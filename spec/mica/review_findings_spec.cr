@@ -110,6 +110,14 @@ describe "Codex review findings" do
       document.root.try(&.to_xml(indent: 0)).should eq("<r><x/></r>")
     end
 
+    it "1: unlinks a redundant declaration that an ancestor already provides" do
+      document = Mica.parse(%(<r xmlns:p="u"><p:x xmlns:p="u"/></r>))
+      inner = node_at(document, "/r/*")
+      inner.namespace_definitions.size.should eq(1)
+      (0...document.node_count).map { |index| document.node_at(index) }.reverse_each.find!(&.type.namespace_decl?).unlink
+      document.root.try(&.to_xml(indent: 0)).should eq(%(<r xmlns:p="u"><p:x/></r>))
+    end
+
     it "1: accepts an ancestor declaration that a descendant shadows" do
       document = Mica.parse(%(<r><p:x xmlns:p="u"/></r>))
       root_of(document)["xmlns:p"] = "v"

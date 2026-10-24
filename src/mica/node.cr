@@ -589,6 +589,10 @@ module Mica
       owner = parent
       return unless owner
       prefix_id = @document.declared_prefix_id(@document.data(@index).name_id)
+      # A redundant declaration (the enclosing scope binds the same URI) can
+      # go without changing how any name resolves.
+      inherited = @document.resolve_prefix(@document.data(owner.index).parent, prefix_id)
+      return if inherited == names.intern(@document.value_bytes(@index))
       if owner.declaration_in_use?(prefix_id)
         raise Error.new("Removing #{names[@document.data(@index).name_id].inspect} would unbind names in its scope")
       end
