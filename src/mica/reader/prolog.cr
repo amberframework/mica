@@ -80,6 +80,9 @@ class Mica::Reader
       @encoding = "UTF-8"
     when "UTF-16", "UTF16", "UTF-16LE", "UTF-16BE"
       encoding_error("Document declares #{declared} but has no UTF-16 byte order mark") unless utf16_input
+      if (normalized == "UTF-16LE" && @utf16_big_endian) || (normalized == "UTF-16BE" && !@utf16_big_endian)
+        encoding_error("Document declares #{declared} but its byte order mark says otherwise")
+      end
       @encoding = "UTF-16"
     when "US-ASCII", "ASCII"
       encoding_error("Document declares #{declared} but is encoded in UTF-16") if utf16_input

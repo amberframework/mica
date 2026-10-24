@@ -4,6 +4,7 @@ class Mica::Reader
   private TOKEN_SLACK = 64 * 1024
 
   @encoding_problem : String? = nil
+  @utf16_big_endian = false
 
   # Picks the decoding path for in-memory input from its first bytes.
   private def setup_bytes(bytes : Bytes) : Nil
@@ -14,6 +15,7 @@ class Mica::Reader
     if utf16_signature?(bytes)
       big_endian = bytes[0] == 0xFE
       @encoding = "UTF-16"
+      @utf16_big_endian = big_endian
       setup_stream(UTF16Decoder.new(IO::Memory.new(bytes[2, bytes.size - 2], writable: false), big_endian))
       return
     end
@@ -40,6 +42,7 @@ class Mica::Reader
     if utf16_signature?(prefix)
       big_endian = prefix[0] == 0xFE
       @encoding = "UTF-16"
+      @utf16_big_endian = big_endian
       setup_stream(UTF16Decoder.new(io, big_endian, prefix[2, prefix.size - 2]))
       return
     end

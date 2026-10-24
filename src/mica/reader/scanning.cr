@@ -119,7 +119,8 @@ class Mica::Reader
 
   # Scans an Nmtoken (one or more NameChar) and returns its size.
   private def scan_nmtoken : Int32
-    start = @pos
+    # Relative to the mark: a refill may compact the buffer.
+    start = @pos - @mark
     loop do
       if @pos >= @limit
         break unless fill
@@ -134,7 +135,7 @@ class Mica::Reader
         @pos += length
       end
     end
-    size = @pos - start
+    size = @pos - @mark - start
     syntax_error("Expected a name token") if size == 0
     size
   end

@@ -166,6 +166,9 @@ module Mica::XPath
 
     private def matches?(node : Int32, axis : Axis, matcher : Matcher) : Bool
       kind = @document.kind(node)
+      # XPath sees a run of adjacent text and CDATA nodes as one text node,
+      # represented here by the first node of the run.
+      return false if text_continuation?(node, kind)
       case matcher.kind
       when .any_node?
         true
@@ -395,8 +398,16 @@ module Mica::XPath
 
     # --- Conversions ----------------------------------------------------------
 
+    private def text_continuation?(node : Int32, kind : Node::Type) : Bool
+      return false unless kind.text_node? || kind.cdata_section_node?
+      previous = @document.data(node).previous_sibling
+      return false if previous < 0
+      previous_kind = @document.kind(previous)
+      previous_kind.text_node? || previous_kind.cdata_section_node?
+    end
+
     def string_value(node : Int32) : String
-      Node.new(@document, node).content
+      Node.new(@document, node).xpath_string_value
     end
 
     def to_string(result : Result) : String

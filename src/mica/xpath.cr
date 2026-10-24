@@ -72,7 +72,7 @@ module Mica
         value ? "true" : "false"
       else
         node = value.first?
-        node ? node.content : ""
+        node ? node.xpath_string_value : ""
       end
     end
 

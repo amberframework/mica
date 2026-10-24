@@ -46,6 +46,13 @@ module Mica::XPath
   abstract class Expr
     abstract def static_type : StaticType
 
+    # Height of the expression tree, which bounds evaluation recursion.
+    getter depth : Int32 = 1
+
+    protected def self.max_depth(list_of_expressions : Enumerable(Expr)) : Int32
+      list_of_expressions.max_of?(&.depth) || 0
+    end
+
     # True when the expression calls position() or last() anywhere.
     abstract def uses_context_position? : Bool
   end
@@ -57,6 +64,7 @@ module Mica::XPath
     getter right : Expr
 
     def initialize(@operator : String, @left : Expr, @right : Expr)
+      @depth = Math.max(@left.depth, @right.depth) + 1
     end
 
     def static_type : StaticType
@@ -80,6 +88,7 @@ module Mica::XPath
     getter operand : Expr
 
     def initialize(@operand : Expr)
+      @depth = @operand.depth + 1
     end
 
     def static_type : StaticType
@@ -148,6 +157,7 @@ module Mica::XPath
     getter list_of_arguments : Array(Expr)
 
     def initialize(@name : String, @list_of_arguments : Array(Expr))
+      @depth = Expr.max_depth(@list_of_arguments) + 1
     end
 
     def static_type : StaticType
@@ -204,6 +214,9 @@ module Mica::XPath
     getter list_of_steps : Array(Step)
 
     def initialize(@filter : Expr?, @absolute : Bool, @list_of_steps : Array(Step))
+      deepest = @filter.try(&.depth) || 0
+      @list_of_steps.each { |step| deepest = Math.max(deepest, Expr.max_depth(step.list_of_predicates)) }
+      @depth = deepest + 1
     end
 
     def static_type : StaticType
@@ -223,6 +236,7 @@ module Mica::XPath
     getter list_of_predicates : Array(Expr)
 
     def initialize(@primary : Expr, @list_of_predicates : Array(Expr))
+      @depth = Math.max(@primary.depth, Expr.max_depth(@list_of_predicates)) + 1
     end
 
     def static_type : StaticType

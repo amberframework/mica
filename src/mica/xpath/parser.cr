@@ -28,11 +28,16 @@ module Mica::XPath
       @tokens = Lexer.new(@source).tokenize
     end
 
+    # Bounds the expression tree height: long operator chains such as
+    # `1+1+...+1` are parsed iteratively but evaluated recursively.
+    MAX_DEPTH = 256
+
     def parse : Expr
       expression = parse_or
       unless current.kind.end?
         fail("Unexpected #{current.text.inspect}")
       end
+      fail("Expression nested too deeply (tree height #{expression.depth})") if expression.depth > MAX_DEPTH
       expression
     end
 

@@ -62,6 +62,16 @@ module Mica
       raise Error.new("Invalid XML name: #{name.inspect}") unless name?(name)
     end
 
+    # Returns true when *name* is a Namespaces 1.0 QName: a Name with at
+    # most one colon, neither first nor last, followed by a NameStartChar.
+    def self.qname?(name : String) : Bool
+      return false unless name?(name)
+      colon = name.index(':')
+      return true unless colon
+      return false if colon == 0 || colon == name.size - 1 || name.index(':', colon + 1)
+      CharClass.name_start_char?(name[colon + 1].ord)
+    end
+
     # Returns true when *name* matches the XML `Name` production.
     def self.name?(name : String) : Bool
       return false if name.empty? || !name.valid_encoding?

@@ -154,18 +154,53 @@ module Mica
       end
       Escape.check_name(new_name)
       name_id = names.intern(new_name)
-      namespace_uri_id = NameTable::EMPTY_ID
-      if element? || attribute?
-        raise Error.new("Invalid qualified name: #{new_name.inspect}") unless names.qname?(name_id)
-        prefix_id = names.prefix_id(name_id)
-        if element? || prefix_id != NameTable::EMPTY_ID
-          scope = element? ? @index : record.parent
-          namespace_uri_id = @document.resolve_prefix(scope, prefix_id)
-          raise Error.new("Namespace prefix of #{new_name.inspect} is not bound") if namespace_uri_id < 0
-        end
+      if processing_instruction?
+        rename_processing_instruction(new_name, name_id)
+        return new_name
       end
+      raise Error.new("Invalid qualified name: #{new_name.inspect}") unless names.qname?(name_id)
+      prefix_id = names.prefix_id(name_id)
+      if prefix_id == names.intern("xmlns") || new_name == "xmlns"
+        raise Error.new("Use []= to declare namespaces, not a rename to #{new_name.inspect}")
+      end
+      namespace_uri_id = resolve_new_name(new_name, prefix_id)
+      check_attribute_rename(new_name, name_id, namespace_uri_id) if attribute?
       @document.rename(@index, name_id, namespace_uri_id)
       new_name
+    end
+
+    # Resolves the namespace of a new element or attribute name.
+    private def resolve_new_name(new_name : String, prefix_id : Int32) : Int32
+      return NameTable::EMPTY_ID if attribute? && prefix_id == NameTable::EMPTY_ID
+      scope = element? ? @index : record.parent
+      namespace_uri_id = @document.resolve_prefix(scope, prefix_id)
+      raise Error.new("Namespace prefix of #{new_name.inspect} is not bound") if namespace_uri_id < 0
+      namespace_uri_id
+    end
+
+    # An attribute rename must not collide with a sibling attribute.
+    private def check_attribute_rename(new_name : String, name_id : Int32, namespace_uri_id : Int32) : Nil
+      owner = parent
+      return unless owner
+      owner.each_attribute_index do |sibling|
+        next if sibling == @index
+        raise Error.new("Attribute #{new_name.inspect} already exists") if @document.data(sibling).name_id == name_id
+      end
+      return if namespace_uri_id == NameTable::EMPTY_ID
+      owner.check_expanded_name_for_rename(namespace_uri_id, names.local_id(name_id), @index)
+    end
+
+    # :nodoc:
+    def check_expanded_name_for_rename(uri_id : Int32, local_id : Int32, except : Int32) : Nil
+      check_unique_expanded_name(uri_id, local_id, except)
+    end
+
+    private def rename_processing_instruction(target : String, name_id : Int32) : Nil
+      if target.compare("xml", case_insensitive: true) == 0
+        raise Error.new("The processing instruction target #{target.inspect} is reserved")
+      end
+      raise Error.new("A processing instruction target cannot contain a colon") if target.includes?(':')
+      @document.rename(@index, name_id, NameTable::EMPTY_ID)
     end
 
     # Returns the text content: the concatenated text of all descendant text
@@ -205,6 +240,23 @@ module Mica
       end
     end
 
+    # :nodoc:
+    #
+    # Returns the XPath string value: for a text or CDATA node, the text of
+    # the whole run of adjacent text and CDATA siblings it starts.
+    def xpath_string_value : String
+      return content unless text? || cdata?
+      String.build do |io|
+        current = @index
+        while current >= 0
+          kind = @document.kind(current)
+          break unless kind.text_node? || kind.cdata_section_node?
+          io.write(@document.value_bytes(current))
+          current = @document.data(current).next_sibling
+        end
+      end
+    end
+
     # Sets the content. For an element this replaces its children with one
     # text node holding *text* (escaped on output, never parsed as markup).
     def content=(text : String) : String
@@ -218,7 +270,7 @@ module Mica
       case type
       when .element_node?
         @document.replace_children_with_text(@index, text)
-      when .text_node?, .cdata_section_node?, .comment_node?, .pi_node?, .attribute_node?, .namespace_decl?
+      when .text_node?, .cdata_section_node?, .comment_node?, .pi_node?, .attribute_node?
         @document.set_value(@index, text)
       else
         raise Error.new("Cannot set the content of a #{type} node")
@@ -259,6 +311,9 @@ module Mica
       text = value.to_s
       Escape.check_text(text)
       if attribute = find_exact_attribute(name)
+        if @document.kind(attribute).namespace_decl? && @document.value_string(attribute) != text
+          raise Error.new("Changing the namespace declaration #{name.inspect} is not supported: it would rename nodes in its scope")
+        end
         @document.set_value(attribute, text)
         return text
       end
@@ -267,7 +322,7 @@ module Mica
       raise Error.new("Invalid qualified name: #{name.inspect}") unless names.qname?(name_id)
       xmlns_id = names.intern("xmlns")
       if name_id == xmlns_id || names.prefix_id(name_id) == xmlns_id
-        @document.append_attribute(@index, name_id, @document.xmlns_namespace_id, text, Type::NAMESPACE_DECL)
+        add_namespace_declaration(name_id, text)
         return text
       end
       namespace_uri_id = NameTable::EMPTY_ID
@@ -275,9 +330,59 @@ module Mica
       unless prefix_id == NameTable::EMPTY_ID
         namespace_uri_id = @document.resolve_prefix(@index, prefix_id)
         raise Error.new("Namespace prefix of #{name.inspect} is not bound") if namespace_uri_id < 0
+        check_unique_expanded_name(namespace_uri_id, names.local_id(name_id), -1)
       end
       @document.append_attribute(@index, name_id, namespace_uri_id, text, Type::ATTRIBUTE_NODE)
       text
+    end
+
+    # Adds a namespace declaration. It must not change how any existing name
+    # in this element's subtree resolves, and must follow Namespaces 1.0.
+    private def add_namespace_declaration(name_id : Int32, uri : String) : Nil
+      prefix_id = @document.declared_prefix_id(name_id)
+      reserved = {Reader::XML_NAMESPACE, Reader::XMLNS_NAMESPACE}
+      if prefix_id == NameTable::EMPTY_ID
+        raise Error.new("The default namespace cannot be #{uri.inspect}") if reserved.includes?(uri)
+      else
+        prefix = names[prefix_id]
+        raise Error.new("The prefix #{prefix.inspect} cannot be declared") if prefix == "xml" || prefix == "xmlns"
+        raise Error.new("A namespace prefix cannot be bound to an empty URI") if uri.empty?
+        raise Error.new("A prefix cannot be bound to #{uri.inspect}") if reserved.includes?(uri)
+      end
+      if subtree_uses_prefix?(prefix_id)
+        raise Error.new("Declaring #{names[name_id].inspect} would rename existing nodes in its scope")
+      end
+      @document.append_attribute(@index, name_id, @document.xmlns_namespace_id, uri, Type::NAMESPACE_DECL)
+    end
+
+    # True when an element (or, for a non-empty prefix, an attribute) in this
+    # element's subtree is named with *prefix_id*.
+    private def subtree_uses_prefix?(prefix_id : Int32) : Bool
+      current = @index
+      while current >= 0
+        if @document.kind(current).element_node?
+          return true if names.prefix_id(@document.data(current).name_id) == prefix_id
+          unless prefix_id == NameTable::EMPTY_ID
+            Node.new(@document, current).each_attribute_index do |attribute|
+              return true if names.prefix_id(@document.data(attribute).name_id) == prefix_id
+            end
+          end
+        end
+        current = @document.following_in_order(current, @index)
+      end
+      false
+    end
+
+    # Raises when another attribute of this element has the expanded name
+    # {*uri_id*, *local_id*}. *except* is an attribute index to ignore.
+    private def check_unique_expanded_name(uri_id : Int32, local_id : Int32, except : Int32) : Nil
+      each_attribute_index do |attribute|
+        next if attribute == except
+        record = @document.data(attribute)
+        if record.namespace_uri_id == uri_id && names.local_id(record.name_id) == local_id
+          raise Error.new("An attribute with the same expanded name already exists")
+        end
+      end
     end
 
     # Removes attribute *name* and returns its value, or nil when missing.

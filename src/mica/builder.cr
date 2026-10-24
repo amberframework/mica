@@ -27,6 +27,7 @@ module Mica
     private class Frame
       getter name : String
       getter binding_mark : Int32
+      getter attribute_names = [] of String
       property? has_children : Bool = false
       property? has_text : Bool = false
 
@@ -42,6 +43,8 @@ module Mica
     @document_started = false
     @root_written = false
     @top_level_written = false
+    @cdata_brackets = 0
+    @comment_ends_with_dash = false
 
     def initialize(@io : IO)
     end
@@ -68,8 +71,10 @@ module Mica
     # Writes the XML declaration.
     def start_document(version : String? = nil, encoding : String? = nil) : Nil
       raise BuilderError.new("start_document must come first") if @document_started || @top_level_written
+      version ||= "1.0"
+      raise BuilderError.new("Invalid XML version #{version.inspect}") unless version.matches?(/\A1\.[0-9]+\z/)
       @document_started = true
-      @io << %(<?xml version=") << (version || "1.0") << '"'
+      @io << %(<?xml version=") << version << '"'
       if encoding
         unless encoding.compare("UTF-8", case_insensitive: true) == 0
           raise BuilderError.new("Mica::Builder writes UTF-8 only, not #{encoding}")
@@ -113,6 +118,7 @@ module Mica
     end
 
     private def open_element(qualified_name : String) : Nil
+      raise BuilderError.new("Invalid qualified name #{qualified_name.inspect}") unless Escape.qname?(qualified_name)
       ensure_content_state("start an element")
       close_start_tag
       if parent = @frames.last?
@@ -134,6 +140,7 @@ module Mica
       frame = @frames.pop? || raise BuilderError.new("end_element without an open element")
       case @state
       when .start_tag_open?
+        check_start_tag(frame)
         @io << "/>"
       when .content?
         if frame.has_children? && !frame.has_text?
@@ -210,8 +217,11 @@ module Mica
     # Opens attribute *name*; write its value with `text`, then call
     # `end_attribute`.
     def start_attribute(name : String) : Nil
-      Escape.check_name(name)
       require_start_tag("start an attribute")
+      if name == "xmlns" || name.starts_with?("xmlns:")
+        raise BuilderError.new("Declare namespaces with #namespace, not start_attribute")
+      end
+      record_attribute_name(name)
       @io << ' ' << name << '=' << @quote_char
       @state = State::AttributeOpen
     end
@@ -236,9 +246,7 @@ module Mica
     # Declares namespace *uri* for *prefix* (nil for the default namespace)
     # on the open start tag.
     def namespace(prefix : String?, uri : String) : Nil
-      Escape.check_name(prefix) if prefix
       write_attribute(prefix ? "xmlns:#{prefix}" : "xmlns", uri)
-      @bindings << {prefix, uri}
     end
 
     # Writes escaped character data. Inside `start_attribute`, `start_cdata`
@@ -249,10 +257,9 @@ module Mica
       when .attribute_open?
         Escape.attribute(@io, content.to_slice, @quote_char)
       when .cdata_open?
-        @io << content.gsub("]]>", "]]]]><![CDATA[>")
+        write_cdata_text(content)
       when .comment_open?
-        check_comment(content)
-        @io << content
+        write_comment_text(content)
       when .dtd_open?
         raise BuilderError.new("text is not allowed inside a DTD")
       else
@@ -267,6 +274,7 @@ module Mica
     def start_cdata : Nil
       start_child_construct("start a CDATA section")
       @io << "<![CDATA["
+      @cdata_brackets = 0
       @state = State::CdataOpen
     end
 
@@ -300,12 +308,14 @@ module Mica
         @top_level_written = true
       end
       @io << "<!--"
+      @comment_ends_with_dash = false
       @state = State::CommentOpen
     end
 
     # Closes the comment.
     def end_comment : Nil
       raise BuilderError.new("end_comment without start_comment") unless @state.comment_open?
+      raise BuilderError.new("A comment cannot end with '-'") if @comment_ends_with_dash
       @io << "-->"
       @state = State::Content
     end
@@ -331,9 +341,14 @@ module Mica
       @io << "<!DOCTYPE " << name
       if pubid
         raise BuilderError.new("A public identifier needs a system identifier") unless sysid
-        @io << %( PUBLIC ") << pubid << %(" ") << sysid << '"'
+        unless pubid.each_char.all? { |char| char != '"' && CharClass.pubid_char?(char.ord) }
+          raise BuilderError.new("Invalid public identifier #{pubid.inspect}")
+        end
+        @io << %( PUBLIC ") << pubid << '"' << ' '
+        write_system_literal(sysid)
       elsif sysid
-        @io << %( SYSTEM ") << sysid << '"'
+        @io << " SYSTEM "
+        write_system_literal(sysid)
       end
       @top_level_written = true
       @state = State::DTDOpen
@@ -348,6 +363,7 @@ module Mica
 
     # Writes a DOCTYPE declaration with an optional raw internal *subset*.
     def dtd(name : String, pubid : String?, sysid : String?, subset : String? = nil) : Nil
+      check_internal_subset(name, subset) if subset
       start_dtd(name, pubid, sysid)
       @io << " [" << subset << ']' if subset
       end_dtd
@@ -373,6 +389,10 @@ module Mica
     private def write_attribute(name : String, value : String) : Nil
       require_start_tag("write an attribute")
       Escape.check_text(value)
+      record_attribute_name(name)
+      if name == "xmlns" || name.starts_with?("xmlns:")
+        bind_namespace(name == "xmlns" ? nil : name[6..], value)
+      end
       @io << ' ' << name << '=' << @quote_char
       Escape.attribute(@io, value.to_slice, @quote_char)
       @io << @quote_char
@@ -403,6 +423,9 @@ module Mica
 
     private def close_start_tag : Nil
       return unless @state.start_tag_open?
+      if frame = @frames.last?
+        check_start_tag(frame)
+      end
       @io << '>'
       @state = State::Content
     end
@@ -413,10 +436,98 @@ module Mica
       level.times { @io << @indent_text }
     end
 
-    private def check_comment(text : String) : Nil
-      if text.includes?("--") || text.ends_with?('-')
-        raise BuilderError.new("A comment cannot contain '--' or end with '-'")
+    # Records an attribute name on the open start tag, rejecting invalid
+    # QNames and duplicates.
+    private def record_attribute_name(name : String) : Nil
+      raise BuilderError.new("Invalid qualified name #{name.inspect}") unless Escape.qname?(name)
+      frame = @frames.last? || raise BuilderError.new("No start tag is open")
+      raise BuilderError.new("Attribute #{name.inspect} written twice") if frame.attribute_names.includes?(name)
+      frame.attribute_names << name
+    end
+
+    private def bind_namespace(prefix : String?, uri : String) : Nil
+      reserved = {Reader::XML_NAMESPACE, Reader::XMLNS_NAMESPACE}
+      if prefix
+        if prefix == "xml"
+          raise BuilderError.new("The xml prefix is bound to #{Reader::XML_NAMESPACE}") unless uri == Reader::XML_NAMESPACE
+          return
+        end
+        raise BuilderError.new("The xmlns prefix cannot be declared") if prefix == "xmlns"
+        raise BuilderError.new("A namespace prefix cannot be bound to an empty URI") if uri.empty?
       end
+      raise BuilderError.new("Namespace #{uri.inspect} cannot be declared") if reserved.includes?(uri)
+      @bindings << {prefix, uri}
+    end
+
+    # Returns the URI bound to *prefix* (nil prefix: the default
+    # namespace), or nil when unbound.
+    private def bound_uri(prefix : String?) : String?
+      return Reader::XML_NAMESPACE if prefix == "xml"
+      binding = @bindings.reverse_each.find { |candidate| candidate[0] == prefix }
+      binding ? binding[1] : nil
+    end
+
+    # Checks the finished start tag: every prefix is bound and no two
+    # attributes share an expanded name.
+    private def check_start_tag(frame : Frame) : Nil
+      check_prefix_bound(frame.name)
+      expanded = Set({String, String}).new
+      frame.attribute_names.each do |name|
+        next if name == "xmlns" || name.starts_with?("xmlns:")
+        colon = name.index(':')
+        next unless colon
+        check_prefix_bound(name)
+        uri = bound_uri(name[0, colon]) || ""
+        unless expanded.add?({uri, name[colon + 1..]})
+          raise BuilderError.new("Attribute #{name.inspect} duplicates another attribute's expanded name")
+        end
+      end
+    end
+
+    private def check_prefix_bound(name : String) : Nil
+      colon = name.index(':')
+      return unless colon
+      prefix = name[0, colon]
+      raise BuilderError.new("Namespace prefix #{prefix.inspect} of #{name.inspect} is not declared") unless bound_uri(prefix)
+    end
+
+    # Writes CDATA text, splitting a `]]>` that spans several calls.
+    private def write_cdata_text(content : String) : Nil
+      content.each_char do |char|
+        if char == '>' && @cdata_brackets >= 2
+          @io << "]]><![CDATA[>"
+          @cdata_brackets = 0
+        else
+          @io << char
+          @cdata_brackets = char == ']' ? @cdata_brackets + 1 : 0
+        end
+      end
+    end
+
+    # Writes comment text; `--` is rejected even when split across calls.
+    private def write_comment_text(content : String) : Nil
+      return if content.empty?
+      if content.includes?("--") || (@comment_ends_with_dash && content.starts_with?('-'))
+        raise BuilderError.new("A comment cannot contain '--'")
+      end
+      @io << content
+      @comment_ends_with_dash = content.ends_with?('-')
+    end
+
+    private def write_system_literal(literal : String) : Nil
+      if literal.includes?('"') && literal.includes?('\'')
+        raise BuilderError.new("A system identifier cannot contain both quote characters")
+      end
+      quote = literal.includes?('"') ? '\'' : '"'
+      @io << quote << literal << quote
+    end
+
+    # Parses the raw internal subset so a malformed one cannot reach the
+    # output.
+    private def check_internal_subset(name : String, subset : String) : Nil
+      Mica.parse("<!DOCTYPE #{name} [#{subset}]><#{name}/>", ParserOptions.new(namespace_aware: false))
+    rescue error : ParseError
+      raise BuilderError.new("Invalid internal DTD subset: #{error.message}")
     end
   end
 
