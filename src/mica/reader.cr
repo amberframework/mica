@@ -112,6 +112,7 @@ module Mica
     @empty_element = false
     @attrs = [] of AttributeSlot
     @attr_index = -1
+    @attribute_lookup = {} of Int32 => Int32
     @scratch : Bytes = Bytes.new(4096)
     @scratch_size = 0
 

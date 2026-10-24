@@ -10,6 +10,7 @@ class Mica::Reader
     @value_in_scratch = false
     @empty_element = false
     @attrs.clear
+    @attribute_lookup.clear unless @attribute_lookup.empty?
     if entity = @pending_entity
       @pending_entity = nil
       push_entity(entity)
@@ -142,14 +143,31 @@ class Mica::Reader
   end
 
   private def check_duplicate_attribute(attr_id : Int32) : Nil
-    count = @attrs.size
-    index = 0
-    while index < count
-      if @attrs.unsafe_fetch(index).name_id == attr_id
-        syntax_error("Attribute '#{@names[attr_id]}' appears twice")
-      end
-      index += 1
+    if find_attribute_slot(attr_id)
+      syntax_error("Attribute '#{@names[attr_id]}' appears twice")
     end
+  end
+
+  # Elements with more attributes than this are indexed by a hash so that
+  # duplicate checks and DTD lookups stay linear.
+  private LINEAR_ATTRIBUTE_SCAN = 16
+
+  # Returns the slot index of attribute *name_id* on the current start tag.
+  private def find_attribute_slot(name_id : Int32) : Int32?
+    count = @attrs.size
+    if count <= LINEAR_ATTRIBUTE_SCAN
+      index = 0
+      while index < count
+        return index if @attrs.unsafe_fetch(index).name_id == name_id
+        index += 1
+      end
+      return nil
+    end
+    while @attribute_lookup.size < count
+      position = @attribute_lookup.size
+      @attribute_lookup[@attrs.unsafe_fetch(position).name_id] = position
+    end
+    @attribute_lookup[name_id]?
   end
 
   # Scans an attribute value after its opening quote, normalizing white
@@ -228,7 +246,7 @@ class Mica::Reader
     decls = @dtd.declared_attributes(element_id)
     return unless decls
     decls.each do |decl|
-      index = @attrs.index { |slot| slot.name_id == decl.name_id }
+      index = find_attribute_slot(decl.name_id)
       if index
         normalize_tokenized_attribute(index) unless decl.type.cdata?
       elsif decl.default_kind.fixed? || decl.default_kind.value?

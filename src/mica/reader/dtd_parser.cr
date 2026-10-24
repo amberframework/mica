@@ -283,8 +283,8 @@ class Mica::Reader
 
   private def record_attribute_declaration(element_id : Int32, decl : DTD::AttributeDecl) : Nil
     return unless processing_declarations?
+    return unless @dtd.declared_attribute_keys.add?({element_id, decl.name_id})
     decls = @dtd.attribute_decls[element_id] ||= [] of DTD::AttributeDecl
-    return if decls.any? { |existing| existing.name_id == decl.name_id }
     decls << decl
   end
 

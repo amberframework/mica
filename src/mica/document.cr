@@ -76,6 +76,8 @@ module Mica
     @chunk_used = CHUNK_SIZE
     @large_values = [] of Bytes
     @order_keys : Array(Int32)? = nil
+    @merging_text_node = -1
+    @text_merge_buffer = IO::Memory.new
     @order_dirty = false
     @xmlns_namespace_id : Int32
     @xml_namespace_id : Int32
@@ -128,6 +130,7 @@ module Mica
       while reader.read
         parent = add_event(reader, parent)
       end
+      finish_text_merge
       copy_prolog(reader)
     end
 
@@ -147,6 +150,7 @@ module Mica
           break if reader.event_type.end_element? && reader.event_depth == depth
           parent = add_event(reader, parent)
         end
+        finish_text_merge
       end
       reader.finish_expand(name_id, namespace_uri_id, depth)
     end
@@ -162,7 +166,9 @@ module Mica
     end
 
     private def add_event(reader : Reader, parent : Int32) : Int32
-      case reader.event_type
+      type = reader.event_type
+      finish_text_merge unless @merging_text_node < 0 || type.text? || type.significant_whitespace?
+      case type
       when .element?
         element = add_element(reader, parent)
         return element unless reader.empty_element?
@@ -196,18 +202,29 @@ module Mica
       element
     end
 
-    # Adds text under *parent*, merging with a preceding text node (adjacent
-    # text events occur around entity boundaries).
+    # Adds text under *parent*. Adjacent text events (around entity
+    # boundaries) merge into one node; the merged text is collected in a
+    # buffer and stored once, so merging stays linear.
     private def add_text(parent : Int32, bytes : Bytes) : Nil
       last = data(parent).last_child
       if last >= 0 && data(last).kind.text_node?
-        merged = Bytes.new(data(last).value_size + bytes.size)
-        merged.copy_from(value_bytes(last))
-        (merged + data(last).value_size).copy_from(bytes)
-        store_value(last, merged)
+        if @merging_text_node != last
+          @text_merge_buffer.clear
+          @text_merge_buffer.write(value_bytes(last))
+          @merging_text_node = last
+        end
+        @text_merge_buffer.write(bytes)
         return
       end
       append_new(Node::Type::TEXT_NODE, parent, 0, 0, bytes)
+    end
+
+    private def finish_text_merge : Nil
+      node = @merging_text_node
+      return if node < 0
+      store_value(node, @text_merge_buffer.to_slice)
+      @merging_text_node = -1
+      @text_merge_buffer.clear
     end
 
     # :nodoc:

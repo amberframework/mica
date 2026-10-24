@@ -69,6 +69,8 @@ module Mica
     getter general_entities = {} of Int32 => Entity
     getter parameter_entities = {} of Int32 => Entity
     getter attribute_decls = {} of Int32 => Array(AttributeDecl)
+    # {element name id, attribute name id} pairs already declared.
+    getter declared_attribute_keys = Set({Int32, Int32}).new
     # Notation name => {public identifier, system identifier}.
     getter notations = {} of String => {String?, String?}
     property root_name : String = ""

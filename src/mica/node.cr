@@ -209,6 +209,12 @@ module Mica
     # text node holding *text* (escaped on output, never parsed as markup).
     def content=(text : String) : String
       Escape.check_text(text)
+      if comment? && (text.includes?("--") || text.ends_with?('-'))
+        raise Error.new("A comment cannot contain '--' or end with '-'")
+      end
+      if processing_instruction? && text.includes?("?>")
+        raise Error.new("A processing instruction cannot contain '?>'")
+      end
       case type
       when .element_node?
         @document.replace_children_with_text(@index, text)

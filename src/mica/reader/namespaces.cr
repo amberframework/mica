@@ -95,22 +95,13 @@ class Mica::Reader
 
   # Two prefixed attributes must not share a namespace URI and local name.
   private def check_expanded_attribute_names : Nil
-    count = @attrs.size
-    outer = 0
-    while outer < count
-      first = @attrs.unsafe_fetch(outer)
-      if first.namespace_uri_id != NameTable::EMPTY_ID && first.namespace_uri_id != @xmlns_namespace_id
-        local = @names.local_id(first.name_id)
-        inner = outer + 1
-        while inner < count
-          second = @attrs.unsafe_fetch(inner)
-          if second.namespace_uri_id == first.namespace_uri_id && @names.local_id(second.name_id) == local
-            syntax_error("Attributes '#{@names[first.name_id]}' and '#{@names[second.name_id]}' have the same expanded name")
-          end
-          inner += 1
-        end
+    seen = Set({Int32, Int32}).new
+    @attrs.each do |slot|
+      uri_id = slot.namespace_uri_id
+      next if uri_id == NameTable::EMPTY_ID || uri_id == @xmlns_namespace_id
+      unless seen.add?({uri_id, @names.local_id(slot.name_id)})
+        syntax_error("Attribute '#{@names[slot.name_id]}' duplicates the expanded name of another attribute")
       end
-      outer += 1
     end
   end
 

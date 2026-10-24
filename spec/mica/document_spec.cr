@@ -92,6 +92,12 @@ describe Mica::Document do
       document.xpath_nodes("//@*").map(&.name).should eq(["z", "y"])
     end
 
+    it "rejects comment and PI content that would end the construct early" do
+      document = Mica.parse("<a><!--c--><?p d?></a>")
+      expect_raises(Mica::Error) { node_at(document, "//comment()").content = "x--y" }
+      expect_raises(Mica::Error) { node_at(document, "//processing-instruction()").content = "x?>y" }
+    end
+
     it "keeps entity references that were not expanded" do
       document = Mica.parse(%(<!DOCTYPE a SYSTEM "a.dtd"><a>x&ext;y</a>))
       root_of(document).children.map(&.type).should eq([

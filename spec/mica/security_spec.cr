@@ -84,3 +84,20 @@ describe "Mica security defaults" do
     Mica::NameTable.new.intern("x").should eq(Mica::NameTable.new.intern("x"))
   end
 end
+
+describe "Mica linear-time guards" do
+  it "checks duplicate attributes on very wide elements in linear time" do
+    wide = "<a " + (1..9_999).map { |index| %(a#{index}="1") }.join(' ') + "/>"
+    started = Time.instant
+    root_of(Mica.parse(wide)).attributes.size.should eq(9_999)
+    (Time.instant - started).should be < 1.second
+    expect_raises(Mica::ParseError, /appears twice/) { Mica.parse(wide.sub("/>", %( a5000="2"/>))) }
+  end
+
+  it "merges text split by many entity boundaries in linear time" do
+    xml = %(<!DOCTYPE r [<!ENTITY e "]">]><r>#{"#{"t" * 1000}&e;" * 5_000}</r>)
+    started = Time.instant
+    root_of(Mica.parse(xml)).content.size.should eq(5_000 * 1001)
+    (Time.instant - started).should be < 1.second
+  end
+end
