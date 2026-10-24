@@ -20,5 +20,5 @@ Metrics/CyclomaticComplexity:
 
 # Scratch programs (git-ignored) are not part of the library.
 Excluded:
-  - tmp/**
-  - lib/**
+  - tmp
+  - lib
