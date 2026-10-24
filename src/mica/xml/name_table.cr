@@ -13,11 +13,13 @@ module Mica::XML
   # lookup of any name, present or absent, never costs more than its name's
   # length plus MAX_RUN + 1 probes, and a run of collisions cannot persist.
   #
-  # `operations` counts all the work for the reader's work meter: each
-  # lookup's name bytes (hashing), every slot probed, the bytes compared,
-  # and every name rehashed when the table grows or reseeds. Probe counts
-  # depend on the seed; tests that need reproducible operation counts pass
-  # a fixed *seed*.
+  # Two counters record the work. `operations` is the work of adding
+  # names, which the reader filling the table charges to its parse: each
+  # interned name's bytes (hashing), every slot probed, the bytes compared,
+  # and every name rehashed when the table grows or reseeds.
+  # `lookup_operations` is the same work for `lookup`, which never adds a
+  # name; its caller charges it. Probe counts depend on the seed; tests
+  # that need reproducible operation counts pass a fixed *seed*.
   class NameTable
     # Longest probe sequence tolerated before reseeding. With a random seed
     # and a load factor of at most 1/2, sequences this long are vanishingly
@@ -176,6 +178,22 @@ module Mica::XML
         end
         index = (index + 1) & @mask
       end
+    end
+
+    # True when name *id* has been split into prefix and local part, so
+    # `local_id` and `prefix_id` return without interning.
+    def split?(id : Int32) : Bool
+      @local_ids[id] >= 0
+    end
+
+    # Returns the bytes after the first colon of name *id* (the whole name
+    # when there is no colon), without interning them.
+    def local_bytes(id : Int32) : Bytes
+      cached = @local_ids[id]
+      return @strings[cached].to_slice if cached >= 0
+      bytes = @strings[id].to_slice
+      colon = bytes.index(':'.ord.to_u8)
+      colon ? bytes[colon + 1, bytes.size - colon - 1] : bytes
     end
 
     # Returns the id of the part after the first colon of name *id* (the

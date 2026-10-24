@@ -344,7 +344,7 @@ module Mica::XML::XPath
         else
           # Without namespace processing a name is one unit ("p:a" is not
           # an "a"), so the test compares whole names and never splits one.
-          name_id = @namespace_aware ? @names.local_id(record.name_id) : record.name_id
+          name_id = @namespace_aware ? @document.split_local_id(record.name_id) : record.name_id
           record.namespace_uri_id == matcher.uri_id && name_id == matcher.local_id
         end
       end
@@ -929,7 +929,7 @@ module Mica::XML::XPath
         # Without namespace processing a name has no local part to split
         # off (and splitting would intern uncharged work).
         return @names[record.name_id] unless @namespace_aware
-        @names[@names.local_id(record.name_id)]
+        @names[@document.split_local_id(record.name_id)]
       else
         return @names[record.name_id] if kind.pi_node? || kind.element_node? || kind.attribute_node?
         ""

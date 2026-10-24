@@ -99,7 +99,7 @@ module Mica::XML
     def name : String
       case type
       when .element_node?, .attribute_node?, .namespace_decl?
-        names[names.local_id(record.name_id)]
+        names[@document.split_local_id(record.name_id)]
       when .pi_node?, .entity_ref_node?, .dtd_node?
         names[record.name_id]
       when .text_node?
@@ -129,7 +129,7 @@ module Mica::XML
     # Returns the namespace prefix of an element or attribute, or nil.
     def prefix : String?
       return unless element? || attribute?
-      prefix_id = names.prefix_id(record.name_id)
+      prefix_id = @document.split_prefix_id(record.name_id)
       prefix_id == NameTable::EMPTY_ID ? nil : names[prefix_id]
     end
 
@@ -164,7 +164,7 @@ module Mica::XML
           return new_name
         end
         raise Error.new("Invalid qualified name: #{new_name.inspect}") unless names.qname?(name_id)
-        prefix_id = names.prefix_id(name_id)
+        prefix_id = @document.split_prefix_id(name_id)
         if prefix_id == names.intern("xmlns") || new_name == "xmlns"
           raise Error.new("Use []= to declare namespaces, not a rename to #{new_name.inspect}")
         end
@@ -191,7 +191,7 @@ module Mica::XML
       sibling = @document.attribute_named(owner.index, name_id)
       raise Error.new("Attribute #{new_name.inspect} already exists") if sibling && sibling != @index
       return if namespace_uri_id == NameTable::EMPTY_ID
-      owner.check_expanded_name_for_rename(namespace_uri_id, names.local_id(name_id), @index)
+      owner.check_expanded_name_for_rename(namespace_uri_id, @document.split_local_id(name_id), @index)
     end
 
     # :nodoc:
@@ -331,16 +331,16 @@ module Mica::XML
         name_id = names.intern(name)
         raise Error.new("Invalid qualified name: #{name.inspect}") unless names.qname?(name_id)
         xmlns_id = names.intern("xmlns")
-        if name_id == xmlns_id || names.prefix_id(name_id) == xmlns_id
+        if name_id == xmlns_id || @document.split_prefix_id(name_id) == xmlns_id
           add_namespace_declaration(name_id, text)
           return text
         end
         namespace_uri_id = NameTable::EMPTY_ID
-        prefix_id = names.prefix_id(name_id)
+        prefix_id = @document.split_prefix_id(name_id)
         unless prefix_id == NameTable::EMPTY_ID
           namespace_uri_id = @document.resolve_prefix(@index, prefix_id)
           raise Error.new("Namespace prefix of #{name.inspect} is not bound") if namespace_uri_id < 0
-          check_unique_expanded_name(namespace_uri_id, names.local_id(name_id), -1)
+          check_unique_expanded_name(namespace_uri_id, @document.split_local_id(name_id), -1)
         end
         @document.append_attribute(@index, name_id, namespace_uri_id, text, Type::ATTRIBUTE_NODE)
         text
@@ -383,11 +383,11 @@ module Mica::XML
             current = following_outside_subtree(current)
             next
           end
-          return true if names.prefix_id(@document.data(current).name_id) == prefix_id
+          return true if @document.split_prefix_id(@document.data(current).name_id) == prefix_id
           unless prefix_id == NameTable::EMPTY_ID
             Node.new(@document, current).each_attribute_index do |attribute|
               @document.charge_edit(1)
-              return true if names.prefix_id(@document.data(attribute).name_id) == prefix_id
+              return true if @document.split_prefix_id(@document.data(attribute).name_id) == prefix_id
             end
           end
         end
@@ -457,20 +457,29 @@ module Mica::XML
     # (*for_edit*) build the element's attribute index so that a run of
     # deletions stays linear; plain reads use an index only when one
     # exists, so reading never allocates one.
+    #
+    # Building the index splits every attribute name, so after it a name
+    # that was never interned matches nothing. Without an index the local
+    # names are compared as bytes: reading never interns, and *name* can
+    # be the local part of an attribute name that was never split.
     private def find_attribute(name : String, for_edit : Bool = false) : Int32?
       return unless element?
+      @document.index_attributes(@index) if for_edit
       id = names.lookup(name.to_slice)
-      return if id < 0
-      if for_edit || @document.attribute_index?(@index)
+      if @document.attribute_index?(@index)
+        return if id < 0
         exact = @document.attribute_named(@index, id)
         return exact if exact && @document.kind(exact).attribute_node?
         return @document.attribute_with_local_name(@index, id)
       end
-      each_attribute_index do |attribute|
-        return attribute if @document.data(attribute).name_id == id
+      if id >= 0
+        each_attribute_index do |attribute|
+          return attribute if @document.data(attribute).name_id == id
+        end
       end
+      bytes = name.to_slice
       each_attribute_index do |attribute|
-        return attribute if names.local_id(@document.data(attribute).name_id) == id
+        return attribute if names.local_bytes(@document.data(attribute).name_id) == bytes
       end
       nil
     end

@@ -666,7 +666,7 @@ module Mica::XML
         charge_edit(1)
         first = list[candidates.head]
         record = data(first)
-        return first if record.parent == element && record.kind.attribute_node? && @names.local_id(record.name_id) == local_id
+        return first if record.parent == element && record.kind.attribute_node? && split_local_id(record.name_id) == local_id
         candidates.head += 1
       end
       nil
@@ -677,6 +677,13 @@ module Mica::XML
     # True when *element* has an attribute index (it was edited).
     def attribute_index?(element : Int32) : Bool
       @attribute_indexes.has_key?(element)
+    end
+
+    # :nodoc:
+    #
+    # Builds *element*'s attribute index (an edit is about to search it).
+    def index_attributes(element : Int32) : Nil
+      attribute_index(element)
     end
 
     private def attribute_index(element : Int32) : AttributeIndex
@@ -703,7 +710,7 @@ module Mica::XML
         index.by_declared_prefix[declared_prefix_id(record.name_id)] ||= attribute
         return
       end
-      local_id = @names.local_id(record.name_id)
+      local_id = split_local_id(record.name_id)
       if record.namespace_uri_id != NameTable::EMPTY_ID
         index.by_expanded_name[{record.namespace_uri_id, local_id}] ||= attribute
       end
@@ -738,7 +745,7 @@ module Mica::XML
     private def unindex_attribute(index : AttributeIndex, attribute : Int32) : Nil
       record = data(attribute)
       index.by_name.delete(record.name_id) if index.by_name[record.name_id]? == attribute
-      key = {record.namespace_uri_id, @names.local_id(record.name_id)}
+      key = {record.namespace_uri_id, split_local_id(record.name_id)}
       index.by_expanded_name.delete(key) if index.by_expanded_name[key]? == attribute
       if record.kind.namespace_decl?
         prefix_id = declared_prefix_id(record.name_id)
@@ -854,7 +861,42 @@ module Mica::XML
     # Returns the prefix id a namespace declaration attribute binds
     # (EMPTY_ID for `xmlns`).
     def declared_prefix_id(name_id : Int32) : Int32
-      name_id == @xmlns_id ? NameTable::EMPTY_ID : @names.local_id(name_id)
+      name_id == @xmlns_id ? NameTable::EMPTY_ID : split_local_id(name_id)
+    end
+
+    # :nodoc:
+    #
+    # Returns `NameTable#local_id` of *name_id*. Splitting a name interns
+    # its parts; in a table shared with a reader (`Reader#expand`) that
+    # work is the document's, so `own_name_work` keeps it off the reader.
+    def split_local_id(name_id : Int32) : Int32
+      return @names.local_id(name_id) if !@shared_names || @names.split?(name_id)
+      own_name_work { @names.local_id(name_id) }
+    end
+
+    # :nodoc:
+    #
+    # Returns `NameTable#prefix_id` of *name_id*, like `split_local_id`.
+    def split_prefix_id(name_id : Int32) : Int32
+      return @names.prefix_id(name_id) if !@shared_names || @names.split?(name_id)
+      own_name_work { @names.prefix_id(name_id) }
+    end
+
+    # Runs the block's name-table work as the document's own: with the
+    # reader's rehash hook detached and the work marked paid, so the
+    # reader never charges it to its parse. Reads are not metered; the
+    # work is linear in the name split plus amortized growth.
+    private def own_name_work(& : -> Int32) : Int32
+      hook = @names.before_rebuild
+      @names.before_rebuild = nil
+      unpaid_before = @names.unpaid_operations
+      begin
+        yield
+      ensure
+        @names.before_rebuild = hook
+        work = @names.unpaid_operations - unpaid_before
+        @names.mark_paid(work) if work > 0
+      end
     end
 
     # :nodoc:

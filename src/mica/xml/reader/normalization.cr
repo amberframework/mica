@@ -200,11 +200,13 @@ class Mica::XML::Reader
   # turns white space into spaces and collapses or trims spaces, so the
   # character is found by counting non-space bytes: the value's source is
   # replayed until as many non-space bytes have been produced as precede
-  # the character in *bytes*. The replay runs only on the error path and
-  # redoes expansion work the parse already charged.
+  # the character in *bytes*. The replay runs only on the error path; it
+  # is charged like the parse (the tag's bytes, each expansion's bytes and
+  # each name lookup), so a budget or deadline also stops it.
   private def rewritten_value_source_index(ordinal : Int32, bytes : Bytes, offending : Int32) : Int32?
-    name_offset = attribute_name_offset(ordinal) || return
     stop = Math.min(@pos, @limit)
+    charge(stop - @mark + offending)
+    name_offset = attribute_name_offset(ordinal) || return
     index = skip_until(@mark + name_offset, stop, '='.ord.to_u8) + 1
     while index < stop && (space = white_space_length(index, stop)) > 0
       index += space
@@ -239,7 +241,10 @@ class Mica::XML::Reader
       code = decode_char_reference_body(body)
       return code == 0x20 ? 0 : code.chr.bytesize
     end
+    charge(body.size + 1)
+    lookups = @names.lookup_operations
     name_id = @names.lookup(body)
+    charge(@names.lookup_operations - lookups)
     return 0 if name_id < 0
     return 1 if predefined_entity_byte(name_id)
     text = @dtd.general_entities[name_id]?.try(&.replacement)
@@ -249,6 +254,7 @@ class Mica::XML::Reader
   # Returns the non-space bytes that replacement text *text* adds to an
   # attribute value, as `expand_attribute_entity` expands it.
   private def replacement_output_size(text : Bytes) : Int32
+    charge(text.size)
     size = 0
     index = 0
     while index < text.size
