@@ -153,25 +153,26 @@ module Mica::XML
     #
     # Raises `Mica::Error` for an invalid name or an unbound prefix.
     def name=(new_name : String) : String
-      meter_edit(new_name.bytesize)
-      unless element? || attribute? || processing_instruction?
-        raise Error.new("Cannot set the name of a #{type} node")
+      @document.editing(new_name.bytesize.to_i64) do
+        unless element? || attribute? || processing_instruction?
+          raise Error.new("Cannot set the name of a #{type} node")
+        end
+        Escape.check_name(new_name)
+        name_id = names.intern(new_name)
+        if processing_instruction?
+          rename_processing_instruction(new_name, name_id)
+          return new_name
+        end
+        raise Error.new("Invalid qualified name: #{new_name.inspect}") unless names.qname?(name_id)
+        prefix_id = names.prefix_id(name_id)
+        if prefix_id == names.intern("xmlns") || new_name == "xmlns"
+          raise Error.new("Use []= to declare namespaces, not a rename to #{new_name.inspect}")
+        end
+        namespace_uri_id = resolve_new_name(new_name, prefix_id)
+        check_attribute_rename(new_name, name_id, namespace_uri_id) if attribute?
+        @document.rename(@index, name_id, namespace_uri_id)
+        new_name
       end
-      Escape.check_name(new_name)
-      name_id = names.intern(new_name)
-      if processing_instruction?
-        rename_processing_instruction(new_name, name_id)
-        return new_name
-      end
-      raise Error.new("Invalid qualified name: #{new_name.inspect}") unless names.qname?(name_id)
-      prefix_id = names.prefix_id(name_id)
-      if prefix_id == names.intern("xmlns") || new_name == "xmlns"
-        raise Error.new("Use []= to declare namespaces, not a rename to #{new_name.inspect}")
-      end
-      namespace_uri_id = resolve_new_name(new_name, prefix_id)
-      check_attribute_rename(new_name, name_id, namespace_uri_id) if attribute?
-      @document.rename(@index, name_id, namespace_uri_id)
-      new_name
     end
 
     # Resolves the namespace of a new element or attribute name.
@@ -265,23 +266,24 @@ module Mica::XML
     # Sets the content. For an element this replaces its children with one
     # text node holding *text* (escaped on output, never parsed as markup).
     def content=(text : String) : String
-      meter_edit(text.bytesize)
-      Escape.check_text(text, xml11_document?)
-      if comment? && (text.includes?("--") || text.ends_with?('-'))
-        raise Error.new("A comment cannot contain '--' or end with '-'")
+      @document.editing(text.bytesize.to_i64) do
+        Escape.check_text(text, xml11_document?)
+        if comment? && (text.includes?("--") || text.ends_with?('-'))
+          raise Error.new("A comment cannot contain '--' or end with '-'")
+        end
+        if processing_instruction? && text.includes?("?>")
+          raise Error.new("A processing instruction cannot contain '?>'")
+        end
+        case type
+        when .element_node?
+          @document.replace_children_with_text(@index, text)
+        when .text_node?, .cdata_section_node?, .comment_node?, .pi_node?, .attribute_node?
+          @document.set_value(@index, text)
+        else
+          raise Error.new("Cannot set the content of a #{type} node")
+        end
+        text
       end
-      if processing_instruction? && text.includes?("?>")
-        raise Error.new("A processing instruction cannot contain '?>'")
-      end
-      case type
-      when .element_node?
-        @document.replace_children_with_text(@index, text)
-      when .text_node?, .cdata_section_node?, .comment_node?, .pi_node?, .attribute_node?
-        @document.set_value(@index, text)
-      else
-        raise Error.new("Cannot set the content of a #{type} node")
-      end
-      text
     end
 
     # Same as `content`.
@@ -311,36 +313,39 @@ module Mica::XML
       attribute ? @document.value_string(attribute) : nil
     end
 
-    # Sets attribute *name* to *value*, adding it when missing.
+    # Sets attribute *name* to *value*, adding it when missing. A value that
+    # is not a `String` is converted with `to_s` first, as the caller's
+    # work; the edit meters the resulting text.
     def []=(name : String, value) : String
       text = value.to_s
-      meter_edit(name.bytesize + text.bytesize)
-      raise Error.new("Only elements have attributes") unless element?
-      Escape.check_text(text, xml11_document?)
-      if attribute = find_exact_attribute(name)
-        if @document.kind(attribute).namespace_decl? && @document.value_string(attribute) != text
-          raise Error.new("Changing the namespace declaration #{name.inspect} is not supported: it would rename nodes in its scope")
+      @document.editing(name.bytesize.to_i64 + text.bytesize) do
+        raise Error.new("Only elements have attributes") unless element?
+        Escape.check_text(text, xml11_document?)
+        if attribute = find_exact_attribute(name)
+          if @document.kind(attribute).namespace_decl? && !same_value?(attribute, text)
+            raise Error.new("Changing the namespace declaration #{name.inspect} is not supported: it would rename nodes in its scope")
+          end
+          @document.set_value(attribute, text)
+          return text
         end
-        @document.set_value(attribute, text)
-        return text
+        Escape.check_name(name)
+        name_id = names.intern(name)
+        raise Error.new("Invalid qualified name: #{name.inspect}") unless names.qname?(name_id)
+        xmlns_id = names.intern("xmlns")
+        if name_id == xmlns_id || names.prefix_id(name_id) == xmlns_id
+          add_namespace_declaration(name_id, text)
+          return text
+        end
+        namespace_uri_id = NameTable::EMPTY_ID
+        prefix_id = names.prefix_id(name_id)
+        unless prefix_id == NameTable::EMPTY_ID
+          namespace_uri_id = @document.resolve_prefix(@index, prefix_id)
+          raise Error.new("Namespace prefix of #{name.inspect} is not bound") if namespace_uri_id < 0
+          check_unique_expanded_name(namespace_uri_id, names.local_id(name_id), -1)
+        end
+        @document.append_attribute(@index, name_id, namespace_uri_id, text, Type::ATTRIBUTE_NODE)
+        text
       end
-      Escape.check_name(name)
-      name_id = names.intern(name)
-      raise Error.new("Invalid qualified name: #{name.inspect}") unless names.qname?(name_id)
-      xmlns_id = names.intern("xmlns")
-      if name_id == xmlns_id || names.prefix_id(name_id) == xmlns_id
-        add_namespace_declaration(name_id, text)
-        return text
-      end
-      namespace_uri_id = NameTable::EMPTY_ID
-      prefix_id = names.prefix_id(name_id)
-      unless prefix_id == NameTable::EMPTY_ID
-        namespace_uri_id = @document.resolve_prefix(@index, prefix_id)
-        raise Error.new("Namespace prefix of #{name.inspect} is not bound") if namespace_uri_id < 0
-        check_unique_expanded_name(namespace_uri_id, names.local_id(name_id), -1)
-      end
-      @document.append_attribute(@index, name_id, namespace_uri_id, text, Type::ATTRIBUTE_NODE)
-      text
     end
 
     # Adds a namespace declaration. It must not change how any existing name
@@ -423,20 +428,21 @@ module Mica::XML
 
     # Removes attribute *name* and returns its value, or nil when missing.
     def delete(name : String) : String?
-      meter_edit(name.bytesize)
-      attribute = find_attribute(name, for_edit: true)
-      return unless attribute
-      value = @document.value_string(attribute)
-      @document.unlink(attribute)
-      value
+      @document.editing(name.bytesize.to_i64) do
+        attribute = find_attribute(name, for_edit: true)
+        return unless attribute
+        value = @document.value_string(attribute)
+        @document.unlink(attribute)
+        value
+      end
     end
 
-    # Records an edit call given *bytes* of input and charges validating,
-    # hashing and copying them, before the edit does anything else (also
-    # when it then fails).
-    private def meter_edit(bytes : Int) : Nil
-      @document.add_edit_units(bytes)
-      @document.charge_edit(2 * bytes + 1)
+    # True when *attribute*'s value is *text*, compared in place (the old
+    # value's bytes are charged first).
+    private def same_value?(attribute : Int32, text : String) : Bool
+      value = @document.value_bytes(attribute)
+      @document.charge_edit(Math.min(value.size, text.bytesize))
+      value == text.to_slice
     end
 
     private def find_exact_attribute(name : String) : Int32?
@@ -604,9 +610,10 @@ module Mica::XML
     # Raises `Mica::Error` when this node is a namespace declaration that a
     # name in its element's subtree still resolves through.
     def unlink : Nil
-      meter_edit(0)
-      check_declaration_unused if @document.kind(@index).namespace_decl?
-      @document.unlink(@index)
+      @document.editing(0_i64) do
+        check_declaration_unused if @document.kind(@index).namespace_decl?
+        @document.unlink(@index)
+      end
     end
 
     private def check_declaration_unused : Nil
@@ -616,7 +623,9 @@ module Mica::XML
       # A redundant declaration (the enclosing scope binds the same URI) can
       # go without changing how any name resolves.
       inherited = @document.resolve_prefix(@document.data(owner.index).parent, prefix_id)
-      return if inherited == names.intern(@document.value_bytes(@index))
+      uri = @document.value_bytes(@index)
+      @document.charge_edit(uri.size)
+      return if inherited == names.intern(uri)
       if owner.declaration_in_use?(prefix_id)
         raise Error.new("Removing #{names[@document.data(@index).name_id].inspect} would unbind names in its scope")
       end

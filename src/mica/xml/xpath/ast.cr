@@ -58,6 +58,10 @@ module Mica::XML::XPath
 
     # True when the expression calls position() or last() anywhere.
     abstract def uses_context_position? : Bool
+
+    # `uses_context_position?` of composite expressions, computed once from
+    # the children when the node is built, so every query is O(1).
+    @uses_context_position : Bool = false
   end
 
   # :nodoc:
@@ -68,6 +72,7 @@ module Mica::XML::XPath
 
     def initialize(@operator : String, @left : Expr, @right : Expr)
       @depth = Math.max(@left.depth, @right.depth) + 1
+      @uses_context_position = @left.uses_context_position? || @right.uses_context_position?
     end
 
     def static_type : StaticType
@@ -82,7 +87,7 @@ module Mica::XML::XPath
     end
 
     def uses_context_position? : Bool
-      @left.uses_context_position? || @right.uses_context_position?
+      @uses_context_position
     end
   end
 
@@ -92,6 +97,7 @@ module Mica::XML::XPath
 
     def initialize(@operand : Expr)
       @depth = @operand.depth + 1
+      @uses_context_position = @operand.uses_context_position?
     end
 
     def static_type : StaticType
@@ -99,7 +105,7 @@ module Mica::XML::XPath
     end
 
     def uses_context_position? : Bool
-      @operand.uses_context_position?
+      @uses_context_position
     end
   end
 
@@ -161,6 +167,7 @@ module Mica::XML::XPath
 
     def initialize(@name : String, @list_of_arguments : Array(Expr))
       @depth = Expr.max_depth(@list_of_arguments) + 1
+      @uses_context_position = @name == "position" || @name == "last" || @list_of_arguments.any?(&.uses_context_position?)
     end
 
     def static_type : StaticType
@@ -170,7 +177,7 @@ module Mica::XML::XPath
     end
 
     def uses_context_position? : Bool
-      @name == "position" || @name == "last" || @list_of_arguments.any?(&.uses_context_position?)
+      @uses_context_position
     end
   end
 
@@ -193,6 +200,10 @@ module Mica::XML::XPath
     getter offset : Int32
 
     def initialize(@axis : Axis, @test : NodeTest, @list_of_predicates : Array(Expr), @offset : Int32 = 0)
+      @position_free = @list_of_predicates.all? do |predicate|
+        type = predicate.static_type
+        !type.number? && !type.unknown? && !predicate.uses_context_position?
+      end
     end
 
     # True for `descendant-or-self::node()` with no predicates (the `//`
@@ -201,13 +212,9 @@ module Mica::XML::XPath
       @axis.descendant_or_self? && @test.kind.any_node? && @list_of_predicates.empty?
     end
 
-    # True when the predicates do not depend on the proximity position.
-    def position_free? : Bool
-      @list_of_predicates.all? do |predicate|
-        type = predicate.static_type
-        !type.number? && !type.unknown? && !predicate.uses_context_position?
-      end
-    end
+    # True when the predicates do not depend on the proximity position
+    # (computed once, when the step is built: every query is O(1)).
+    getter? position_free : Bool
   end
 
   # :nodoc:
@@ -222,6 +229,9 @@ module Mica::XML::XPath
       deepest = @filter.try(&.depth) || 0
       @list_of_steps.each { |step| deepest = Math.max(deepest, Expr.max_depth(step.list_of_predicates)) }
       @depth = deepest + 1
+      filter = @filter
+      @uses_context_position = (filter && filter.uses_context_position?) ||
+                               @list_of_steps.any? { |step| step.list_of_predicates.any?(&.uses_context_position?) }
     end
 
     def static_type : StaticType
@@ -229,9 +239,7 @@ module Mica::XML::XPath
     end
 
     def uses_context_position? : Bool
-      filter = @filter
-      return true if filter && filter.uses_context_position?
-      @list_of_steps.any? { |step| step.list_of_predicates.any?(&.uses_context_position?) }
+      @uses_context_position
     end
   end
 
@@ -242,6 +250,7 @@ module Mica::XML::XPath
 
     def initialize(@primary : Expr, @list_of_predicates : Array(Expr))
       @depth = Math.max(@primary.depth, Expr.max_depth(@list_of_predicates)) + 1
+      @uses_context_position = @primary.uses_context_position? || @list_of_predicates.any?(&.uses_context_position?)
     end
 
     def static_type : StaticType
@@ -249,7 +258,7 @@ module Mica::XML::XPath
     end
 
     def uses_context_position? : Bool
-      @primary.uses_context_position? || @list_of_predicates.any?(&.uses_context_position?)
+      @uses_context_position
     end
   end
 end

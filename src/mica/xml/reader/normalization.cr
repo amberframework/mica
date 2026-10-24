@@ -17,9 +17,11 @@ class Mica::XML::Reader
   private def verify_normalization : Nil
     case @node_type
     when .element?
-      check_normalized_name(@name_id)
+      check_normalized_name(@name_id, 1)
+      ordinal = 0
       @attrs.each do |slot|
-        check_normalized_name(slot.name_id)
+        check_normalized_name(slot.name_id, attribute_ordinal: slot.specified ? ordinal : nil)
+        ordinal += 1 if slot.specified
         check_normalized(attribute_value_bytes(slot), "attribute value")
       end
     when .text?, .significant_whitespace?
@@ -29,7 +31,7 @@ class Mica::XML::Reader
     when .comment?
       check_normalized_value("comment")
     when .processing_instruction?
-      check_normalized_name(@name_id)
+      check_normalized_name(@name_id, 2)
       check_normalized_value("processing instruction")
     end
   end
@@ -81,10 +83,64 @@ class Mica::XML::Reader
     @normalization_checked
   end
 
-  private def check_normalized_name(name_id : Int32) : Nil
+  # Checks a name once per document. With *name_offset* (where the name
+  # starts in the current token, relative to `@mark`) or *attribute_ordinal*
+  # (the attribute's place among the tag's specified attributes, located
+  # only when there is an error) the error points at the offending
+  # character; otherwise at the token.
+  private def check_normalized_name(name_id : Int32, name_offset : Int32? = nil, attribute_ordinal : Int32? = nil) : Nil
     return if @normalized_name_ids.includes?(name_id)
-    check_normalized(@names[name_id].to_slice, "name", @token_position || error_position)
+    bytes = @names[name_id].to_slice
+    check_normalized(bytes, "name", nil) do |offending|
+      start = @token_position
+      offset = name_offset || attribute_ordinal.try { |ordinal| attribute_name_offset(ordinal) }
+      if start.nil?
+        error_position
+      elsif offset && @frames.empty?
+        position_after(start, @mark, @mark + offset + offending)
+      else
+        start
+      end
+    end
     @normalized_name_ids << name_id
+  end
+
+  # Returns where the *ordinal*-th attribute name of the current start tag
+  # begins, relative to `@mark`, by stepping over the tag's bytes (only on
+  # the error path's way to a position, so linear and rare).
+  private def attribute_name_offset(ordinal : Int32) : Int32?
+    index = @mark + 1 + @names[@name_id].bytesize
+    stop = Math.min(@pos, @limit)
+    count = 0
+    while index < stop
+      byte = @buffer[index]
+      if white_space_byte?(byte)
+        index += 1
+        next
+      end
+      return if byte == '/'.ord || byte == '>'.ord
+      return index - @mark if count == ordinal
+      index = skip_until(index, stop, '='.ord.to_u8) + 1
+      while index < stop && white_space_byte?(@buffer[index])
+        index += 1
+      end
+      return if index >= stop
+      index = skip_until(index + 1, stop, @buffer[index]) + 1
+      count += 1
+    end
+    nil
+  end
+
+  private def white_space_byte?(byte : UInt8) : Bool
+    byte == 0x20 || byte == 0x09 || byte == 0x0A || byte == 0x0D
+  end
+
+  # Returns the index of the first *target* byte from *index*, or *stop*.
+  private def skip_until(index : Int32, stop : Int32, target : UInt8) : Int32
+    while index < stop && @buffer[index] != target
+      index += 1
+    end
+    index
   end
 
   # Checks the current event's value; an error points at the offending
@@ -112,7 +168,7 @@ class Mica::XML::Reader
     charge(bytes.size.to_i64 * NORMALIZATION_OPERATIONS_PER_BYTE)
     code, length = Core::UTF8.decode(bytes)
     if length > 0 && ComposingCharacters.includes?(code)
-      raise NormalizationError.new("The #{construct} starts with the composing character U+#{hex_code(code)} (XML 1.1 section 2.13)", position || error_position)
+      raise NormalizationError.new("The #{construct} starts with the composing character U+#{hex_code(code)} (XML 1.1 section 2.13)", yield 0)
     end
     return if String.new(bytes).unicode_normalized?(:nfc)
     raise NormalizationError.new("The #{construct} is not in Unicode Normalization Form C (XML 1.1 section 2.13)", yield offending_normalization_index(bytes))

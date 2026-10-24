@@ -141,10 +141,30 @@ module Mica::XML
 
     # :nodoc:
     #
-    # Records one edit call given *bytes* of input (names, values, text).
-    def add_edit_units(bytes : Int) : Nil
-      edit_meter.add_units(bytes + 1)
+    # Runs one edit call given *bytes* of input (names, values, text): adds
+    # its units, charges validating, hashing and copying the input before
+    # anything else (also when the edit then fails), and points the name
+    # table's rehash hook at the edit meter for the duration, so a rehash
+    # the edit causes is charged to it even when the table is shared with
+    # a reader (`Reader#expand`).
+    def editing(bytes : Int64, &)
+      meter = edit_meter
+      meter.add_units(bytes + 1)
+      charge_edit(2 * bytes + 1)
+      previous_hook = @names.before_rebuild
+      @names.before_rebuild = edit_rebuild_hook
+      begin
+        yield
+      ensure
+        @names.before_rebuild = previous_hook
+      end
     end
+
+    private def edit_rebuild_hook : Proc(Int64, Nil)
+      @edit_rebuild_hook ||= ->(work : Int64) { charge_edit(work) }
+    end
+
+    @edit_rebuild_hook : Proc(Int64, Nil)? = nil
 
     # :nodoc:
     def initialize(@names : NameTable = NameTable.new)
@@ -160,9 +180,9 @@ module Mica::XML
       reader = Reader.new(source, options, meter)
       document = new(reader.names)
       document.build_from(reader)
-      # The finished document owns the names now: rehashes that later
-      # edits cause are charged to the edit meter, not the parse's.
-      reader.names.before_rebuild = ->(work : Int64) { document.charge_edit(work) }
+      # The finished document owns the names now; rehashes that later
+      # edits cause are charged to the edit meter (see `editing`).
+      reader.names.before_rebuild = nil
       document
     end
 
