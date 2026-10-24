@@ -1,15 +1,20 @@
 # Writes James Clark's canonical XML form used by the xmlconf OUTPUT files:
 # no declaration, DOCTYPE or comments; attributes sorted by name; empty
 # elements as start and end tag; character data with `&`, `<`, `>`, `"`,
-# TAB, LF and CR escaped; PIs as `<?target data?>`.
+# TAB, LF and CR escaped; PIs as `<?target data?>`. For an XML 1.1
+# document the output starts with `<?xml version="1.1"?>` and every C0 and
+# C1 control character (and DEL) is written as a decimal character
+# reference, as in the eduni and IBM XML 1.1 OUTPUT files.
 module Canonical
   def self.write(document : Mica::XML::Document) : String
+    xml11 = document.version == "1.1"
     String.build do |io|
-      document.node.children.each { |child| write_node(io, child) }
+      io << %(<?xml version="1.1"?>) if xml11
+      document.node.children.each { |child| write_node(io, child, xml11) }
     end
   end
 
-  private def self.write_node(io : IO, node : Mica::XML::Node) : Nil
+  private def self.write_node(io : IO, node : Mica::XML::Node, xml11 : Bool) : Nil
     case node.type
     when .element_node?
       io << '<' << node.qualified_name
@@ -21,14 +26,14 @@ module Canonical
       attributes.sort_by!(&.[0])
       attributes.each do |name, value|
         io << ' ' << name << "=\""
-        escape(io, value)
+        escape(io, value, xml11)
         io << '"'
       end
       io << '>'
-      node.children.each { |child| write_node(io, child) }
+      node.children.each { |child| write_node(io, child, xml11) }
       io << "</" << node.qualified_name << '>'
     when .text_node?, .cdata_section_node?
-      escape(io, node.content)
+      escape(io, node.content, xml11)
     when .pi_node?
       io << "<?" << node.name << ' ' << node.content << "?>"
     when .entity_ref_node?
@@ -57,7 +62,7 @@ module Canonical
     io << "]>\n"
   end
 
-  private def self.escape(io : IO, text : String) : Nil
+  private def self.escape(io : IO, text : String, xml11 : Bool) : Nil
     text.each_char do |char|
       case char
       when '&'  then io << "&amp;"
@@ -67,7 +72,12 @@ module Canonical
       when '\t' then io << "&#9;"
       when '\n' then io << "&#10;"
       when '\r' then io << "&#13;"
-      else           io << char
+      else
+        if xml11 && (char.ord < 0x20 || (0x7F..0x9F).includes?(char.ord))
+          io << "&#" << char.ord << ';'
+        else
+          io << char
+        end
       end
     end
   end

@@ -104,6 +104,7 @@ module Mica::XML
     # True once a version="1.1" declaration has been read: XML 1.1 line
     # ends, characters and namespace undeclaration apply.
     @xml11 = false
+    @normalized_name_ids = Set(Int32).new
 
     # Event state.
     @phase = Phase::Start
@@ -212,7 +213,9 @@ module Mica::XML
       if @phase.start?
         start_document
       end
-      advance
+      produced = advance
+      verify_normalization if produced && @xml11 && @options.check_normalization?
+      produced
     end
 
     # Returns the type of the node the reader is positioned on.
@@ -573,3 +576,4 @@ require "./reader/content"
 require "./reader/references"
 require "./reader/namespaces"
 require "./reader/dtd_parser"
+require "./reader/normalization"
