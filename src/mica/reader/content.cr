@@ -161,7 +161,7 @@ class Mica::Reader
         return index if @attrs.unsafe_fetch(index).name_id == name_id
         index += 1
       end
-      return nil
+      return
     end
     while @attribute_lookup.size < count
       position = @attribute_lookup.size

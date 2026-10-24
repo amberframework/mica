@@ -167,7 +167,7 @@ module Mica
 
     private def add_event(reader : Reader, parent : Int32) : Int32
       type = reader.event_type
-      finish_text_merge unless @merging_text_node < 0 || type.text? || type.significant_whitespace?
+      finish_text_merge_before(type)
       case type
       when .element?
         element = add_element(reader, parent)
@@ -217,6 +217,11 @@ module Mica
         return
       end
       append_new(Node::Type::TEXT_NODE, parent, 0, 0, bytes)
+    end
+
+    private def finish_text_merge_before(type : Reader::Type) : Nil
+      return if @merging_text_node < 0
+      finish_text_merge unless type.text? || type.significant_whitespace?
     end
 
     private def finish_text_merge : Nil
