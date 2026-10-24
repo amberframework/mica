@@ -1,4 +1,4 @@
 maintenance_exemptions:
   - target: libxml2
-    reason: "Comparison baseline only: conformance/run_libxml2.cr and bench/*_stdlib.cr measure stdlib XML (libxml2) against Mica. The library itself (src/) never requires xml; spec binaries do not link libxml2."
+    reason: "Comparison baseline only: conformance/run_libxml2.cr, bench/bench_stdlib.cr and fuzz/differential.cr measure stdlib XML (libxml2) against Mica. The library itself (src/) never requires xml; spec binaries do not link libxml2."
     expires: 2027-04-24

@@ -39,7 +39,7 @@ module Mica::XPath
     end
 
     def tokenize : Array(Token)
-      while true
+      loop do
         skip_spaces
         break unless @reader.has_next?
         @tokens << next_token

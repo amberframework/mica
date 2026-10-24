@@ -46,7 +46,7 @@ module Mica
     def intern(bytes : Bytes) : Int32
       hash = hash_bytes(bytes)
       index = hash.to_i32! & @mask
-      while true
+      loop do
         id = @slots.unsafe_fetch(index)
         if id < 0
           return add(bytes, hash, index)
@@ -67,7 +67,7 @@ module Mica
     def lookup(bytes : Bytes) : Int32
       hash = hash_bytes(bytes)
       index = hash.to_i32! & @mask
-      while true
+      loop do
         id = @slots.unsafe_fetch(index)
         return -1 if id < 0
         if @hashes.unsafe_fetch(id) == hash && @strings.unsafe_fetch(id).to_slice == bytes

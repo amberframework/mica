@@ -69,7 +69,7 @@ class Mica::Reader
   # Returns a description of an unsupported or malformed encoding signature,
   # or nil when the input is UTF-8 or UTF-16 with a byte order mark.
   private def signature_problem(bytes : Bytes) : String?
-    return nil if bytes.size < 4
+    return if bytes.size < 4
     b0, b1, b2, b3 = bytes[0], bytes[1], bytes[2], bytes[3]
     if (b0 == 0 && b1 == 0 && b2 == 0xFE && b3 == 0xFF) || (b0 == 0xFF && b1 == 0xFE && b2 == 0 && b3 == 0) ||
        (b0 == 0 && b1 == 0 && b2 == 0 && b3 == 0x3C) || (b0 == 0x3C && b1 == 0 && b2 == 0 && b3 == 0)

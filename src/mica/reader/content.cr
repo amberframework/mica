@@ -19,7 +19,7 @@ class Mica::Reader
       @pending_skipped_entity_id = -1
       return true
     end
-    while true
+    loop do
       @mark = @pos
       if @pos >= @limit && !fill
         if @frames.empty?
@@ -82,7 +82,7 @@ class Mica::Reader
   private def parse_start_tag : Nil
     @pos += 1
     name_id = scan_name_id
-    while true
+    loop do
       had_space = skip_spaces
       byte = peek_byte
       if byte == '>'.ord
@@ -161,7 +161,7 @@ class Mica::Reader
     segment = start
     in_scratch = false
     scratch_start = @scratch_size
-    while true
+    loop do
       ptr = @buffer.to_unsafe
       pos = @pos
       limit = @limit
@@ -292,7 +292,7 @@ class Mica::Reader
     start = @pos - @mark
     segment = start
     in_scratch = false
-    while true
+    loop do
       ptr = @buffer.to_unsafe
       pos = @pos
       limit = @limit
@@ -449,7 +449,7 @@ class Mica::Reader
     in_scratch = false
     scratch_start = @scratch_size
     end_offset = 0
-    while true
+    loop do
       ptr = @buffer.to_unsafe
       pos = @pos
       limit = @limit

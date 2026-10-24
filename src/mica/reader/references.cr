@@ -86,7 +86,7 @@ class Mica::Reader
     value = 0
     digits = 0
     too_large = false
-    while true
+    loop do
       byte = peek_byte
       digit = if byte >= '0'.ord && byte <= '9'.ord
                 byte - '0'.ord

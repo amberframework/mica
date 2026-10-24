@@ -41,7 +41,7 @@ module Mica
       format_stack = [] of Bool
       level = 0
       current = root
-      while true
+      loop do
         record = document.data(current)
         descended = false
         if record.kind.element_node?
@@ -64,7 +64,7 @@ module Mica
         next if descended
 
         # Move to the next sibling, closing finished elements on the way up.
-        while true
+        loop do
           return if current == root
           following = document.data(current).next_sibling
           if following >= 0

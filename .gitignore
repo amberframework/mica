@@ -1,9 +1,9 @@
-lib/
 .crystal/
 .shards/
-bin/
-bench/data/
-bench/bin/
-conformance/xmlconf/
 *.dwarf
+bench/bin/
+bench/data/
+bin/
+conformance/xmlconf/
+lib/
 tmp/

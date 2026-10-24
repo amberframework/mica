@@ -74,7 +74,7 @@ describe "Mica security defaults" do
       xml = %(<!DOCTYPE r SYSTEM "file://#{secret}" [<!ENTITY s SYSTEM "file://#{secret}"><!ENTITY % p SYSTEM "file://#{secret}">%p;]><r>&s;</r>)
       document = Mica.parse(xml)
       document.to_xml.should_not contain("TOP-SECRET")
-      document.root.not_nil!.content.should eq("")
+      root_of(document).content.should eq("")
     ensure
       File.delete(secret)
     end

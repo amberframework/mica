@@ -21,7 +21,7 @@ describe Mica::Document do
 
   describe Mica::Node do
     it "navigates children, siblings and parents" do
-      root = Mica.parse(SAMPLE).root.not_nil!
+      root = root_of(Mica.parse(SAMPLE))
       books = root.children.select(&.element?)
       books.map(&.["id"]).should eq(["1", "2"])
       first = books.first
@@ -34,7 +34,7 @@ describe Mica::Document do
 
     it "returns local names and namespace details like stdlib" do
       document = Mica.parse(%(<p:r xmlns:p="urn:p" p:a="1"/>))
-      root = document.root.not_nil!
+      root = root_of(document)
       root.name.should eq("r")
       root.qualified_name.should eq("p:r")
       root.prefix.should eq("p")
@@ -48,7 +48,7 @@ describe Mica::Document do
     end
 
     it "returns content as concatenated descendant text" do
-      root = Mica.parse(%(<a>x<b>y<![CDATA[z]]></b><!--no--></a>)).root.not_nil!
+      root = root_of(Mica.parse(%(<a>x<b>y<![CDATA[z]]></b><!--no--></a>)))
       root.content.should eq("xyz")
       root.text.should eq("xyz")
       root.inner_text.should eq("xyz")
@@ -56,7 +56,7 @@ describe Mica::Document do
 
     it "sets and deletes attributes" do
       document = Mica.parse(%(<a xmlns:p="urn:p" k="v"/>))
-      root = document.root.not_nil!
+      root = root_of(document)
       root["k"] = "changed"
       root["new"] = 42
       root["p:q"] = "ns"
@@ -72,32 +72,32 @@ describe Mica::Document do
 
     it "replaces content and renames elements" do
       document = Mica.parse(%(<a xmlns:p="urn:p"><b>old<c/></b></a>))
-      element_to_change = document.xpath_node("//b").not_nil!
+      element_to_change = node_at(document, "//b")
       element_to_change.content = "<new> & text"
       element_to_change.name = "p:renamed"
       element_to_change.namespace_uri.should eq("urn:p")
-      document.root.not_nil!.to_xml(indent: 0).should eq(%(<a xmlns:p="urn:p"><p:renamed>&lt;new&gt; &amp; text</p:renamed></a>))
+      root_of(document).to_xml(indent: 0).should eq(%(<a xmlns:p="urn:p"><p:renamed>&lt;new&gt; &amp; text</p:renamed></a>))
       expect_raises(Mica::Error) { element_to_change.name = "nope:x" }
     end
 
     it "unlinks nodes and keeps XPath and serialization consistent" do
       document = Mica.parse(%(<a><b>1</b><c>2</c><d>3</d></a>))
-      document.xpath_node("//c").not_nil!.unlink
+      node_at(document, "//c").unlink
       document.xpath_nodes("//*").map(&.name).should eq(["a", "b", "d"])
-      document.root.not_nil!.content.should eq("13")
-      document.root.not_nil!.to_xml(indent: 0).should eq("<a><b>1</b><d>3</d></a>")
-      root = document.root.not_nil!
+      root_of(document).content.should eq("13")
+      root_of(document).to_xml(indent: 0).should eq("<a><b>1</b><d>3</d></a>")
+      root = root_of(document)
       root["z"] = "1"
-      root.first_element_child.not_nil!["y"] = "2"
+      node_at(root, "*[1]")["y"] = "2"
       document.xpath_nodes("//@*").map(&.name).should eq(["z", "y"])
     end
 
     it "keeps entity references that were not expanded" do
       document = Mica.parse(%(<!DOCTYPE a SYSTEM "a.dtd"><a>x&ext;y</a>))
-      document.root.not_nil!.children.map(&.type).should eq([
+      root_of(document).children.map(&.type).should eq([
         Mica::Node::Type::TEXT_NODE, Mica::Node::Type::ENTITY_REF_NODE, Mica::Node::Type::TEXT_NODE,
       ])
-      document.root.not_nil!.to_xml.should eq("<a>x&ext;y</a>")
+      root_of(document).to_xml.should eq("<a>x&ext;y</a>")
     end
   end
 
@@ -110,8 +110,8 @@ describe Mica::Document do
 
     it "indents element-only content and leaves mixed content alone" do
       document = Mica.parse("<a><b><c/></b><d>text <i>x</i></d></a>")
-      document.root.not_nil!.to_xml.should eq("<a>\n  <b>\n    <c/>\n  </b>\n  <d>text <i>x</i></d>\n</a>")
-      document.root.not_nil!.to_xml(indent: 0).should eq("<a><b><c/></b><d>text <i>x</i></d></a>")
+      root_of(document).to_xml.should eq("<a>\n  <b>\n    <c/>\n  </b>\n  <d>text <i>x</i></d>\n</a>")
+      root_of(document).to_xml(indent: 0).should eq("<a><b><c/></b><d>text <i>x</i></d></a>")
     end
 
     it "round-trips: parse, serialize, parse gives the same tree" do
@@ -119,7 +119,7 @@ describe Mica::Document do
         first = Mica.parse(xml)
         second = Mica.parse(first.to_xml(indent: 0))
         second.to_xml(indent: 0).should eq(first.to_xml(indent: 0))
-        second.root.not_nil!.content.should eq(first.root.not_nil!.content)
+        root_of(second).content.should eq(root_of(first).content)
       end
     end
 
@@ -128,7 +128,7 @@ describe Mica::Document do
       xml = "<n>" * depth + "</n>" * depth
       document = Mica.parse(xml, Mica::ParserOptions.new(max_element_depth: depth + 1))
       expected = "<n>" * (depth - 1) + "<n/>" + "</n>" * (depth - 1)
-      document.root.not_nil!.to_xml(indent: 0).should eq(expected)
+      root_of(document).to_xml(indent: 0).should eq(expected)
     end
   end
 end

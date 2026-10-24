@@ -1,0 +1,14 @@
+# Each method listed below is one flat dispatch (a case over byte classes,
+# token kinds, XPath axes or function names) on the scanner's or the XPath
+# evaluator's hot path. Splitting them to satisfy the metric would add calls
+# per byte or per node without making the dispatch easier to read.
+Metrics/CyclomaticComplexity:
+  Excluded:
+    - src/mica/char_class.cr
+    - src/mica/escape.cr
+    - src/mica/reader/content.cr
+    - src/mica/reader/dtd_parser.cr
+    - src/mica/reader/references.cr
+    - src/mica/reader/source.cr
+    - src/mica/xpath/evaluator.cr
+    - src/mica/xpath/lexer.cr

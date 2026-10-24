@@ -45,7 +45,7 @@ class Mica::Reader
   # Skips white space and returns true when there was any.
   private def skip_spaces : Bool
     skipped = false
-    while true
+    loop do
       if @pos >= @limit
         break unless fill
       end
@@ -78,7 +78,7 @@ class Mica::Reader
   private def scan_name_span : {Int32, Int32}
     start = @pos - @mark
     first = true
-    while true
+    loop do
       if @pos >= @limit
         break unless fill
       end
@@ -120,7 +120,7 @@ class Mica::Reader
   # Scans an Nmtoken (one or more NameChar) and returns its size.
   private def scan_nmtoken : Int32
     start = @pos
-    while true
+    loop do
       if @pos >= @limit
         break unless fill
       end

@@ -38,7 +38,7 @@ class Mica::Reader
   private def parse_internal_subset : Nil
     @pin = @pos
     base_level = @frames.size
-    while true
+    loop do
       @mark = @pos
       if @pos >= @limit && !fill
         if @frames.size > base_level
@@ -162,7 +162,7 @@ class Mica::Reader
   private def parse_entity_value(quote : Int32) : Bytes
     @pos += 1
     value = IO::Memory.new
-    while true
+    loop do
       byte = peek_byte
       syntax_error("Unterminated entity value") if byte < 0
       if byte == quote
@@ -223,7 +223,7 @@ class Mica::Reader
     end
     @pos += 1
     literal = String::Builder.new
-    while true
+    loop do
       byte = peek_byte
       syntax_error("Unterminated system identifier") if byte < 0
       if byte == quote
@@ -243,7 +243,7 @@ class Mica::Reader
     end
     @pos += 1
     literal = String::Builder.new
-    while true
+    loop do
       byte = peek_byte
       syntax_error("Unterminated public identifier") if byte < 0
       if byte == quote
@@ -263,7 +263,7 @@ class Mica::Reader
     @pos += 9
     require_spaces("after '<!ATTLIST'")
     element_id = scan_name_id
-    while true
+    loop do
       had_space = skip_spaces
       byte = peek_byte
       if byte == '>'.ord
@@ -316,7 +316,7 @@ class Mica::Reader
   # Parses `( a | b | c )`: names for NOTATION, name tokens otherwise.
   private def parse_enumeration(notation : Bool) : Nil
     expect_byte('(', "to open the enumeration")
-    while true
+    loop do
       skip_spaces
       if notation
         scan_name_span
@@ -393,7 +393,7 @@ class Mica::Reader
   # Parses the rest of `(#PCDATA | a | b)*` or `(#PCDATA)`.
   private def parse_mixed_content : Nil
     names = 0
-    while true
+    loop do
       skip_spaces
       case peek_byte
       when '|'.ord
@@ -421,7 +421,7 @@ class Mica::Reader
       limit_error("Content model nested deeper than #{MAX_CONTENT_MODEL_DEPTH}")
     end
     separator = 0
-    while true
+    loop do
       skip_spaces
       if peek_byte == '('.ord
         @pos += 1

@@ -124,14 +124,14 @@ module Mica
 
     # Returns the namespace prefix of an element or attribute, or nil.
     def prefix : String?
-      return nil unless element? || attribute?
+      return unless element? || attribute?
       prefix_id = names.prefix_id(record.name_id)
       prefix_id == NameTable::EMPTY_ID ? nil : names[prefix_id]
     end
 
     # Returns the namespace URI of an element or attribute, or nil.
     def namespace_uri : String?
-      return nil unless element? || attribute?
+      return unless element? || attribute?
       uri_id = record.namespace_uri_id
       uri_id == NameTable::EMPTY_ID ? nil : names[uri_id]
     end
@@ -277,16 +277,16 @@ module Mica
     # Removes attribute *name* and returns its value, or nil when missing.
     def delete(name : String) : String?
       attribute = find_attribute(name)
-      return nil unless attribute
+      return unless attribute
       value = @document.value_string(attribute)
       @document.unlink(attribute)
       value
     end
 
     private def find_exact_attribute(name : String) : Int32?
-      return nil unless element?
+      return unless element?
       id = names.lookup(name.to_slice)
-      return nil if id < 0
+      return if id < 0
       each_attribute_index(include_declarations: true) do |attribute|
         return attribute if @document.data(attribute).name_id == id
       end
@@ -294,9 +294,9 @@ module Mica
     end
 
     private def find_attribute(name : String) : Int32?
-      return nil unless element?
+      return unless element?
       id = names.lookup(name.to_slice)
-      return nil if id < 0
+      return if id < 0
       each_attribute_index do |attribute|
         return attribute if @document.data(attribute).name_id == id
       end

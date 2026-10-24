@@ -28,7 +28,7 @@ def reader_events(reader : Mica::Reader) : Array(String)
     event = "#{reader.node_type}:#{reader.depth}:#{reader.name}"
     event += "=#{reader.value.inspect}" unless reader.value.empty?
     if reader.move_to_first_attribute
-      while true
+      loop do
         event += " @#{reader.name}=#{reader.value.inspect}"
         break unless reader.move_to_next_attribute
       end
@@ -60,4 +60,12 @@ def utf16(text : String, big_endian : Bool) : Bytes
     end
   end
   io.to_slice
+end
+
+def root_of(document : Mica::Document) : Mica::Node
+  document.root || raise "Document has no root element"
+end
+
+def node_at(context : Mica::Document | Mica::Node, path : String) : Mica::Node
+  context.xpath_node(path) || raise "No node matches #{path}"
 end

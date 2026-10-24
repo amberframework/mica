@@ -62,7 +62,7 @@ describe Mica::XPath do
       document.xpath_float("sum(//s3:Size)", S3_NS).should eq(47.0)
       document.xpath_bool("//s3:IsTruncated = 'true'", S3_NS).should be_false
       document.xpath_string("concat(//s3:Name, '/', //s3:Contents[1]/s3:Key)", S3_NS).should eq("bucket/a.txt")
-      document.xpath("count(//s3:Key) > 2", S3_NS).should eq(true)
+      document.xpath("count(//s3:Key) > 2", S3_NS).should be_true
     end
   end
 
@@ -112,7 +112,7 @@ describe Mica::XPath do
     end
 
     it "evaluates relative to a context node" do
-      second = Mica.parse(DOC).xpath_node("//a[2]").not_nil!
+      second = node_at(Mica.parse(DOC), "//a[2]")
       second.xpath_nodes("b").map(&.content).should eq(["three"])
       second.xpath_nodes(".//c").map(&.content).should eq(["c-text"])
       second.xpath_string("string(@id)").should eq("2")

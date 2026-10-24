@@ -4,7 +4,7 @@ describe Mica::Builder do
   describe "Mica.build" do
     it "writes a document with the declaration and a final newline" do
       Mica.build { |xml| xml.element("a") { } }.should eq(%(<?xml version="1.0"?>\n<a/>\n))
-      Mica.build(encoding: "UTF-8") { |xml| xml.element("a", x: 1) }.should eq(%(<?xml version="1.0" encoding="UTF-8"?>\n<a x="1"/>\n))
+      Mica.build(encoding: "UTF-8", &.element("a", x: 1)).should eq(%(<?xml version="1.0" encoding="UTF-8"?>\n<a x="1"/>\n))
     end
 
     it "indents element-only content" do
@@ -23,8 +23,8 @@ describe Mica::Builder do
       end
       xml.should eq(%(<a title="Tom &amp; &quot;Jerry&quot; &lt;3&gt;&#9;&#10;&#13;">1 &lt; 2 &amp; 3 &gt; 2&#13;\n</a>))
       document = Mica.parse(xml)
-      document.root.not_nil!["title"].should eq(%(Tom & "Jerry" <3>\t\n\r))
-      document.root.not_nil!.content.should eq("1 < 2 & 3 > 2\r\n")
+      root_of(document)["title"].should eq(%(Tom & "Jerry" <3>\t\n\r))
+      root_of(document).content.should eq("1 < 2 & 3 > 2\r\n")
     end
 
     it "uses the chosen quote character" do
@@ -40,7 +40,7 @@ describe Mica::Builder do
         end
       end
       xml.should eq(%(<?xml version="1.0"?>\n<!DOCTYPE a SYSTEM "a.dtd"><a><![CDATA[x]]]]><![CDATA[>y]]><!-- note --></a>\n))
-      Mica.parse(xml).root.not_nil!.content.should eq("x]]>y")
+      root_of(Mica.parse(xml)).content.should eq("x]]>y")
     end
 
     it "declares namespaces once per scope" do
@@ -69,13 +69,13 @@ describe Mica::Builder do
 
   describe "misuse" do
     it "raises BuilderError or Error for malformed output" do
-      expect_raises(Mica::Error) { Mica.build_fragment { |xml| xml.element("bad name") } }
+      expect_raises(Mica::Error) { Mica.build_fragment(&.element("bad name")) }
       expect_raises(Mica::Error) { Mica.build_fragment { |xml| xml.element("a") { xml.text "\u0000" } } }
       expect_raises(Mica::BuilderError) { Mica.build_fragment { |xml| xml.element("a") { xml.comment("x--y") } } }
       expect_raises(Mica::BuilderError) { Mica.build_fragment { |xml| xml.element("a") { xml.text "t"; xml.attribute("late", "1") } } }
       expect_raises(Mica::BuilderError) { Mica.build_fragment(&.end_element) }
       expect_raises(Mica::BuilderError) { Mica.build { |xml| xml.element("a"); xml.element("b") } }
-      expect_raises(Mica::BuilderError) { Mica.build(encoding: "ISO-8859-1") { |xml| xml.element("a") } }
+      expect_raises(Mica::BuilderError) { Mica.build(encoding: "ISO-8859-1", &.element("a")) }
     end
   end
 
@@ -85,7 +85,7 @@ describe Mica::Builder do
       50.times do
         text = String.build { |io| 20.times { io << ['a', '<', '&', '>', '"', '\'', ' ', '\n', '\t', 'é', '😀', ']'].sample(random) } }
         xml = Mica.build { |builder| builder.element("r", v: text) { builder.text text; builder.cdata(text) } }
-        root = Mica.parse(xml).root.not_nil!
+        root = root_of(Mica.parse(xml))
         root["v"].should eq(text)
         root.content.should eq(text + text)
       end

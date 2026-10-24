@@ -59,7 +59,7 @@ class Mica::Reader
     end
     @pos += 1
     start = @pos - @mark
-    while true
+    loop do
       byte = peek_byte
       syntax_error("Unterminated value for '#{what}'") if byte < 0
       break if byte == quote
@@ -111,7 +111,7 @@ class Mica::Reader
       if starts_with?("<!--")
         parse_comment
       elsif starts_with?("<!DOCTYPE")
-        unless @phase.prolog? && !@doctype_seen
+        if !@phase.prolog? || @doctype_seen
           syntax_error("A DOCTYPE declaration must come once, before the root element")
         end
         parse_doctype

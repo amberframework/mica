@@ -220,7 +220,7 @@ module Mica
     # Returns the namespace prefix of the current element or attribute, or
     # nil when it has none.
     def prefix : String?
-      return nil unless named_by_qname?
+      return unless named_by_qname?
       prefix_id = @names.prefix_id(current_name_id)
       prefix_id == NameTable::EMPTY_ID ? nil : @names[prefix_id]
     end
@@ -228,7 +228,7 @@ module Mica
     # Returns the namespace URI of the current element or attribute, or nil
     # when it is in no namespace.
     def namespace_uri : String?
-      return nil unless named_by_qname?
+      return unless named_by_qname?
       uri_id = @attr_index >= 0 ? @attrs.unsafe_fetch(@attr_index).namespace_uri_id : @namespace_uri_id
       uri_id == NameTable::EMPTY_ID ? nil : @names[uri_id]
     end
@@ -267,7 +267,7 @@ module Mica
 
     # Moves to the first attribute of the current element.
     def move_to_first_attribute : Bool
-      return false unless @node_type.element? && !@attrs.empty?
+      return false if !@node_type.element? || @attrs.empty?
       @attr_index = 0
       true
     end
@@ -303,7 +303,7 @@ module Mica
     # Returns the value of the attribute named *name*, or nil.
     def []?(name : String) : String?
       index = attribute_index(name)
-      return nil if index < 0
+      return if index < 0
       String.new(attribute_value_bytes(@attrs.unsafe_fetch(index)))
     end
 
@@ -346,7 +346,7 @@ module Mica
       return "" unless @node_type.element?
       element = expand
       String.build do |io|
-        element.children.each { |child| child.to_xml(io, indent: 0) }
+        element.children.each(&.to_xml(io, indent: 0))
       end
     end
 
@@ -457,7 +457,7 @@ module Mica
 
     private def skip_subtree : Nil
       @attr_index = -1
-      return unless @node_type.element? && !@empty_element
+      return if !@node_type.element? || @empty_element
       target = @event_depth
       while read
         break if @node_type.end_element? && @event_depth == target

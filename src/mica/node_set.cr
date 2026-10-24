@@ -35,7 +35,7 @@ module Mica
     end
 
     def to_s(io : IO) : Nil
-      @nodes.each { |node| node.to_xml(io) }
+      @nodes.each(&.to_xml(io))
     end
 
     def inspect(io : IO) : Nil
