@@ -75,8 +75,9 @@ class Mica::XML::Reader
     # Charges the outer bytes scanned so far in this token (callers between
     # tokens move the mark to the position first) and the frame scan below,
     # which max_entity_depth bounds.
-    charge(@frames.size + @pos - @mark - @token_precharged)
+    charge(@frames.size + @pos - @mark - @token_precharged + @token_operations)
     @token_precharged = 0
+    @token_operations = 0_i64
     if @current_entity == entity || @frames.any? { |frame| frame.entity == entity }
       syntax_error("Recursive reference to entity '#{@names[entity.name_id]}'")
     end
@@ -168,7 +169,9 @@ class Mica::XML::Reader
   # enforced: an error is being raised anyway.
   private def charge_scanned_before_error : Nil
     scanned = @pos - @mark - @token_precharged
-    @meter.charge(scanned) if scanned > 0
-    @token_precharged += scanned if scanned > 0
+    scanned = 0 if scanned < 0
+    @meter.charge(scanned + @token_operations)
+    @token_precharged += scanned
+    @token_operations = 0_i64
   end
 end

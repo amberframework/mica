@@ -16,7 +16,7 @@ class Mica::XML::Reader
     @value_size = 0
     @value_in_scratch = false
     @empty_element = false
-    @attrs.clear
+    @attrs.clear unless @attrs.empty?
     @attribute_lookup.clear unless @attribute_lookup.empty?
     # The previous event is finished: nothing before the position is needed.
     @mark = @pos
@@ -52,17 +52,33 @@ class Mica::XML::Reader
   # `charge_token`) and checks the budget, partway through a long scan.
   private def scan_checkpoint : Nil
     scanned = @pos - @mark - @token_precharged
-    return if scanned <= 0
+    scanned = 0 if scanned < 0
+    pending = @token_operations
+    return if scanned == 0 && pending == 0
     @token_precharged += scanned
-    charge(scanned)
+    @token_operations = 0_i64
+    charge(scanned + pending)
   end
+
+  # Records *count* operations of work inside the current token that is not
+  # byte scanning (namespace resolution, white-space checks). They reach the
+  # meter with the token's bytes in `charge_token`, or earlier at a
+  # `scan_checkpoint`; every such site does work linear in the token, so
+  # the budget is still checked within one token's worth of work.
+  @[AlwaysInline]
+  private def charge_in_token(count : Int32) : Nil
+    @token_operations += count
+  end
+
+  # Operations recorded by `charge_in_token` and not yet charged.
+  @token_operations = 0_i64
 
   # Ends the current entity's replacement text. Elements opened inside it
   # must be closed inside it.
   private def leave_entity : Nil
-    if level = @open_entity_levels.last?
-      if level == @frames.size
-        syntax_error("Entity '#{entity_name}' ends inside element '#{@names[@open_names.last]}'")
+    if open_element = @open_elements.last?
+      if open_element.entity_level == @frames.size
+        syntax_error("Entity '#{entity_name}' ends inside element '#{@names[open_element.name_id]}'")
       end
     end
     pop_entity
@@ -74,6 +90,13 @@ class Mica::XML::Reader
     else
       ""
     end
+  end
+
+  # Returns true when the *size* bytes at *offset* in the buffer spell name
+  # *name_id*.
+  private def end_tag_matches?(name_id : Int32, offset : Int32, size : Int32) : Bool
+    expected = @names[name_id].to_slice
+    expected.size == size && Core::ByteScan.matches?(@buffer, offset, expected)
   end
 
   # Reads one token inside the root element.
@@ -132,18 +155,15 @@ class Mica::XML::Reader
     end
     @node_type = Type::ELEMENT
     @name_id = name_id
-    @event_depth = @open_names.size
+    @event_depth = @open_elements.size
     if @empty_element
       @pending_binding_mark = binding_mark
-      @phase = Phase::Epilog if @open_names.empty?
+      @phase = Phase::Epilog if @open_elements.empty?
     else
-      if @open_names.size >= @options.max_element_depth
+      if @open_elements.size >= @options.max_element_depth
         limit_error("Elements nested deeper than max_element_depth (#{@options.max_element_depth})")
       end
-      @open_names << name_id
-      @open_namespace_uris << @namespace_uri_id
-      @open_binding_marks << binding_mark
-      @open_entity_levels << @frames.size
+      @open_elements << OpenElement.new(name_id, @namespace_uri_id, binding_mark, @frames.size)
     end
   end
 
@@ -154,7 +174,9 @@ class Mica::XML::Reader
     end
     attr_id = scan_name_id
     skip_spaces
-    expect_byte('=', "after attribute name '#{@names[attr_id]}'")
+    # The message is built only on failure (this runs once per attribute).
+    syntax_error("Expected '=' after attribute name '#{@names[attr_id]}'") unless peek_byte == '='.ord
+    @pos += 1
     skip_spaces
     quote = peek_byte
     unless quote == '"'.ord || quote == '\''.ord
@@ -207,13 +229,11 @@ class Mica::XML::Reader
     in_scratch = false
     scratch_start = @scratch_size
     loop do
-      # Hot loop: `Slice#index` walks a bounds-checked window of at most
-      # SCAN_CHUNK bytes.
+      # Hot loop: a window of at most SCAN_CHUNK bytes.
       pos = @pos
       limit = @limit
       stop = limit - pos > SCAN_CHUNK ? pos + SCAN_CHUNK : limit
-      found = @buffer[pos, stop - pos].index { |byte| CharClass.flags(byte) & CharClass::ATTR_STOP != 0 }
-      pos = found ? pos + found : stop
+      pos = Core::ByteScan.skip_while(@buffer, pos, stop) { |byte| CharClass.flags(byte) & CharClass::ATTR_STOP == 0 }
       @pos = pos
       if pos >= stop
         if pos < limit
@@ -354,23 +374,21 @@ class Mica::XML::Reader
     start, size = scan_name_span
     skip_spaces
     expect_byte('>', "to close the end tag")
-    open_id = @open_names.last? || syntax_error("End tag without a matching start tag")
-    expected = @names[open_id].to_slice
-    actual = @buffer[@mark + start, size]
-    unless expected == actual
-      syntax_error("End tag '#{String.new(actual)}' does not match start tag '#{@names[open_id]}'")
+    open_element = @open_elements.last? || syntax_error("End tag without a matching start tag")
+    open_id = open_element.name_id
+    unless end_tag_matches?(open_id, @mark + start, size)
+      syntax_error("End tag '#{String.new(@buffer[@mark + start, size])}' does not match start tag '#{@names[open_id]}'")
     end
-    if @open_entity_levels.last != @frames.size
+    if open_element.entity_level != @frames.size
       syntax_error("End tag '#{@names[open_id]}' and its start tag are in different entities")
     end
-    @open_names.pop
-    @namespace_uri_id = @open_namespace_uris.pop
-    @pending_binding_mark = @open_binding_marks.pop
-    @open_entity_levels.pop
+    @open_elements.pop
+    @namespace_uri_id = open_element.namespace_uri_id
+    @pending_binding_mark = open_element.binding_mark
     @node_type = Type::END_ELEMENT
     @name_id = open_id
-    @event_depth = @open_names.size
-    @phase = Phase::Epilog if @open_names.empty?
+    @event_depth = @open_elements.size
+    @phase = Phase::Epilog if @open_elements.empty?
   end
 
   # Scans character data up to the next markup. Returns false when no event
@@ -380,13 +398,11 @@ class Mica::XML::Reader
     segment = start
     in_scratch = false
     loop do
-      # Hot loop: `Slice#index` walks a bounds-checked window of at most
-      # SCAN_CHUNK bytes.
+      # Hot loop: a window of at most SCAN_CHUNK bytes.
       pos = @pos
       limit = @limit
       stop = limit - pos > SCAN_CHUNK ? pos + SCAN_CHUNK : limit
-      found = @buffer[pos, stop - pos].index { |byte| CharClass.flags(byte) & CharClass::TEXT_STOP != 0 }
-      pos = found ? pos + found : stop
+      pos = Core::ByteScan.skip_while(@buffer, pos, stop) { |byte| CharClass.flags(byte) & CharClass::TEXT_STOP == 0 }
       @pos = pos
       if pos >= stop
         if pos < limit
@@ -468,7 +484,7 @@ class Mica::XML::Reader
       check_token_size(size)
       set_value(start, size, false)
     end
-    @event_depth = @open_names.size
+    @event_depth = @open_elements.size
     @node_type = whitespace_value? ? Type::SIGNIFICANT_WHITESPACE : Type::TEXT
     true
   end
@@ -483,17 +499,17 @@ class Mica::XML::Reader
   # Returns true when the value is all white space; stops at the first
   # other byte, so it reads each byte at most once.
   private def whitespace_value? : Bool
-    bytes = value_bytes
-    index = 0
-    while index < bytes.size
-      unless CharClass.space?(bytes[index])
-        charge(index + 1)
-        return false
-      end
-      index += 1
+    if @value_in_scratch
+      bytes = @scratch
+      from = @value_start
+    else
+      bytes = @buffer
+      from = @mark + @value_start
     end
-    charge(bytes.size)
-    true
+    stop = from + @value_size
+    index = Core::ByteScan.skip_while(bytes, from, stop) { |byte| CharClass.space?(byte) }
+    charge_in_token(index < stop ? index - from + 1 : index - from)
+    index == stop
   end
 
   # Emits an ENTITY_REFERENCE event for an entity that was not expanded
@@ -503,7 +519,7 @@ class Mica::XML::Reader
     @node_type = Type::ENTITY_REFERENCE
     @name_id = name_id
     @namespace_uri_id = NameTable::EMPTY_ID
-    @event_depth = @open_names.size
+    @event_depth = @open_elements.size
     @value_size = 0
   end
 
@@ -513,7 +529,7 @@ class Mica::XML::Reader
     start, size, in_scratch = scan_markup_body('-'.ord.to_u8, "comment")
     set_value(start, size, in_scratch)
     @node_type = Type::COMMENT
-    @event_depth = @open_names.size
+    @event_depth = @open_elements.size
   end
 
   # Parses `<![CDATA[ ... ]]>`.
@@ -522,7 +538,7 @@ class Mica::XML::Reader
     start, size, in_scratch = scan_markup_body(']'.ord.to_u8, "CDATA section")
     set_value(start, size, in_scratch)
     @node_type = Type::CDATA
-    @event_depth = @open_names.size
+    @event_depth = @open_elements.size
   end
 
   # Parses `<?target data?>`.
@@ -538,7 +554,7 @@ class Mica::XML::Reader
     end
     @node_type = Type::PROCESSING_INSTRUCTION
     @name_id = target_id
-    @event_depth = @open_names.size
+    @event_depth = @open_elements.size
   end
 
   private def scan_processing_instruction_target : Int32
@@ -564,13 +580,11 @@ class Mica::XML::Reader
     scratch_start = @scratch_size
     end_offset = 0
     loop do
-      # Hot loop: `Slice#index` walks a bounds-checked window of at most
-      # SCAN_CHUNK bytes.
+      # Hot loop: a window of at most SCAN_CHUNK bytes.
       pos = @pos
       limit = @limit
       stop = limit - pos > SCAN_CHUNK ? pos + SCAN_CHUNK : limit
-      found = @buffer[pos, stop - pos].index { |byte| CharClass.flags(byte) & CharClass::CONTENT_STOP != 0 }
-      pos = found ? pos + found : stop
+      pos = Core::ByteScan.skip_while(@buffer, pos, stop) { |byte| CharClass.flags(byte) & CharClass::CONTENT_STOP == 0 }
       @pos = pos
       if pos >= stop
         if pos < limit

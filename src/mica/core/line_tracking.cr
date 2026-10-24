@@ -35,11 +35,9 @@ module Mica::Core
       discard_end = base + keep
       return unless @line_start < discard_end
       from = Math.max(@line_start - base, 0_i64).to_i32
-      index = from
-      while index < keep
-        @column_offset += 1 unless buffer[index] & 0xC0 == 0x80
-        index += 1
-      end
+      discarded = buffer[from, keep - from]
+      # Characters are the bytes that are not UTF-8 continuation bytes.
+      @column_offset += discarded.size - discarded.count { |byte| byte & 0xC0 == 0x80 }
       @line_start = discard_end
       @column_cache_offset = -1_i64
     end

@@ -177,29 +177,39 @@ module Mica::XML
       @dtd = reader.dtd
     end
 
+    # Adds the node for the reader's current event under *parent* and
+    # returns the parent for the next event. Each event is charged before
+    # anything is copied: one record per node plus the bytes copied. An end
+    # tag only moves to the parent; the reader's per-token charge covers it.
     private def add_event(reader : Reader, parent : Int32) : Int32
       type = reader.event_type
-      # One record per event and per attribute, plus the bytes copied.
-      reader.charge(1 + reader.event_attributes.size + reader.value_bytes.size)
       finish_text_merge_before(type)
       case type
       when .element?
+        reader.charge(1 + attribute_bytes(reader))
         element = add_element(reader, parent)
         return element unless reader.empty_element?
       when .end_element?
         return data(parent).parent
-      when .text?, .significant_whitespace?
-        add_text(parent, reader.value_bytes)
-      when .cdata?
-        append_new(Node::Type::CDATA_SECTION_NODE, parent, 0, 0, reader.value_bytes)
-      when .comment?
-        append_new(Node::Type::COMMENT_NODE, parent, 0, 0, reader.value_bytes)
-      when .processing_instruction?
-        append_new(Node::Type::PI_NODE, parent, reader.event_name_id, 0, reader.value_bytes)
       when .document_type?
+        reader.charge(1)
         append_new(Node::Type::DTD_NODE, parent, reader.event_name_id, 0, Bytes.empty)
       when .entity_reference?
+        reader.charge(1)
         append_new(Node::Type::ENTITY_REF_NODE, parent, reader.event_name_id, 0, Bytes.empty)
+      else
+        value = reader.value_bytes
+        reader.charge(1 + value.size)
+        case type
+        when .text?, .significant_whitespace?
+          add_text(parent, value)
+        when .cdata?
+          append_new(Node::Type::CDATA_SECTION_NODE, parent, 0, 0, value)
+        when .comment?
+          append_new(Node::Type::COMMENT_NODE, parent, 0, 0, value)
+        when .processing_instruction?
+          append_new(Node::Type::PI_NODE, parent, reader.event_name_id, 0, value)
+        end
       end
       parent
     end
@@ -210,14 +220,19 @@ module Mica::XML
       reader.event_attributes.each do |slot|
         kind = slot.namespace_uri_id == @xmlns_namespace_id ? Node::Type::NAMESPACE_DECL : Node::Type::ATTRIBUTE_NODE
         value = reader.attribute_value_bytes(slot)
-        # Charge each value's copy before making it, so a tag with many
-        # large values is stopped between copies.
-        reader.charge(value.size)
-        attribute = add_node(kind, element, slot.name_id, slot.namespace_uri_id, value)
-        link_attribute(element, attribute, previous)
-        previous = attribute
+        previous = add_attribute_node(kind, element, slot.name_id, slot.namespace_uri_id, value, previous)
       end
       element
+    end
+
+    # Returns the work of copying the current start tag's attributes: one
+    # record and the value bytes for each.
+    private def attribute_bytes(reader : Reader) : Int64
+      total = 0_i64
+      reader.event_attributes.each do |slot|
+        total += 1 + slot.value_size
+      end
+      total
     end
 
     # Adds text under *parent*. Adjacent text events (around entity
@@ -319,7 +334,8 @@ module Mica::XML
       String.new(value_bytes(index))
     end
 
-    private def add_node(kind : Node::Type, parent : Int32, name_id : Int32, namespace_uri_id : Int32, value : Bytes) : Int32
+    # Creates node *index* with its links and value in one record write.
+    private def add_node(kind : Node::Type, parent : Int32, name_id : Int32, namespace_uri_id : Int32, value : Bytes, previous_sibling : Int32 = -1) : Int32
       index = @size
       if index & PAGE_MASK == 0
         if index == Int32::MAX & ~PAGE_MASK
@@ -330,66 +346,73 @@ module Mica::XML
       @size += 1
       record = NodeData.new(kind)
       record.parent = parent
+      record.previous_sibling = previous_sibling
       record.name_id = name_id
       record.namespace_uri_id = namespace_uri_id
+      unless value.empty?
+        record.value_ref = copy_value(value)
+        record.value_size = value.size
+      end
       write_data(index, record)
-      store_value(index, value) unless value.empty?
       index
     end
 
+    # Adds a node as the last child of *parent*.
     private def append_new(kind : Node::Type, parent : Int32, name_id : Int32, namespace_uri_id : Int32, value : Bytes) : Int32
-      index = add_node(kind, parent, name_id, namespace_uri_id, value)
-      link_child(parent, index)
-      index
+      parent_record = data(parent)
+      last = parent_record.last_child
+      child = add_node(kind, parent, name_id, namespace_uri_id, value, last)
+      if last < 0
+        parent_record.first_child = child
+      else
+        update(last) { |record| record.next_sibling = child; record }
+      end
+      parent_record.last_child = child
+      write_data(parent, parent_record)
+      child
     end
 
     # :nodoc:
     #
     # Copies *value* into the heap and points node *index* at it.
     def store_value(index : Int32, value : Bytes) : Nil
-      ref = 0
-      size = value.size
-      if size > LARGE_VALUE
-        @large_values << value.dup
-        ref = -@large_values.size
-      elsif size > 0
-        if @chunk_used + size > CHUNK_SIZE
-          raise Error.new("Document text exceeds 2 GiB") if @chunks.size >= MAX_CHUNKS
-          @chunks << Bytes.new(CHUNK_SIZE)
-          @chunk_used = 0
-        end
-        chunk = @chunks.last
-        chunk[@chunk_used, size].copy_from(value)
-        ref = ((@chunks.size - 1) << CHUNK_BITS) + @chunk_used
-        @chunk_used += size
-      end
+      ref = value.empty? ? 0 : copy_value(value)
       record = data(index)
       record.value_ref = ref
-      record.value_size = size
+      record.value_size = value.size
       write_data(index, record)
     end
 
-    private def link_child(parent : Int32, child : Int32) : Nil
-      parent_record = data(parent)
-      last = parent_record.last_child
-      if last < 0
-        parent_record.first_child = child
-      else
-        update(last) { |record| record.next_sibling = child; record }
-        update(child) { |record| record.previous_sibling = last; record }
+    # Copies non-empty *value* into the value heap and returns its
+    # reference: a chunk offset, or a negative large-value index.
+    private def copy_value(value : Bytes) : Int32
+      size = value.size
+      if size > LARGE_VALUE
+        @large_values << value.dup
+        return -@large_values.size
       end
-      parent_record.last_child = child
-      write_data(parent, parent_record)
-      update(child) { |record| record.parent = parent; record }
+      if @chunk_used + size > CHUNK_SIZE
+        raise Error.new("Document text exceeds 2 GiB") if @chunks.size >= MAX_CHUNKS
+        @chunks << Bytes.new(CHUNK_SIZE)
+        @chunk_used = 0
+      end
+      chunk = @chunks.last
+      chunk[@chunk_used, size].copy_from(value)
+      ref = ((@chunks.size - 1) << CHUNK_BITS) + @chunk_used
+      @chunk_used += size
+      ref
     end
 
-    private def link_attribute(element : Int32, attribute : Int32, previous : Int32) : Nil
+    # Adds an attribute node after *previous* (or first, when *previous* is
+    # -1) in *element*'s attribute list.
+    private def add_attribute_node(kind : Node::Type, element : Int32, name_id : Int32, namespace_uri_id : Int32, value : Bytes, previous : Int32) : Int32
+      attribute = add_node(kind, element, name_id, namespace_uri_id, value, previous)
       if previous < 0
         update(element) { |record| record.first_attribute = attribute; record }
       else
         update(previous) { |record| record.next_sibling = attribute; record }
-        update(attribute) { |record| record.previous_sibling = previous; record }
       end
+      attribute
     end
 
     # Applies a change to the record of node *index*.
@@ -455,14 +478,13 @@ module Mica::XML
     # Adds an attribute (or namespace declaration) at the end of the
     # element's attribute list.
     def append_attribute(element : Int32, name_id : Int32, namespace_uri_id : Int32, value : String, kind : Node::Type) : Int32
-      attribute = add_node(kind, element, name_id, namespace_uri_id, value.to_slice)
       last = -1
       current = data(element).first_attribute
       while current >= 0
         last = current
         current = data(current).next_sibling
       end
-      link_attribute(element, attribute, last)
+      attribute = add_attribute_node(kind, element, name_id, namespace_uri_id, value.to_slice, last)
       mark_order_dirty
       attribute
     end

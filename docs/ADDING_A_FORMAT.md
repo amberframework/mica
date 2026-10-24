@@ -144,7 +144,10 @@ quadratic).
   lookups, unbounded backtracking, repeated copying, hash flooding) and
   design it away. Prove each with a complexity spec.
 - **Bounds-checked memory.** Read input through `Slice` indexing,
-  `Slice#index` or `Slice#each`; raw pointers, `to_unsafe` and
+  `Slice#index` or `Slice#each`. For hot loops over byte runs, use
+  `Core::ByteScan.skip_while` and `Core::ByteScan.matches?`, which check
+  their whole window once and then read without per-byte checks; they are
+  the only unchecked reads in Mica. Raw pointers, `to_unsafe` and
   `unsafe_fetch` stay out of format code.
 - **Iterative, bounded nesting.** Use explicit stacks with a depth limit,
   never recursion on input structure.

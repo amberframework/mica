@@ -47,6 +47,15 @@ module Mica::XML
     #
     # The saved state of an outer source while an entity's replacement text
     # is being read.
+    # An element whose end tag is still to come: its name, namespace, the
+    # binding stack size before its declarations, and the entity nesting
+    # level it started in.
+    record OpenElement,
+      name_id : Int32,
+      namespace_uri_id : Int32,
+      binding_mark : Int32,
+      entity_level : Int32
+
     record SourceFrame,
       buffer : Bytes,
       pos : Int32,
@@ -123,10 +132,7 @@ module Mica::XML
     @scratch_size = 0
 
     # Tree state.
-    @open_names = [] of Int32
-    @open_namespace_uris = [] of Int32
-    @open_binding_marks = [] of Int32
-    @open_entity_levels = [] of Int32
+    @open_elements = [] of OpenElement
     # Namespace bindings: parallel stacks, plus for each prefix id the index
     # of its innermost binding, so a prefix resolves in O(1).
     @binding_prefixes = [] of Int32
@@ -537,8 +543,10 @@ module Mica::XML
     @[AlwaysInline]
     private def charge_token : Nil
       name_operations = @names.operations
-      charge(@pos - @mark - @token_precharged + TOKEN_OPERATIONS + (name_operations - @charged_name_operations))
+      scanned = @pos - @mark - @token_precharged
+      charge(scanned.to_i64 + TOKEN_OPERATIONS + (name_operations - @charged_name_operations) + @token_operations)
       @token_precharged = 0
+      @token_operations = 0_i64
       @charged_name_operations = name_operations
     end
 

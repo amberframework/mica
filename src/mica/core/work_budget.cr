@@ -109,9 +109,13 @@ module Mica::Core
     # count, so a miscalculated delta can never lower the recorded work.
     @[AlwaysInline]
     def charge(count : Int) : Bool
-      raise ArgumentError.new("Negative work charge: #{count}") if count < 0
+      raise_negative_charge(count) if count < 0
       @operations = count > Int64::MAX - @operations ? Int64::MAX : @operations + count
       @operations > @checkpoint
+    end
+
+    private def raise_negative_charge(count : Int) : NoReturn
+      raise ArgumentError.new("Negative work charge: #{count}")
     end
 
     # Records *count* more units of input (saturating), which raises the

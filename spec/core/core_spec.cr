@@ -205,6 +205,30 @@ describe Mica::Core::UTF8 do
   end
 end
 
+describe Mica::Core::ByteScan do
+  it_satisfies "MICA-MEMORY-SAFETY", "skips runs only inside a window it checks first" do
+    bytes = "abc;d".to_slice
+    Mica::Core::ByteScan.skip_while(bytes, 0, 5) { |byte| byte != ';'.ord }.should eq(3)
+    Mica::Core::ByteScan.skip_while(bytes, 4, 5) { |byte| byte != ';'.ord }.should eq(5)
+    Mica::Core::ByteScan.skip_while(bytes, 2, 2) { true }.should eq(2)
+    # The window ends at *stop*, even when the run goes on.
+    Mica::Core::ByteScan.skip_while(bytes, 0, 2) { true }.should eq(2)
+    expect_raises(IndexError) { Mica::Core::ByteScan.skip_while(bytes, 0, 6) { true } }
+    expect_raises(IndexError) { Mica::Core::ByteScan.skip_while(bytes, -1, 2) { true } }
+    expect_raises(IndexError) { Mica::Core::ByteScan.skip_while(bytes, 3, 2) { true } }
+  end
+
+  it_satisfies "MICA-MEMORY-SAFETY", "compares in place only inside a window it checks first" do
+    bytes = "<a></a>".to_slice
+    Mica::Core::ByteScan.matches?(bytes, 5, "a".to_slice).should be_true
+    Mica::Core::ByteScan.matches?(bytes, 1, "a>".to_slice).should be_true
+    Mica::Core::ByteScan.matches?(bytes, 1, "b".to_slice).should be_false
+    Mica::Core::ByteScan.matches?(bytes, 7, Bytes.empty).should be_true
+    expect_raises(IndexError) { Mica::Core::ByteScan.matches?(bytes, 6, "a>".to_slice) }
+    expect_raises(IndexError) { Mica::Core::ByteScan.matches?(bytes, -1, "a".to_slice) }
+  end
+end
+
 describe Mica::Core::Encoding do
   it_satisfies "MICA-CORE-ENCODING", "detects byte order marks and resolves labels" do
     Mica::Core::Encoding.from_byte_order_mark(Bytes[0xEF, 0xBB, 0xBF, 0x3C]).should eq({Mica::Core::Encoding::UTF8, 3})

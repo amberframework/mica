@@ -6,7 +6,7 @@ class Mica::XML::Reader
   private def process_namespaces(element_id : Int32) : Int32
     binding_mark = @binding_prefixes.size
     count = @attrs.size
-    charge(count)
+    charge_in_token(count)
     index = 0
     while index < count
       slot = @attrs[index]
@@ -86,7 +86,7 @@ class Mica::XML::Reader
     while @innermost_binding.size <= prefix_id
       @innermost_binding << -1
     end
-    charge(1)
+    charge_in_token(1)
     @binding_previous << @innermost_binding[prefix_id]
     @innermost_binding[prefix_id] = @binding_prefixes.size
     @binding_prefixes << prefix_id
@@ -97,7 +97,7 @@ class Mica::XML::Reader
   # namespace). Raises when a non-empty prefix is unbound (or undeclared).
   private def resolve_prefix(prefix_id : Int32, name_id : Int32) : Int32
     return @xml_namespace_id if prefix_id == @xml_id
-    charge(1)
+    charge_in_token(1)
     binding = prefix_id < @innermost_binding.size ? @innermost_binding[prefix_id] : -1
     uri_id = binding >= 0 ? @binding_uris[binding] : NameTable::EMPTY_ID
     return uri_id if uri_id != NameTable::EMPTY_ID || prefix_id == NameTable::EMPTY_ID
@@ -107,7 +107,7 @@ class Mica::XML::Reader
   # Two prefixed attributes must not share a namespace URI and local name.
   private def check_expanded_attribute_names : Nil
     seen = Set({Int32, Int32}).new
-    charge(@attrs.size)
+    charge_in_token(@attrs.size)
     @attrs.each do |slot|
       uri_id = slot.namespace_uri_id
       next if uri_id == NameTable::EMPTY_ID || uri_id == @xmlns_namespace_id

@@ -61,10 +61,14 @@ class Mica::XML::Reader
   # checked).
   @token_position : Core::Position? = nil
 
-  # True when XML 1.1 full normalization is being checked.
+  # True when XML 1.1 full normalization is being checked (an XML 1.1
+  # document read with `check_normalization`); set from the XML
+  # declaration.
+  @normalization_checked = false
+
   @[AlwaysInline]
   private def normalization_checked? : Bool
-    @xml11 && @options.check_normalization?
+    @normalization_checked
   end
 
   private def check_normalized_name(name_id : Int32) : Nil

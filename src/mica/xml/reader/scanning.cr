@@ -98,20 +98,37 @@ class Mica::XML::Reader
       syntax_error("Expected a name") unless CharClass.name_start_char?(code)
       @pos += length
     end
-    scan_name_chars(start, "Name")
+    # Fast path: an ASCII name that ends inside the buffer, within
+    # NAME_FAST_WINDOW bytes and the name limit, is scanned here; anything
+    # else continues in `scan_name_chars`.
+    buffer = @buffer
+    index = @pos
+    room = @options.max_name_bytes.to_i64 - (index - @mark - start) + 1
+    window = room.clamp(0_i64, NAME_FAST_WINDOW.to_i64).to_i32
+    stop = @limit - index > window ? index + window : @limit
+    index = Core::ByteScan.skip_while(buffer, index, stop) { |next_byte| CharClass.flags(next_byte) & CharClass::NAME_CHAR != 0 }
+    @pos = index
+    scan_name_chars(start, "Name") if index == stop || buffer[index] >= 0x80
     size = @pos - @mark - start
     syntax_error("Expected a name") if size == 0
+    if size > @options.max_name_bytes
+      limit_error("Name exceeds max_name_bytes (#{@options.max_name_bytes})")
+    end
     {start, size}
   end
+
+  # Bytes `scan_name_span` scans inline before handing a name to
+  # `scan_name_chars`.
+  private NAME_FAST_WINDOW = 256
 
   # Consumes NameChar characters of a name or name token that started at
   # *start* (relative to the mark).
   #
-  # ASCII name characters are skipped in runs with `Slice#index` over a
-  # window that ends at most `max_name_bytes + 1` bytes past the start and
-  # at most SCAN_CHUNK bytes ahead, so an over-long name stops at the limit
-  # and the budget is checked every chunk; non-ASCII characters are decoded
-  # and checked one at a time.
+  # ASCII name characters are skipped in runs over a bounds-checked window
+  # that ends at most `max_name_bytes + 1` bytes past the start and at most
+  # SCAN_CHUNK bytes ahead, so an over-long name stops at the limit and the
+  # budget is checked every chunk; non-ASCII characters are decoded and
+  # checked one at a time.
   private def scan_name_chars(start : Int32, what : String) : Nil
     max_name_bytes = @options.max_name_bytes
     loop do
@@ -124,13 +141,13 @@ class Mica::XML::Reader
         room = max_name_bytes.to_i64 - (@pos - @mark - start) + 1
         window = Math.min(Math.min(room, (@limit - @pos).to_i64), SCAN_CHUNK.to_i64).to_i32
         stop = @pos + window
-        run = @buffer[@pos, stop - @pos].index { |next_byte| CharClass.flags(next_byte) & CharClass::NAME_CHAR == 0 }
-        if run
-          @pos += run
+        buffer = @buffer
+        index = Core::ByteScan.skip_while(buffer, @pos, stop) { |byte| CharClass.flags(byte) & CharClass::NAME_CHAR != 0 }
+        @pos = index
+        if index < stop
           # An ASCII byte ends the name; a non-ASCII byte is decoded next.
-          break if @buffer[@pos] < 0x80
+          break if buffer[index] < 0x80
         else
-          @pos = stop
           scan_checkpoint
         end
       else

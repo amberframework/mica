@@ -102,7 +102,7 @@ module Mica::XML
 
     # Returns true when *element_name_id* has attribute declarations.
     def declares_attributes?(element_name_id : Int32) : Bool
-      @elements_with_attributes.includes?(element_name_id)
+      !@elements_with_attributes.empty? && @elements_with_attributes.includes?(element_name_id)
     end
 
     # Returns the declaration of attribute *attribute_name_id* on

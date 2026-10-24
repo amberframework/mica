@@ -50,6 +50,7 @@ class Mica::XML::Reader
     end
     expect_literal("?>", "to close the XML declaration")
     @xml11 = @xml_version == "1.1"
+    @normalization_checked = @xml11 && @options.check_normalization?
     charge(@pos - @mark + TOKEN_OPERATIONS)
     @mark = @pos
     apply_declared_encoding(declared_encoding) if declared_encoding
@@ -77,7 +78,8 @@ class Mica::XML::Reader
   # Parses `S? '=' S? ("value" | 'value')` inside the XML declaration.
   private def parse_declaration_value(what : String) : String
     skip_spaces
-    expect_byte('=', "after '#{what}'")
+    syntax_error("Expected '=' after '#{what}'") unless peek_byte == '='.ord
+    @pos += 1
     skip_spaces
     quote = peek_byte
     unless quote == '"'.ord || quote == '\''.ord
@@ -180,8 +182,8 @@ class Mica::XML::Reader
   # Ends the document: every element must be closed and a root must exist.
   private def finish_document : Nil
     if @phase.content?
-      if open_id = @open_names.last?
-        syntax_error("Unexpected end of document: element '#{@names[open_id]}' is not closed")
+      if open_element = @open_elements.last?
+        syntax_error("Unexpected end of document: element '#{@names[open_element.name_id]}' is not closed")
       end
     end
     syntax_error("Document has no root element") unless @root_seen
