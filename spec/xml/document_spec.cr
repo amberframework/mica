@@ -137,4 +137,22 @@ describe Mica::XML::Document do
       root_of(document).to_xml(indent: 0).should eq(expected)
     end
   end
+
+  describe "Mica::XML::Document bounds" do
+    it_satisfies "MICA-MEMORY-SAFETY", "raises IndexError for node indexes outside the document" do
+      document = Mica::XML.parse("<a><b/></a>")
+      document.data(0).kind.should eq(Mica::XML::Node::Type::DOCUMENT_NODE)
+      expect_raises(IndexError) { document.data(-1) }
+      expect_raises(IndexError) { document.data(document.node_count) }
+      expect_raises(IndexError) { document.data(Int32::MAX) }
+    end
+
+    it_satisfies "MICA-MEMORY-SAFETY", "stores nodes across many pages" do
+      count = 10_000
+      document = Mica::XML.parse("<r>#{"<i/>" * count}</r>")
+      document.node_count.should eq(count + 2)
+      document.xpath_nodes("/r/i").size.should eq(count)
+      document.data(document.node_count - 1).kind.should eq(Mica::XML::Node::Type::ELEMENT_NODE)
+    end
+  end
 end

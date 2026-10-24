@@ -183,6 +183,14 @@ describe Mica::Core::UTF8 do
     Mica::Core::UTF8.first_invalid_offset(Bytes[0x61, 0xC3, 0xA9, 0xFF, 0x61]).should eq(3)
     Mica::Core::UTF8.decode(Bytes.empty).should eq({Mica::Core::UTF8::Problem::Truncated.value, 0})
   end
+
+  it_satisfies "MICA-MEMORY-SAFETY", "never reads past the limit it is given" do
+    bytes = "\u20AC\u20AC".to_slice
+    Mica::Core::UTF8.decode(bytes, 3, 6).should eq({0x20AC, 3})
+    Mica::Core::UTF8.decode(bytes, 3, 5).should eq({Mica::Core::UTF8::Problem::Truncated.value, 0})
+    Mica::Core::UTF8.decode(bytes, 6, 6).should eq({Mica::Core::UTF8::Problem::Truncated.value, 0})
+    expect_raises(IndexError) { Mica::Core::UTF8.decode(bytes[0, 4], 3, 9) }
+  end
 end
 
 describe Mica::Core::Encoding do
@@ -198,8 +206,9 @@ describe Mica::Core::Encoding do
   end
 end
 
-private def transcode(bytes : Bytes, encoding : Mica::Core::Encoding, chunk : Int32 = 4096) : Bytes
-  transcoder = Mica::Core::Transcoder.new(IO::Memory.new(bytes), encoding)
+private def transcode(bytes : Bytes, encoding : Mica::Core::Encoding, chunk : Int32 = 4096, source_chunk : Int32? = nil) : Bytes
+  source = source_chunk ? TrickleIO.new(bytes, source_chunk) : IO::Memory.new(bytes)
+  transcoder = Mica::Core::Transcoder.new(source, encoding)
   output = IO::Memory.new
   buffer = Bytes.new(chunk)
   while (count = transcoder.read(buffer)) > 0
@@ -221,6 +230,11 @@ describe Mica::Core::Transcoder do
     }.each do |encoding, encoded|
       {1, 2, 3, 4, 5, 4096}.each do |chunk|
         String.new(transcode(encoded, encoding, chunk)).should eq(sample)
+      end
+      # A source that returns 1 to 3 bytes per read leaves partial code
+      # units behind, so refill moves overlapping ranges.
+      {1, 2, 3}.each do |source_chunk|
+        String.new(transcode(encoded, encoding, 5, source_chunk)).should eq(sample)
       end
       decoded = transcode(encoded, encoding)
       Mica::Core::Transcoder.source_size(encoding, decoded).should eq(encoded.size)

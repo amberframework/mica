@@ -55,11 +55,11 @@ module Mica::XML
     ]
     {% end %}
 
-    # TABLE has 256 entries and a UInt8 indexes at most 255, so the unchecked
-    # read is always in bounds.
+    # TABLE has 256 entries and a UInt8 indexes at most 255, so the
+    # compiler proves the bounds check redundant and removes it.
     @[AlwaysInline]
     def self.flags(byte : UInt8) : UInt8
-      TABLE.unsafe_fetch(byte)
+      TABLE[byte]
     end
 
     @[AlwaysInline]

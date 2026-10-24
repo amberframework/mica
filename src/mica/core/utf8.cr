@@ -63,17 +63,16 @@ module Mica::Core
     # Mica::Core::UTF8.decode(Bytes[0xC0, 0x80]) # => {2, 0} (Problem::Overlong)
     # ```
     def self.decode(bytes : Bytes) : {Int32, Int32}
-      return {Problem::Truncated.value, 0} if bytes.empty?
-      decode(bytes.to_unsafe, bytes.size)
+      decode(bytes, 0, bytes.size)
     end
 
-    # :nodoc:
-    #
-    # Pointer form used by scanners on their hot path. *available* must be
-    # at least 1 and no more than the bytes readable at *ptr*; the function
-    # reads `ptr[0]` to `ptr[available - 1]` at most.
-    def self.decode(ptr : UInt8*, available : Int32) : {Int32, Int32}
-      b0 = ptr[0].to_i32
+    # Decodes the sequence at *offset* in *bytes*, reading no byte at or
+    # past *limit* (at most `bytes.size`). Scanners call this form on their
+    # hot path with their buffer, position and fill level; every read is
+    # bounds-checked.
+    def self.decode(bytes : Bytes, offset : Int32, limit : Int32) : {Int32, Int32}
+      return {Problem::Truncated.value, 0} if offset >= limit
+      b0 = bytes[offset].to_i32
       return {b0, 1} if b0 < 0x80
       return {Problem::UnexpectedContinuation.value, 0} if b0 < 0xC0
       return {Problem::Overlong.value, 0} if b0 < 0xC2
@@ -83,20 +82,21 @@ module Mica::Core
       # prefix never depends on how many bytes follow it.
       index = 1
       while index < length
-        return {Problem::Truncated.value, 0} if index >= available
-        return {Problem::BadContinuation.value, 0} unless ptr[index] & 0xC0 == 0x80
+        return {Problem::Truncated.value, 0} if offset + index >= limit
+        return {Problem::BadContinuation.value, 0} unless bytes[offset + index] & 0xC0 == 0x80
         index += 1
       end
+      b1 = bytes[offset + 1].to_i32 & 0x3F
       case length
       when 2
-        {((b0 & 0x1F) << 6) | (ptr[1].to_i32 & 0x3F), 2}
+        {((b0 & 0x1F) << 6) | b1, 2}
       when 3
-        code = ((b0 & 0x0F) << 12) | ((ptr[1].to_i32 & 0x3F) << 6) | (ptr[2].to_i32 & 0x3F)
+        code = ((b0 & 0x0F) << 12) | (b1 << 6) | (bytes[offset + 2].to_i32 & 0x3F)
         return {Problem::Overlong.value, 0} if code < 0x800
         return {Problem::Surrogate.value, 0} if code >= 0xD800 && code <= 0xDFFF
         {code, 3}
       else
-        code = ((b0 & 0x07) << 18) | ((ptr[1].to_i32 & 0x3F) << 12) | ((ptr[2].to_i32 & 0x3F) << 6) | (ptr[3].to_i32 & 0x3F)
+        code = ((b0 & 0x07) << 18) | (b1 << 12) | ((bytes[offset + 2].to_i32 & 0x3F) << 6) | (bytes[offset + 3].to_i32 & 0x3F)
         return {Problem::Overlong.value, 0} if code < 0x10000
         return {Problem::OutOfRange.value, 0} if code > 0x10FFFF
         {code, 4}
@@ -152,13 +152,12 @@ module Mica::Core
     def self.first_invalid_offset(bytes : Bytes) : Int32?
       index = 0
       size = bytes.size
-      ptr = bytes.to_unsafe
       while index < size
-        if ptr[index] < 0x80
+        if bytes[index] < 0x80
           index += 1
           next
         end
-        _, length = decode(ptr + index, size - index)
+        _, length = decode(bytes, index, size)
         return index if length == 0
         index += length
       end

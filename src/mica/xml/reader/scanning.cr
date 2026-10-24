@@ -166,7 +166,7 @@ class Mica::XML::Reader
       encoding_error("Byte 0x#{hex_byte(lead)} is not valid in the declared US-ASCII encoding")
     end
     ensure_bytes(Core::UTF8.sequence_length(lead))
-    code, length = Core::UTF8.decode(@buffer.to_unsafe + @pos, @limit - @pos)
+    code, length = Core::UTF8.decode(@buffer, @pos, @limit)
     invalid_encoding(lead, code) if length == 0
     check_literal_char(code)
     {code, length}

@@ -41,3 +41,4 @@ MICA-CORE-LIMITS	core	Core enforces token, input-size and work limits for any fo
 MICA-TESTING-COMPLEXITY	testing	The complexity harness flags superlinear growth
 MICA-TESTING-FUZZ	testing	The fuzz harness is replayable and classifies crashes, overruns and nondeterminism
 MICA-TESTING-TRACEABILITY	testing	The traceability helper reports covered, uncovered and unknown ids
+MICA-MEMORY-SAFETY	memory safety	Scanners and storage read memory only through bounds-checked slices

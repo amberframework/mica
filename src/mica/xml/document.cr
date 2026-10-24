@@ -70,7 +70,7 @@ module Mica::XML
     # Declarations read from the internal subset.
     getter dtd : DTD = DTD.new
 
-    @pages = [] of Pointer(NodeData)
+    @pages = [] of Page
     @size = 0
     @chunks = [] of Bytes
     @chunk_used = CHUNK_SIZE
@@ -252,17 +252,39 @@ module Mica::XML
     # that was never allocated.
     @[AlwaysInline]
     def data(index : Int32) : NodeData
-      data_pointer(index).value
+      check_index(index)
+      @pages[index >> PAGE_BITS][index & PAGE_MASK]
     end
 
-    # Pages are raw PAGE_SIZE-record allocations (atomic, so the GC never
-    # scans them). The bounds check against `@size` keeps every pointer
-    # inside an allocated page: a record below `@size` lives in page
-    # `index >> PAGE_BITS`, which exists, at an offset below PAGE_SIZE.
+    # One page of PAGE_SIZE node records. The records live inline in a
+    # StaticArray, so an offset masked with PAGE_MASK is provably in bounds
+    # and the compiler drops the check; no raw pointers are involved.
+    # Records are written by `add_node` before anything reads them (reads
+    # are limited to indexes below `@size`).
+    private class Page
+      @records = uninitialized StaticArray(NodeData, PAGE_SIZE)
+
+      @[AlwaysInline]
+      def [](offset : Int32) : NodeData
+        @records[offset]
+      end
+
+      @[AlwaysInline]
+      def []=(offset : Int32, record : NodeData) : NodeData
+        @records[offset] = record
+      end
+    end
+
     @[AlwaysInline]
-    private def data_pointer(index : Int32) : Pointer(NodeData)
+    private def check_index(index : Int32) : Nil
       raise IndexError.new("Node index #{index} out of range") unless index >= 0 && index < @size
-      @pages[index >> PAGE_BITS] + (index & PAGE_MASK)
+    end
+
+    # Replaces the record of node *index*.
+    @[AlwaysInline]
+    private def write_data(index : Int32, record : NodeData) : Nil
+      check_index(index)
+      @pages[index >> PAGE_BITS][index & PAGE_MASK] = record
     end
 
     # :nodoc:
@@ -299,14 +321,14 @@ module Mica::XML
         if index == Int32::MAX & ~PAGE_MASK
           raise Error.new("Document exceeds the maximum node count")
         end
-        @pages << Pointer(NodeData).malloc(PAGE_SIZE)
+        @pages << Page.new
       end
       @size += 1
       record = NodeData.new(kind)
       record.parent = parent
       record.name_id = name_id
       record.namespace_uri_id = namespace_uri_id
-      data_pointer(index).value = record
+      write_data(index, record)
       store_value(index, value) unless value.empty?
       index
     end
@@ -337,16 +359,14 @@ module Mica::XML
         ref = ((@chunks.size - 1) << CHUNK_BITS) + @chunk_used
         @chunk_used += size
       end
-      pointer = data_pointer(index)
-      record = pointer.value
+      record = data(index)
       record.value_ref = ref
       record.value_size = size
-      pointer.value = record
+      write_data(index, record)
     end
 
     private def link_child(parent : Int32, child : Int32) : Nil
-      parent_pointer = data_pointer(parent)
-      parent_record = parent_pointer.value
+      parent_record = data(parent)
       last = parent_record.last_child
       if last < 0
         parent_record.first_child = child
@@ -355,7 +375,7 @@ module Mica::XML
         update(child) { |record| record.previous_sibling = last; record }
       end
       parent_record.last_child = child
-      parent_pointer.value = parent_record
+      write_data(parent, parent_record)
       update(child) { |record| record.parent = parent; record }
     end
 
@@ -371,9 +391,7 @@ module Mica::XML
     # Applies a change to the record of node *index*.
     @[AlwaysInline]
     private def update(index : Int32, & : NodeData -> NodeData) : Nil
-      pointer = data_pointer(index)
-      record = pointer.value
-      pointer.value = yield record
+      write_data(index, yield data(index))
     end
 
     # --- Mutation (used by Mica::XML::Node) -------------------------------------

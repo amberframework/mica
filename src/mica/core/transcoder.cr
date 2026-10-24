@@ -181,7 +181,8 @@ module Mica::Core
     private def refill(needed : Int32) : Nil
       return if @eof
       remaining = @input_end - @input_start
-      @input.copy_from(@input.to_unsafe + @input_start, remaining) if remaining > 0
+      # The ranges can overlap, so move (memmove), never copy.
+      @input[0, remaining].move_from(@input[@input_start, remaining]) if remaining > 0
       @input_start = 0
       @input_end = remaining
       while @input_end < needed

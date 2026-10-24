@@ -95,9 +95,9 @@ module Mica::Core
         discarding_input(keep)
         count = @limit - keep
         @input_bytes_moved += count
-        # Overlapping move inside one buffer: both ranges lie in
-        # [0, @limit), which is within @buffer.size.
-        @buffer.to_unsafe.move_from(@buffer.to_unsafe + keep, count) if count > 0
+        # Overlapping ranges inside one buffer: move (memmove) through
+        # bounds-checked subslices.
+        @buffer[0, count].move_from(@buffer[keep, count]) if count > 0
         @base_offset += keep
         @pos -= keep
         @limit -= keep

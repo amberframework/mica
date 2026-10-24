@@ -206,15 +206,13 @@ class Mica::XML::Reader
     in_scratch = false
     scratch_start = @scratch_size
     loop do
-      # Hot loop: `pos < stop <= @limit <= @buffer.size`, so every read
-      # through the raw pointer is in bounds.
-      ptr = @buffer.to_unsafe
+      # Hot loop: `Slice#index` walks a bounds-checked window of at most
+      # SCAN_CHUNK bytes.
       pos = @pos
       limit = @limit
       stop = limit - pos > SCAN_CHUNK ? pos + SCAN_CHUNK : limit
-      while pos < stop && CharClass.flags(ptr[pos]) & CharClass::ATTR_STOP == 0
-        pos += 1
-      end
+      found = @buffer[pos, stop - pos].index { |byte| CharClass.flags(byte) & CharClass::ATTR_STOP != 0 }
+      pos = found ? pos + found : stop
       @pos = pos
       if pos >= stop
         if pos < limit
@@ -224,7 +222,7 @@ class Mica::XML::Reader
         syntax_error("Unterminated attribute value") unless fill
         next
       end
-      byte = ptr[pos]
+      byte = @buffer[pos]
       if byte == quote
         break
       end
@@ -381,14 +379,13 @@ class Mica::XML::Reader
     segment = start
     in_scratch = false
     loop do
-      # Hot loop: `pos < stop <= @limit <= @buffer.size`.
-      ptr = @buffer.to_unsafe
+      # Hot loop: `Slice#index` walks a bounds-checked window of at most
+      # SCAN_CHUNK bytes.
       pos = @pos
       limit = @limit
       stop = limit - pos > SCAN_CHUNK ? pos + SCAN_CHUNK : limit
-      while pos < stop && CharClass.flags(ptr[pos]) & CharClass::TEXT_STOP == 0
-        pos += 1
-      end
+      found = @buffer[pos, stop - pos].index { |byte| CharClass.flags(byte) & CharClass::TEXT_STOP != 0 }
+      pos = found ? pos + found : stop
       @pos = pos
       if pos >= stop
         if pos < limit
@@ -398,7 +395,7 @@ class Mica::XML::Reader
         break unless fill
         next
       end
-      byte = ptr[pos]
+      byte = @buffer[pos]
       case byte
       when '<'.ord
         break
@@ -566,14 +563,13 @@ class Mica::XML::Reader
     scratch_start = @scratch_size
     end_offset = 0
     loop do
-      # Hot loop: `pos < stop <= @limit <= @buffer.size`.
-      ptr = @buffer.to_unsafe
+      # Hot loop: `Slice#index` walks a bounds-checked window of at most
+      # SCAN_CHUNK bytes.
       pos = @pos
       limit = @limit
       stop = limit - pos > SCAN_CHUNK ? pos + SCAN_CHUNK : limit
-      while pos < stop && CharClass.flags(ptr[pos]) & CharClass::CONTENT_STOP == 0
-        pos += 1
-      end
+      found = @buffer[pos, stop - pos].index { |byte| CharClass.flags(byte) & CharClass::CONTENT_STOP != 0 }
+      pos = found ? pos + found : stop
       @pos = pos
       if pos >= stop
         if pos < limit
@@ -583,7 +579,7 @@ class Mica::XML::Reader
         syntax_error("Unterminated #{what}") unless fill
         next
       end
-      byte = ptr[pos]
+      byte = @buffer[pos]
       if byte == terminator
         case terminator
         when '-'.ord

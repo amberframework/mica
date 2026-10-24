@@ -176,7 +176,7 @@ class Mica::XML::Reader
       when '&'.ord
         if peek_byte_at(1) == '#'.ord
           @pos += 1
-          value << parse_char_reference.unsafe_chr
+          value << parse_char_reference.chr
         else
           @pos += 1
           start, size = scan_name_span
@@ -186,7 +186,7 @@ class Mica::XML::Reader
           value.write_byte(';'.ord.to_u8)
         end
       else
-        value << next_char.unsafe_chr
+        value << next_char.chr
       end
       check_token_size(value.bytesize)
     end
@@ -231,7 +231,7 @@ class Mica::XML::Reader
         @pos += 1
         break
       end
-      literal << next_char.unsafe_chr
+      literal << next_char.chr
       check_token_size(literal.bytesize)
     end
     literal.to_s
@@ -253,7 +253,7 @@ class Mica::XML::Reader
       end
       code = next_char
       syntax_error("Invalid character in public identifier") unless CharClass.pubid_char?(code)
-      literal << code.unsafe_chr
+      literal << code.chr
       check_token_size(literal.bytesize)
     end
     literal.to_s
