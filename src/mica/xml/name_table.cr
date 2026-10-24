@@ -90,7 +90,7 @@ module Mica::XML
         end
         if @hashes[id] == hash
           @operations += bytes.size
-          if @strings[id].to_slice == bytes
+          if same_bytes?(@strings[id], bytes)
             @operations += steps
             reseed if steps > MAX_PROBES
             return id
@@ -99,6 +99,12 @@ module Mica::XML
         index = (index + 1) & @mask
         steps += 1
       end
+    end
+
+    # Names are short: an in-place byte comparison beats memcmp here.
+    @[AlwaysInline]
+    private def same_bytes?(string : String, bytes : Bytes) : Bool
+      string.bytesize == bytes.size && Core::ByteScan.matches?(bytes, 0, string.to_slice)
     end
 
     # Returns the id of *string*, adding it if needed.
@@ -118,7 +124,7 @@ module Mica::XML
         return -1 if id < 0
         if @hashes[id] == hash
           @operations += bytes.size
-          return id if @strings[id].to_slice == bytes
+          return id if same_bytes?(@strings[id], bytes)
         end
         index = (index + 1) & @mask
       end

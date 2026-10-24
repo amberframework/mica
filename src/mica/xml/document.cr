@@ -155,6 +155,9 @@ module Mica::XML
       depth = reader.event_depth
       name_id = reader.event_name_id
       namespace_uri_id = reader.event_namespace_uri_id
+      # The reader already returned this element: charge its copy here, as
+      # add_event does for the rest.
+      reader.charge(1 + attribute_bytes(reader))
       element = add_element(reader, 0)
       unless reader.empty_element?
         parent = element
@@ -356,7 +359,8 @@ module Mica::XML
         record.value_ref = copy_value(value)
         record.value_size = value.size
       end
-      write_data(index, record)
+      # index is @size - 1, so only the page lookup needs its check.
+      @pages[index >> PAGE_BITS][index & PAGE_MASK] = record
       index
     end
 
@@ -400,8 +404,7 @@ module Mica::XML
         @chunks << Bytes.new(CHUNK_SIZE)
         @chunk_used = 0
       end
-      chunk = @chunks.last
-      chunk[@chunk_used, size].copy_from(value)
+      Core::ByteScan.copy_into(@chunks.last, @chunk_used, value)
       ref = ((@chunks.size - 1) << CHUNK_BITS) + @chunk_used
       @chunk_used += size
       ref

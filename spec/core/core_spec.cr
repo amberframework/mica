@@ -227,6 +227,16 @@ describe Mica::Core::ByteScan do
     expect_raises(IndexError) { Mica::Core::ByteScan.matches?(bytes, 6, "a>".to_slice) }
     expect_raises(IndexError) { Mica::Core::ByteScan.matches?(bytes, -1, "a".to_slice) }
   end
+
+  it_satisfies "MICA-MEMORY-SAFETY", "copies only inside a window it checks first" do
+    target = Bytes.new(4)
+    Mica::Core::ByteScan.copy_into(target, 1, "ab".to_slice)
+    target.should eq(Bytes[0, 97, 98, 0])
+    Mica::Core::ByteScan.copy_into(target, 4, Bytes.empty)
+    expect_raises(IndexError) { Mica::Core::ByteScan.copy_into(target, 3, "ab".to_slice) }
+    expect_raises(IndexError) { Mica::Core::ByteScan.copy_into(target, -1, "a".to_slice) }
+    expect_raises(IndexError) { Mica::Core::ByteScan.copy_into("abcd".to_slice, 0, "x".to_slice) }
+  end
 end
 
 describe Mica::Core::Encoding do

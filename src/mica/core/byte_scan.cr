@@ -1,11 +1,11 @@
 module Mica::Core
-  # Byte-run scanning for the hot loops of format scanners (text runs,
-  # attribute values, names).
+  # Byte-run scanning and copying for the hot paths of format scanners and
+  # trees (text runs, attribute values, names, stored values).
   #
-  # This is the one place in Mica that reads bytes without a bounds check
-  # on every read: each method checks its whole window against the slice
-  # once, before its loop, and the loop index never leaves that window.
-  # Everything else reads through checked `Slice` indexing.
+  # This is the one place in Mica that touches bytes without a bounds check
+  # on every access: each method checks its whole window against the slice
+  # once, before it reads or writes, and never leaves that window.
+  # Everything else goes through checked `Slice` indexing.
   module ByteScan
     # Returns the index of the first byte in `bytes[from...stop]` for which
     # the block returns false, or *stop* when it returns true for all of
@@ -48,6 +48,27 @@ module Mica::Core
         index += 1
       end
       true
+    end
+
+    # Copies all of *source* into *target* starting at *offset*, without
+    # building a subslice. Raises `IndexError` unless
+    # `0 <= offset <= target.size - source.size`, and when *target* is
+    # read-only.
+    #
+    # ```
+    # target = Bytes.new(4)
+    # Mica::Core::ByteScan.copy_into(target, 1, "ab".to_slice)
+    # target # => Bytes[0, 97, 98, 0]
+    # ```
+    @[AlwaysInline]
+    def self.copy_into(target : Bytes, offset : Int32, source : Bytes) : Nil
+      size = source.size
+      unless 0 <= offset && offset <= target.size - size
+        raise IndexError.new("Window #{offset}...#{offset + size} is outside 0...#{target.size}")
+      end
+      raise IndexError.new("Copy into a read-only slice") if target.read_only?
+      # offset + size <= target.size: the copy stays inside target.
+      source.copy_to(target.to_unsafe + offset, size)
     end
   end
 end
