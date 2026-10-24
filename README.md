@@ -181,7 +181,7 @@ All errors inherit from `Mica::Error`:
 | Error | Raised for |
 |---|---|
 | `Mica::ParseError` | well-formedness or namespace errors; has `position` (`byte_offset`, `line_number`, `column_number` in characters) and `detail` |
-| `Mica::EncodingError` | unsupported encodings and invalid UTF-8, UTF-16 or UTF-32, at the exact source byte (subclass of `ParseError`) |
+| `Mica::EncodingError` | unsupported encodings and invalid UTF-8 or UTF-16, at the exact source byte (subclass of `ParseError`) |
 | `Mica::LimitExceededError` | a `ParserOptions` limit (subclass of `ParseError`) |
 | `Mica::WorkBudgetExceededError` | the work budget (subclass of `LimitExceededError`) |
 | `Mica::DeadlineExceededError` | the deadline (subclass of `LimitExceededError`) |
@@ -191,12 +191,13 @@ All errors inherit from `Mica::Error`:
 
 ## Encodings
 
-UTF-8 (with or without a byte order mark), UTF-16 and UTF-32 (big or little
-endian, byte order mark required) and ISO-8859-1 are decoded in Crystal;
+`Mica::XML` decodes UTF-8 (with or without a byte order mark), UTF-16 (big
+or little endian, byte order mark required) and ISO-8859-1 in Crystal;
 `US-ASCII` is accepted and enforced. Invalid input is never replaced with
 U+FFFD: it raises `Mica::EncodingError` at the offset of the bad byte in the
-original input. Any other declared encoding raises `Mica::EncodingError`
-naming it.
+original input. UTF-32, EBCDIC and any other declared encoding raise
+`Mica::EncodingError` naming it. (`Mica::Core::Transcoder` also decodes
+UTF-32, for formats that allow it.)
 
 ## XML 1.1
 
