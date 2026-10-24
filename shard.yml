@@ -1,0 +1,19 @@
+name: mica
+version: 0.1.0
+
+authors:
+  - AgentC Consulting <agent_c@agentc.consulting>
+
+description: |
+  Pure-Crystal XML 1.0 and Namespaces parser, streaming reader, DOM, builder and
+  XPath 1.0 for the Amber ecosystem. Secure by default; no libxml2.
+
+crystal: ">= 1.21.0, < 2.0.0"
+
+license: MIT
+
+development_dependencies:
+  ameba:
+    github: crystal-ameba/ameba
+    # Crystal 1.21 compatible pre-1.7.0 commit (same pin as micrate).
+    commit: cdd58b34b0d8a9c785d67183a7a8f07541549e55
