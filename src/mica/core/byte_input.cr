@@ -193,6 +193,12 @@ module Mica::Core
       @source_prefix_bytes + base + pos
     end
 
+    # Same; an untranscoded offset maps without scanning, so the step block
+    # is never called.
+    private def source_offset_at(buffer : Bytes, pos : Int32, base : Int64, & : Int32 ->) : Int64
+      @source_prefix_bytes + base + pos
+    end
+
     # :nodoc:
     #
     # Returns the bytes copied while compacting or growing the buffer. Each

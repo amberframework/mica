@@ -260,6 +260,8 @@ module Mica::XML::XPath
     private def resolve(test : NodeTest) : Matcher
       local_id = -1
       uri_id = NameTable::EMPTY_ID
+      # Name lookups hash and compare their bytes: charge that work too.
+      name_operations = @names.operations
       if local = test.local
         local_id = @names.lookup(local.to_slice) unless test.kind.pi?
       end
@@ -268,6 +270,7 @@ module Mica::XML::XPath
         uri_id = @names.lookup(uri.to_slice)
         uri_id = -2 if uri_id < 0
       end
+      charge(@names.operations - name_operations)
       Matcher.new(test.kind, local_id, uri_id, test.kind.pi? ? test.local : nil)
     end
 

@@ -335,7 +335,7 @@ describe "Mica::Core::Transcoder reads" do
 end
 
 describe Mica::Core::ByteSearch do
-  it_satisfies "MICA-LINEAR-SEARCH", "finds the same offsets as the standard library in at most 2(n + m) steps" do
+  it_satisfies "MICA-LINEAR-SEARCH", "finds the same offsets as the standard library in at most 2n + 3m steps" do
     random = Random::PCG32.new(42_u64)
     2_000.times do
       haystack = String.build { |io| random.rand(64).times { io << "ab"[random.rand(2)] } }
@@ -343,7 +343,7 @@ describe Mica::Core::ByteSearch do
       steps = 0
       found = Mica::Core::ByteSearch.index(haystack.to_slice, needle.to_slice) { |count| steps += count }
       found.should eq(haystack.byte_index(needle))
-      steps.should be <= 2 * (haystack.bytesize + needle.bytesize)
+      steps.should be <= 2 * haystack.bytesize + 3 * needle.bytesize
     end
     Mica::Core::ByteSearch.index("abc".to_slice, Bytes.empty).should eq(0)
     reports = [] of Int32

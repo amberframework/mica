@@ -36,6 +36,12 @@ module Mica::XML
     @reseeds = 0
     @fixed_seed = false
 
+    # Called with the work a rehash is about to do (slots allocated plus
+    # names placed, and the name bytes rehashed when reseeding) before it
+    # starts, so the owner's work meter can stop it first. The reader that
+    # fills the table sets it.
+    property before_rebuild : Proc(Int64, Nil)? = nil
+
     @strings : Array(String)
     @hashes : Array(UInt32)
     @local_ids : Array(Int32)
@@ -209,6 +215,9 @@ module Mica::XML
     private def reseed : Nil
       @reseeds += 1
       raise Mica::Error.new("Name table hash collisions persist after #{MAX_RESEEDS} reseeds") if @reseeds > MAX_RESEEDS
+      if hook = @before_rebuild
+        hook.call(@strings.sum(0_i64) { |string| string.bytesize.to_i64 + 1 })
+      end
       @seed = @fixed_seed ? mix_seed(@seed &+ @reseeds) : Random::Secure.rand(UInt32)
       @strings.each_with_index do |string, id|
         @probes += string.bytesize
@@ -219,6 +228,9 @@ module Mica::XML
     end
 
     private def rebuild(new_size : Int32) : Nil
+      if hook = @before_rebuild
+        hook.call(new_size.to_i64 + @hashes.size)
+      end
       @slots = Slice(Int32).new(new_size, -1)
       @mask = new_size - 1
       @hashes.each_with_index do |hash, id|

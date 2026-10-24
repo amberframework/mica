@@ -94,7 +94,9 @@ describe "Mica::XML linear time (operation counts at n and 4n)" do
     it_satisfies "MICA-LINEAR-CVE-2024-35176", "rejects a '<' in an attribute value at the first one, whatever follows" do
       list_of_operations = {1_000, 4_000, 16_000}.map do |count|
         meter = Mica::Core::WorkMeter.new(Mica::Core::WorkBudget.unlimited)
-        error = expect_raises(Mica::ParseError, /</) { Mica::XML.parse(%(<a v="x) + "<" * count + %("/>), OPEN, meter) }
+        # A fixed name seed: name-table probe counts depend on the seed.
+        reader = Mica::XML::Reader.new(%(<a v="x) + "<" * count + %("/>), OPEN, meter, name_seed: 1_u32)
+        error = expect_raises(Mica::ParseError, /</) { reader.read }
         error.byte_offset.should eq(7)
         meter.operations
       end

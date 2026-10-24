@@ -23,14 +23,14 @@ class Mica::XML::Reader
         check_normalized(attribute_value_bytes(slot), "attribute value")
       end
     when .text?, .significant_whitespace?
-      check_normalized(value_bytes, "character content", value_position)
+      check_normalized_value("character content")
     when .cdata?
-      check_normalized(value_bytes, "CDATA section", value_position)
+      check_normalized_value("CDATA section")
     when .comment?
-      check_normalized(value_bytes, "comment", value_position)
+      check_normalized_value("comment")
     when .processing_instruction?
       check_normalized_name(@name_id)
-      check_normalized(value_bytes, "processing instruction", value_position)
+      check_normalized_value("processing instruction")
     end
   end
 
@@ -39,11 +39,21 @@ class Mica::XML::Reader
   # the token (or, inside entity replacement text, the reference).
   private def value_position : Core::Position
     start = @token_position || return error_position
-    return start if !@frames.empty? || @value_in_scratch
+    return start unless value_in_buffer?
+    position_after(start, @mark, @mark + @value_start)
+  end
+
+  # True when the current value is the bytes `@buffer[@mark + @value_start,
+  # size]`, unchanged from the source, so positions inside it are exact.
+  private def value_in_buffer? : Bool
+    @frames.empty? && !@value_in_scratch && !@token_position.nil?
+  end
+
+  # Returns *start* (the position of buffer byte *index*) advanced over the
+  # buffer bytes from *index* to *stop*.
+  private def position_after(start : Core::Position, index : Int32, stop : Int32) : Core::Position
     line = start.line
     column = start.column
-    index = @mark
-    stop = @mark + @value_start
     while index < stop
       byte = @buffer[index]
       if byte == 0x0A || (byte == 0x0D && !(index + 1 < stop && @buffer[index + 1] == 0x0A))
@@ -77,17 +87,60 @@ class Mica::XML::Reader
     @normalized_name_ids << name_id
   end
 
+  # Checks the current event's value; an error points at the offending
+  # character when the value lies unchanged in the buffer.
+  private def check_normalized_value(construct : String) : Nil
+    bytes = value_bytes
+    start = value_position
+    return check_normalized(bytes, construct, start) unless value_in_buffer?
+    value_index = @mark + @value_start
+    check_normalized(bytes, construct, start) do |offending|
+      position_after(start, value_index, value_index + offending)
+    end
+  end
+
   # Raises `NormalizationError` at *position* (default: here) unless
   # *bytes* are NFC and start with a non-composing character.
   private def check_normalized(bytes : Bytes, construct : String, position : Core::Position? = nil) : Nil
+    check_normalized(bytes, construct, position) { position || error_position }
+  end
+
+  # Same; on failure the block gets the byte index in *bytes* of the
+  # offending character and returns the position to report.
+  private def check_normalized(bytes : Bytes, construct : String, position : Core::Position?, & : Int32 -> Core::Position) : Nil
     return if bytes.empty?
     charge(bytes.size.to_i64 * NORMALIZATION_OPERATIONS_PER_BYTE)
     code, length = Core::UTF8.decode(bytes)
     if length > 0 && ComposingCharacters.includes?(code)
       raise NormalizationError.new("The #{construct} starts with the composing character U+#{hex_code(code)} (XML 1.1 section 2.13)", position || error_position)
     end
-    text = String.new(bytes)
-    return if text.unicode_normalized?(:nfc)
-    raise NormalizationError.new("The #{construct} is not in Unicode Normalization Form C (XML 1.1 section 2.13)", position || error_position)
+    return if String.new(bytes).unicode_normalized?(:nfc)
+    raise NormalizationError.new("The #{construct} is not in Unicode Normalization Form C (XML 1.1 section 2.13)", yield offending_normalization_index(bytes))
+  end
+
+  # Returns the byte index of the character that makes *bytes* (known not
+  # to be NFC) fail: the bytes are split into segments of one
+  # non-composing character and the composing characters after it, and the
+  # first segment that is not NFC on its own is blamed. Within it, the
+  # first composing character is blamed when the leading character alone
+  # is NFC, otherwise the leading character. One pass, linear in the size.
+  private def offending_normalization_index(bytes : Bytes) : Int32
+    index = 0
+    while index < bytes.size
+      segment_start = index
+      _, length = Core::UTF8.decode(bytes, index, bytes.size)
+      index += Math.max(length, 1)
+      first_composing = index
+      while index < bytes.size
+        code, length = Core::UTF8.decode(bytes, index, bytes.size)
+        break unless length > 0 && ComposingCharacters.includes?(code)
+        index += length
+      end
+      next if String.new(bytes[segment_start, index - segment_start]).unicode_normalized?(:nfc)
+      return segment_start if first_composing == index
+      return segment_start unless String.new(bytes[segment_start, first_composing - segment_start]).unicode_normalized?(:nfc)
+      return first_composing
+    end
+    0
   end
 end

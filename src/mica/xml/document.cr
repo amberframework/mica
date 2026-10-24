@@ -79,6 +79,9 @@ module Mica::XML
     @merging_text_node = -1
     @text_merge_buffer = IO::Memory.new
     @order_dirty = false
+    # Attribute lookups for elements the edit API has touched, built on
+    # first use (see `AttributeIndex`).
+    @attribute_indexes = {} of Int32 => AttributeIndex
     @xmlns_namespace_id : Int32
     @xml_namespace_id : Int32
     @xml_prefix_id : Int32
@@ -102,6 +105,9 @@ module Mica::XML
       reader = Reader.new(source, options, meter)
       document = new(reader.names)
       document.build_from(reader)
+      # The finished document owns the names now: later edits are not
+      # charged to the parse's meter.
+      reader.names.before_rebuild = nil
       document
     end
 
@@ -140,7 +146,7 @@ module Mica::XML
       while reader.read
         parent = add_event(reader, parent)
       end
-      finish_text_merge
+      finish_text_merge(reader)
       copy_prolog(reader)
       @parse_operations = reader.operations - start
     end
@@ -165,7 +171,7 @@ module Mica::XML
           break if reader.event_type.end_element? && reader.event_depth == depth
           parent = add_event(reader, parent)
         end
-        finish_text_merge
+        finish_text_merge(reader)
       end
       reader.finish_expand(name_id, namespace_uri_id, depth)
     end
@@ -186,7 +192,7 @@ module Mica::XML
     # tag only moves to the parent; the reader's per-token charge covers it.
     private def add_event(reader : Reader, parent : Int32) : Int32
       type = reader.event_type
-      finish_text_merge_before(type)
+      finish_text_merge_before(reader, type)
       case type
       when .element?
         reader.charge(1 + attribute_bytes(reader))
@@ -205,7 +211,7 @@ module Mica::XML
         reader.charge(1 + value.size)
         case type
         when .text?, .significant_whitespace?
-          add_text(parent, value)
+          add_text(reader, parent, value)
         when .cdata?
           append_new(Node::Type::CDATA_SECTION_NODE, parent, 0, 0, value)
         when .comment?
@@ -241,12 +247,14 @@ module Mica::XML
 
     # Adds text under *parent*. Adjacent text events (around entity
     # boundaries) merge into one node; the merged text is collected in a
-    # buffer and stored once, so merging stays linear.
+    # buffer and stored once, so merging stays linear. Each copy is charged
+    # before it happens (the new bytes are charged with their event).
     @[AlwaysInline]
-    private def add_text(parent : Int32, bytes : Bytes) : Nil
+    private def add_text(reader : Reader, parent : Int32, bytes : Bytes) : Nil
       last = data(parent).last_child
       if last >= 0 && data(last).kind.text_node?
         if @merging_text_node != last
+          reader.charge(value_bytes(last).size)
           @text_merge_buffer.clear
           @text_merge_buffer.write(value_bytes(last))
           @merging_text_node = last
@@ -257,14 +265,15 @@ module Mica::XML
       append_new(Node::Type::TEXT_NODE, parent, 0, 0, bytes)
     end
 
-    private def finish_text_merge_before(type : Reader::Type) : Nil
+    private def finish_text_merge_before(reader : Reader, type : Reader::Type) : Nil
       return if @merging_text_node < 0
-      finish_text_merge unless type.text? || type.significant_whitespace?
+      finish_text_merge(reader) unless type.text? || type.significant_whitespace?
     end
 
-    private def finish_text_merge : Nil
+    private def finish_text_merge(reader : Reader) : Nil
       node = @merging_text_node
       return if node < 0
+      reader.charge(@text_merge_buffer.bytesize)
       store_value(node, @text_merge_buffer.to_slice)
       @merging_text_node = -1
       @text_merge_buffer.clear
@@ -445,6 +454,10 @@ module Mica::XML
       previous = record.previous_sibling
       following = record.next_sibling
       attribute = record.kind.attribute_node? || record.kind.namespace_decl?
+      if attribute_index = attribute_owner_index(record)
+        unindex_attribute(attribute_index, index)
+        attribute_index.tail = previous if attribute_index.tail == index
+      end
       if previous >= 0
         update(previous) { |sibling| sibling.next_sibling = following; sibling }
       elsif attribute
@@ -482,22 +495,93 @@ module Mica::XML
 
     # :nodoc:
     #
+    # The attribute list of one edited element, indexed so that each edit
+    # costs O(1) expected instead of a walk over the list: the attribute (or
+    # namespace declaration) for each qualified name id, the attribute for
+    # each expanded name, and the list tail. Built once per element with
+    # one walk, then kept current by `append_attribute`, `unlink` and
+    # `rename`, so *n* edits on an element cost O(n + k) for *k* parsed
+    # attributes.
+    class AttributeIndex
+      getter by_name = {} of Int32 => Int32
+      getter by_expanded_name = {} of {Int32, Int32} => Int32
+      property tail : Int32 = -1
+    end
+
+    # :nodoc:
+    #
+    # Returns the attribute or namespace declaration of *element* named
+    # *name_id*, or nil.
+    def attribute_named(element : Int32, name_id : Int32) : Int32?
+      attribute_index(element).by_name[name_id]?
+    end
+
+    # :nodoc:
+    #
+    # Returns the attribute of *element* with the expanded name
+    # {*uri_id*, *local_id*}, or nil.
+    def attribute_with_expanded_name(element : Int32, uri_id : Int32, local_id : Int32) : Int32?
+      attribute_index(element).by_expanded_name[{uri_id, local_id}]?
+    end
+
+    private def attribute_index(element : Int32) : AttributeIndex
+      @attribute_indexes[element] ||= begin
+        index = AttributeIndex.new
+        current = data(element).first_attribute
+        while current >= 0
+          index_attribute(index, current)
+          index.tail = current
+          current = data(current).next_sibling
+        end
+        index
+      end
+    end
+
+    private def index_attribute(index : AttributeIndex, attribute : Int32) : Nil
+      record = data(attribute)
+      index.by_name[record.name_id] ||= attribute
+      if record.kind.attribute_node? && record.namespace_uri_id != NameTable::EMPTY_ID
+        index.by_expanded_name[{record.namespace_uri_id, @names.local_id(record.name_id)}] ||= attribute
+      end
+    end
+
+    private def unindex_attribute(index : AttributeIndex, attribute : Int32) : Nil
+      record = data(attribute)
+      index.by_name.delete(record.name_id) if index.by_name[record.name_id]? == attribute
+      key = {record.namespace_uri_id, @names.local_id(record.name_id)}
+      index.by_expanded_name.delete(key) if index.by_expanded_name[key]? == attribute
+    end
+
+    # :nodoc:
+    #
     # Adds an attribute (or namespace declaration) at the end of the
     # element's attribute list.
     def append_attribute(element : Int32, name_id : Int32, namespace_uri_id : Int32, value : String, kind : Node::Type) : Int32
-      last = -1
-      current = data(element).first_attribute
-      while current >= 0
-        last = current
-        current = data(current).next_sibling
-      end
-      attribute = add_attribute_node(kind, element, name_id, namespace_uri_id, value.to_slice, last)
+      index = attribute_index(element)
+      attribute = add_attribute_node(kind, element, name_id, namespace_uri_id, value.to_slice, index.tail)
+      index_attribute(index, attribute)
+      index.tail = attribute
       mark_order_dirty
       attribute
     end
 
     # :nodoc:
     def rename(index : Int32, name_id : Int32, namespace_uri_id : Int32) : Nil
+      record = data(index)
+      attribute_index = attribute_owner_index(record)
+      unindex_attribute(attribute_index, index) if attribute_index
+      write_rename(index, name_id, namespace_uri_id)
+      index_attribute(attribute_index, index) if attribute_index
+    end
+
+    # The index of the element owning attribute *record*, when one was built.
+    private def attribute_owner_index(record : NodeData) : AttributeIndex?
+      return unless record.kind.attribute_node? || record.kind.namespace_decl?
+      return if record.parent < 0
+      @attribute_indexes[record.parent]?
+    end
+
+    private def write_rename(index : Int32, name_id : Int32, namespace_uri_id : Int32) : Nil
       update(index) do |record|
         record.name_id = name_id
         record.namespace_uri_id = namespace_uri_id

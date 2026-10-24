@@ -45,8 +45,6 @@ module Mica::XML
 
     # :nodoc:
     #
-    # The saved state of an outer source while an entity's replacement text
-    # is being read.
     # An element whose end tag is still to come: its name, namespace, the
     # binding stack size before its declarations, and the entity nesting
     # level it started in.
@@ -56,6 +54,10 @@ module Mica::XML
       binding_mark : Int32,
       entity_level : Int32
 
+    # :nodoc:
+    #
+    # The saved state of an outer source while an entity's replacement text
+    # is being read.
     record SourceFrame,
       buffer : Bytes,
       pos : Int32,
@@ -177,6 +179,7 @@ module Mica::XML
     def initialize(bytes : Bytes, @options : ParserOptions = ParserOptions.default, meter : Core::WorkMeter? = nil, *, name_seed : UInt32? = nil)
       @meter = meter || Core::WorkMeter.new(@options.work_budget)
       @names = NameTable.new(name_seed)
+      @names.before_rebuild = ->(work : Int64) { charge(work) }
       @dtd = DTD.new
       @xmlns_id = @names.intern("xmlns")
       @xml_id = @names.intern("xml")
@@ -190,6 +193,7 @@ module Mica::XML
     def initialize(io : IO, @options : ParserOptions = ParserOptions.default, meter : Core::WorkMeter? = nil, *, name_seed : UInt32? = nil)
       @meter = meter || Core::WorkMeter.new(@options.work_budget)
       @names = NameTable.new(name_seed)
+      @names.before_rebuild = ->(work : Int64) { charge(work) }
       @dtd = DTD.new
       @xmlns_id = @names.intern("xmlns")
       @xml_id = @names.intern("xml")
@@ -419,9 +423,13 @@ module Mica::XML
     # Asking after every event stays linear overall (see
     # `Core::LineTracking`); the counting is charged to the work meter.
     def position : Core::Position
-      position = error_position
+      charged = 0_i64
+      position = error_position do |count|
+        charge(count)
+        charged += count
+      end
       steps = @column_steps + @offset_steps
-      charge(steps - @charged_position_steps + 1)
+      charge(steps - @charged_position_steps - charged + 1)
       @charged_position_steps = steps
       position
     end
@@ -542,12 +550,10 @@ module Mica::XML
     # work and the name-table work since the last charge.
     @[AlwaysInline]
     private def charge_token : Nil
-      name_operations = @names.operations
       scanned = @pos - @mark - @token_precharged
-      charge(scanned.to_i64 + TOKEN_OPERATIONS + (name_operations - @charged_name_operations) + @token_operations)
+      charge(scanned.to_i64 + discard_prepay(scanned) + TOKEN_OPERATIONS + take_name_operations + @token_operations)
       @token_precharged = 0
       @token_operations = 0_i64
-      @charged_name_operations = name_operations
     end
 
     # Core::ByteInput hooks.
@@ -564,6 +570,8 @@ module Mica::XML
       limit_error(message)
     end
 
+    # The folds below examine each discarded byte once; their work was
+    # prepaid when a token scanned those bytes (see `discard_prepay`).
     private def discarding_input(keep : Int32) : Nil
       fold_discarded_columns(@buffer, keep, @base_offset)
       account_transcoded_discard(keep)

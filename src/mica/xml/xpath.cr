@@ -88,13 +88,14 @@ module Mica::XML
     end
 
     # Parses *path*. Raises `Mica::XML::XPathError` on a syntax error or an
-    # unsupported feature. With *meter*, lexing and parsing are charged to
-    # it (one operation per byte and per token, with the expression's bytes
-    # as units) and stop with a positioned `Mica::LimitExceededError` when
-    # it runs out.
+    # unsupported feature. Lexing and parsing are charged to *meter* (one
+    # operation per character and per token, with the expression's bytes as
+    # units), or to a fresh meter on `DEFAULT_WORK_BUDGET`, and stop with a
+    # positioned `Mica::LimitExceededError` when it runs out.
     def self.compile(path : String, meter : Core::WorkMeter? = nil) : Expression
-      meter.try(&.add_units(path.bytesize))
-      Expression.new(path, Parser.new(path, meter).parse)
+      work_meter = meter || Core::WorkMeter.new(DEFAULT_WORK_BUDGET)
+      work_meter.add_units(path.bytesize)
+      Expression.new(path, Parser.new(path, work_meter).parse)
     end
 
     # :nodoc:

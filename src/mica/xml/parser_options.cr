@@ -48,7 +48,13 @@ module Mica::XML
     getter max_token_bytes : Int32
     # Maximum size in bytes of the whole input (decoded), or nil for no cap.
     getter max_input_bytes : Int64?
-    # The work budget and deadline every parse runs under.
+    # The work budget and deadline every parse runs under. The deadline is
+    # checked at work-budget checkpoints, after every IO read that returns,
+    # and at the start and end of the parse; it bounds the parser's own
+    # work. A read from a blocking IO that never returns cannot be
+    # interrupted, so for a guaranteed wall-clock bound over an untrusted
+    # stream give the IO its own read timeout (for example
+    # `Socket#read_timeout`).
     getter work_budget : Core::WorkBudget
     # Verifies XML 1.1 full normalization (section 2.13): every text,
     # attribute value, comment, PI, CDATA section and name is in Unicode

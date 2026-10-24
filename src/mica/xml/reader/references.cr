@@ -44,6 +44,8 @@ class Mica::XML::Reader
         limit_error("Entity references nested deeper than max_entity_depth (#{@options.max_entity_depth})")
       end
       charge_expansion(replacement.size)
+      # The copy into scratch is charged before it is made.
+      charge(replacement.size)
       append_scratch_bytes(replacement)
       return REFERENCE_INLINED
     end
@@ -93,6 +95,12 @@ class Mica::XML::Reader
       too_large = true if value > 0x10FFFF
       digits += 1
       @pos += 1
+      # Leading zeros make the digit run unbounded: keep it under the token
+      # limit and charge it every chunk.
+      if digits % SCAN_CHUNK == 0
+        check_token_size(@pos - @mark)
+        scan_checkpoint
+      end
     end
     syntax_error("Malformed character reference") if digits == 0
     expect_byte(';', "to end the character reference")

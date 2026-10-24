@@ -186,10 +186,8 @@ module Mica::XML
     private def check_attribute_rename(new_name : String, name_id : Int32, namespace_uri_id : Int32) : Nil
       owner = parent
       return unless owner
-      owner.each_attribute_index do |sibling|
-        next if sibling == @index
-        raise Error.new("Attribute #{new_name.inspect} already exists") if @document.data(sibling).name_id == name_id
-      end
+      sibling = @document.attribute_named(owner.index, name_id)
+      raise Error.new("Attribute #{new_name.inspect} already exists") if sibling && sibling != @index
       return if namespace_uri_id == NameTable::EMPTY_ID
       owner.check_expanded_name_for_rename(namespace_uri_id, names.local_id(name_id), @index)
     end
@@ -408,13 +406,9 @@ module Mica::XML
     # Raises when another attribute of this element has the expanded name
     # {*uri_id*, *local_id*}. *except* is an attribute index to ignore.
     private def check_unique_expanded_name(uri_id : Int32, local_id : Int32, except : Int32) : Nil
-      each_attribute_index do |attribute|
-        next if attribute == except
-        record = @document.data(attribute)
-        if record.namespace_uri_id == uri_id && names.local_id(record.name_id) == local_id
-          raise Error.new("An attribute with the same expanded name already exists")
-        end
-      end
+      existing = @document.attribute_with_expanded_name(@index, uri_id, local_id)
+      return if existing.nil? || existing == except
+      raise Error.new("An attribute with the same expanded name already exists")
     end
 
     # Removes attribute *name* and returns its value, or nil when missing.
@@ -430,10 +424,7 @@ module Mica::XML
       return unless element?
       id = names.lookup(name.to_slice)
       return if id < 0
-      each_attribute_index(include_declarations: true) do |attribute|
-        return attribute if @document.data(attribute).name_id == id
-      end
-      nil
+      @document.attribute_named(@index, id)
     end
 
     private def find_attribute(name : String) : Int32?

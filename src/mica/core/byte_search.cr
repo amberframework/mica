@@ -5,7 +5,9 @@ module Mica::Core
   # quadratic).
   #
   # The search is Knuth-Morris-Pratt over bytes: at most
-  # `2 * haystack.size + 2 * needle.size` comparisons. UTF-8 is
+  # `2 * haystack.size + 2 * needle.size` comparisons, plus `needle.size`
+  # steps for allocating the failure table, all reported to the step block
+  # before they happen. UTF-8 is
   # self-synchronizing, so a byte match of a valid UTF-8 needle in valid
   # UTF-8 text always starts on a character boundary.
   module ByteSearch
@@ -61,6 +63,14 @@ module Mica::Core
     # loop iteration either advances or shrinks `length`, so the loop runs
     # at most `2 * needle.size` times; the block gets the count in chunks.
     private def self.failure_table(needle : Bytes, & : Int32 ->) : Array(Int32)
+      # The table's allocation and zero fill are linear in the needle, so
+      # they are counted, in chunks, before they happen.
+      remaining = needle.size
+      while remaining > 0
+        chunk = Math.min(remaining, STEP_CHUNK)
+        yield chunk
+        remaining -= chunk
+      end
       table = Array(Int32).new(needle.size, 0)
       length = 0
       index = 1

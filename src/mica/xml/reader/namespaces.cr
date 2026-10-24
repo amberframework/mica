@@ -118,7 +118,10 @@ class Mica::XML::Reader
     end
   end
 
+  # Charged before popping, so a wide element's bindings cannot be undone
+  # past an exhausted budget.
   private def pop_bindings(binding_mark : Int32) : Nil
+    charge((@binding_prefixes.size - binding_mark).to_i64) if @binding_prefixes.size > binding_mark
     while @binding_prefixes.size > binding_mark
       prefix_id = @binding_prefixes.pop
       @binding_uris.pop

@@ -63,15 +63,15 @@ module Mica::Core
 
     # Adds the source size of the decoded bytes `@buffer[0, keep]` that are
     # about to be discarded, so later offsets map back exactly. Each byte is
-    # counted once.
-    private def account_transcoded_discard(keep : Int32) : Nil
+    # counted once. Returns the bytes examined, for the format to charge.
+    private def account_transcoded_discard(keep : Int32) : Int32
       encoding = @transcoded_from
-      return unless encoding
+      return 0 unless encoding
       from = @transcode_origin > @base_offset ? (@transcode_origin - @base_offset).to_i32 : 0
-      return unless from < keep
+      return 0 unless from < keep
       @source_bytes_before_buffer += Transcoder.source_size(encoding, @buffer[from, keep - from])
-      @offset_steps += keep - from
       @offset_cache_from = -1_i64
+      keep - from
     end
 
     # Returns the offset in the original input of byte *pos* of *buffer*,
@@ -83,6 +83,17 @@ module Mica::Core
     # the distance moved, not the distance from the buffer start; the bytes
     # examined are counted in `@offset_steps` for work accounting.
     private def source_offset_at(buffer : Bytes, pos : Int32, base : Int64) : Int64
+      source_offset_at(buffer, pos, base) { }
+    end
+
+    # Decoded bytes mapped between two calls of the step block of
+    # `source_offset_at`.
+    OFFSET_STEP_CHUNK = 65_536
+
+    # Same, calling the block with the decoded bytes examined at least
+    # every OFFSET_STEP_CHUNK bytes and before they are
+    # mapped, so a work meter can stop a long mapping partway.
+    private def source_offset_at(buffer : Bytes, pos : Int32, base : Int64, & : Int32 ->) : Int64
       absolute = base + pos
       encoding = @transcoded_from
       return @source_prefix_bytes + absolute if encoding.nil? || absolute <= @transcode_origin
@@ -94,8 +105,14 @@ module Mica::Core
         scan_from = (@offset_cache_absolute - base).to_i32
         size = @offset_cache_size
       end
-      size += Transcoder.source_size(encoding, buffer[scan_from, pos - scan_from])
-      @offset_steps += pos - scan_from
+      index = scan_from
+      while index < pos
+        chunk_end = pos - index > OFFSET_STEP_CHUNK ? index + OFFSET_STEP_CHUNK : pos
+        yield chunk_end - index
+        @offset_steps += chunk_end - index
+        size += Transcoder.source_size(encoding, buffer[index, chunk_end - index])
+        index = chunk_end
+      end
       @offset_cache_from = from_absolute
       @offset_cache_absolute = absolute
       @offset_cache_size = size

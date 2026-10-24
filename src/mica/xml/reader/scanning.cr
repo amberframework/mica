@@ -93,12 +93,15 @@ class Mica::XML::Reader
   @[AlwaysInline]
   private def scan_name_span : {Int32, Int32}
     start = @pos - @mark
+    max_name_bytes = @options.max_name_bytes
     if (byte = peek_byte) >= 0 && byte < 0x80
       syntax_error("Expected a name") if CharClass.flags(byte.to_u8) & CharClass::NAME_START == 0
+      name_limit_error("Name") if max_name_bytes < 1
       @pos += 1
     elsif byte >= 0x80
       code, length = decode_at_pos
       syntax_error("Expected a name") unless CharClass.name_start_char?(code)
+      name_limit_error("Name") if length > max_name_bytes
       @pos += length
     end
     # Fast path: an ASCII name that ends inside the buffer, within
@@ -106,17 +109,14 @@ class Mica::XML::Reader
     # else continues in `scan_name_chars`.
     buffer = @buffer
     index = @pos
-    room = @options.max_name_bytes.to_i64 - (index - @mark - start) + 1
-    window = room.clamp(0_i64, NAME_FAST_WINDOW.to_i64).to_i32
+    room = max_name_bytes - (index - @mark - start)
+    window = room < NAME_FAST_WINDOW ? room : NAME_FAST_WINDOW
     stop = @limit - index > window ? index + window : @limit
     index = Core::ByteScan.skip_while(buffer, index, stop) { |next_byte| CharClass.flags(next_byte) & CharClass::NAME_CHAR != 0 }
     @pos = index
     scan_name_chars(start, "Name") if index == stop || buffer[index] >= 0x80
     size = @pos - @mark - start
     syntax_error("Expected a name") if size == 0
-    if size > @options.max_name_bytes
-      limit_error("Name exceeds max_name_bytes (#{@options.max_name_bytes})")
-    end
     {start, size}
   end
 
@@ -128,24 +128,25 @@ class Mica::XML::Reader
   # *start* (relative to the mark).
   #
   # ASCII name characters are skipped in runs over a bounds-checked window
-  # that ends at most `max_name_bytes + 1` bytes past the start and at most
-  # SCAN_CHUNK bytes ahead, so an over-long name stops at the limit and the
+  # that ends at the name limit and at most SCAN_CHUNK bytes ahead, so the
   # budget is checked every chunk; non-ASCII characters are decoded and
-  # checked one at a time.
+  # checked one at a time. A name character that would take the name past
+  # `max_name_bytes` raises, positioned at that character.
   private def scan_name_chars(start : Int32, what : String) : Nil
     max_name_bytes = @options.max_name_bytes
     loop do
       if @pos >= @limit
         break unless fill
       end
-      if @buffer[@pos] < 0x80
-        # Room left under the name limit (plus the one byte that proves it
-        # exceeded), the bytes buffered and the scan chunk bound the run.
-        room = max_name_bytes.to_i64 - (@pos - @mark - start) + 1
-        window = Math.min(Math.min(room, (@limit - @pos).to_i64), SCAN_CHUNK.to_i64).to_i32
+      consumed = @pos - @mark - start
+      byte = @buffer[@pos]
+      if byte < 0x80
+        break if CharClass.flags(byte) & CharClass::NAME_CHAR == 0
+        name_limit_error(what) if consumed >= max_name_bytes
+        window = Math.min(Math.min(max_name_bytes - consumed, @limit - @pos), SCAN_CHUNK)
         stop = @pos + window
         buffer = @buffer
-        index = Core::ByteScan.skip_while(buffer, @pos, stop) { |byte| CharClass.flags(byte) & CharClass::NAME_CHAR != 0 }
+        index = Core::ByteScan.skip_while(buffer, @pos, stop) { |next_byte| CharClass.flags(next_byte) & CharClass::NAME_CHAR != 0 }
         @pos = index
         if index < stop
           # An ASCII byte ends the name; a non-ASCII byte is decoded next.
@@ -156,13 +157,15 @@ class Mica::XML::Reader
       else
         code, length = decode_at_pos
         break unless CharClass.name_char?(code)
+        name_limit_error(what) if consumed + length > max_name_bytes
         @pos += length
         scan_checkpoint if @pos - @mark - @token_precharged >= SCAN_CHUNK
       end
-      if @pos - @mark - start > max_name_bytes
-        limit_error("#{what} exceeds max_name_bytes (#{max_name_bytes})")
-      end
     end
+  end
+
+  private def name_limit_error(what : String) : NoReturn
+    limit_error("#{what} exceeds max_name_bytes (#{@options.max_name_bytes})")
   end
 
   # Scans a Name and interns it.

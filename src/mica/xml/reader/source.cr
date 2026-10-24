@@ -26,6 +26,10 @@ class Mica::XML::Reader
     count = 0
     while count < 4
       read = io.read(prefix[count, 4 - count])
+      # Checked after every read that returns. A read that blocks forever
+      # never returns, so a guaranteed wall-clock deadline also needs an IO
+      # with its own read timeout (see `ParserOptions#work_budget`).
+      @meter.enforce_deadline { Core::Position.new(count.to_i64) }
       break if read == 0
       count += read
     end
@@ -75,7 +79,7 @@ class Mica::XML::Reader
     # Charges the outer bytes scanned so far in this token (callers between
     # tokens move the mark to the position first) and the frame scan below,
     # which max_entity_depth bounds.
-    charge(@frames.size + @pos - @mark - @token_precharged + @token_operations)
+    charge(@frames.size + @pos - @mark - @token_precharged + @token_operations + take_name_operations)
     @token_precharged = 0
     @token_operations = 0_i64
     if @current_entity == entity || @frames.any? { |frame| frame.entity == entity }
@@ -137,6 +141,13 @@ class Mica::XML::Reader
   # entity replacement text this is the position just after the outermost
   # reference.
   private def error_position : Core::Position
+    error_position { }
+  end
+
+  # Same, calling the block with the bytes examined at least every 64 KiB
+  # while mapping the position, so `position` can charge a long count as it
+  # goes.
+  private def error_position(& : Int32 ->) : Core::Position
     buffer = @buffer
     pos = @pos
     base = @base_offset
@@ -146,7 +157,8 @@ class Mica::XML::Reader
       base = frame.base_offset
     end
     pos = pos.clamp(0, buffer.size)
-    Core::Position.new(source_offset_at(buffer, pos, base), @line, column_at(buffer, pos, base))
+    offset = source_offset_at(buffer, pos, base) { |count| yield count }
+    Core::Position.new(offset, @line, column_at(buffer, pos, base) { |count| yield count })
   end
 
   private def syntax_error(message : String) : NoReturn
@@ -170,7 +182,7 @@ class Mica::XML::Reader
   private def charge_scanned_before_error : Nil
     scanned = @pos - @mark - @token_precharged
     scanned = 0 if scanned < 0
-    @meter.charge(scanned + @token_operations)
+    @meter.charge(scanned + @token_operations + take_name_operations)
     @token_precharged += scanned
     @token_operations = 0_i64
   end

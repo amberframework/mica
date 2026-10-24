@@ -36,21 +36,33 @@ module Mica::XML::XPath
 
     @tokens = [] of Token
 
+    # Characters the lexer has stepped over (lookahead included), and how
+    # many of them were charged. A long literal, name or space run is
+    # charged every LEX_CHUNK characters, so it stops partway when the
+    # meter runs out.
+    @steps = 0
+    @charged_steps = 0
+    @token_start = 0
+
+    private LEX_CHUNK = 4096
+
     def initialize(@source : String, @meter : Core::WorkMeter? = nil)
       @reader = Char::Reader.new(@source)
     end
 
     def tokenize : Array(Token)
-      scanned = 0
       loop do
+        @token_start = @reader.pos
         skip_spaces
         break unless @reader.has_next?
         start = @reader.pos
+        @token_start = start
         @tokens << next_token.copy_with(offset: start)
-        # One operation per byte scanned (spaces included) and per token.
-        XPath.charge_compile(@meter, @reader.pos - scanned + 1, @source, start)
-        scanned = @reader.pos
+        # One operation per character stepped over (spaces included) and
+        # per token.
+        charge_steps(1)
       end
+      charge_steps(0)
       @tokens << Token.new(TokenKind::End, "", offset: @source.bytesize)
       @tokens
     end
@@ -68,7 +80,14 @@ module Mica::XML::XPath
     end
 
     private def advance : Char
+      @steps += 1
+      charge_steps(0) if @steps - @charged_steps >= LEX_CHUNK
       @reader.next_char
+    end
+
+    private def charge_steps(extra : Int32) : Nil
+      XPath.charge_compile(@meter, @steps - @charged_steps + extra, @source, @token_start)
+      @charged_steps = @steps
     end
 
     private def skip_spaces : Nil

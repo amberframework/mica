@@ -53,11 +53,36 @@ class Mica::XML::Reader
   private def scan_checkpoint : Nil
     scanned = @pos - @mark - @token_precharged
     scanned = 0 if scanned < 0
-    pending = @token_operations
+    pending = @token_operations + take_name_operations
     return if scanned == 0 && pending == 0
     @token_precharged += scanned
     @token_operations = 0_i64
-    charge(scanned + pending)
+    charge(scanned + discard_prepay(scanned) + pending)
+  end
+
+  # Work prepaid for bytes of a streamed token: when the buffer later
+  # drops them, `discarding_input` folds each one once into the column
+  # count (a byte count measured at about 2 GB/s, so half an operation per
+  # byte) and, for transcoded input, into the source offset (one more
+  # half). Charging that with the token that scanned the bytes keeps the
+  # fold inside the token's own budget, instead of landing as one lump of
+  # up to a buffer's size on whichever event triggers the refill (which a
+  # meter renewed per message could not absorb). In-memory input and
+  # entity replacement text are never discarded and prepay nothing.
+  @[AlwaysInline]
+  private def discard_prepay(scanned : Int) : Int64
+    return 0_i64 unless @io
+    @transcoded_from ? scanned.to_i64 : (scanned >> 1).to_i64
+  end
+
+  # Returns the name-table work done since it was last charged and marks
+  # it charged.
+  @[AlwaysInline]
+  private def take_name_operations : Int64
+    name_operations = @names.operations
+    delta = name_operations - @charged_name_operations
+    @charged_name_operations = name_operations
+    delta
   end
 
   # Records *count* operations of work inside the current token that is not

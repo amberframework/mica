@@ -8,7 +8,7 @@ class Mica::XML::Reader
     @doctype_seen = true
     @pos += 9
     require_spaces("after '<!DOCTYPE'")
-    root_id = scan_name_id
+    root_id = scan_declared_name_id
     if @options.namespace_aware? && !@names.qname?(root_id)
       syntax_error("DOCTYPE name '#{@names[root_id]}' is not a valid QName")
     end
@@ -100,7 +100,7 @@ class Mica::XML::Reader
   # Parses `%name;` between declarations.
   private def parse_parameter_entity_reference : Nil
     @pos += 1
-    name_id = scan_name_id
+    name_id = scan_declared_name_id
     expect_byte(';', "to end the parameter-entity reference")
     @parameter_entity_referenced = true
     entity = @dtd.parameter_entities[name_id]?
@@ -126,7 +126,7 @@ class Mica::XML::Reader
       require_spaces("after '%' in an entity declaration")
       parameter = true
     end
-    name_id = scan_name_id
+    name_id = scan_declared_name_id
     if @options.namespace_aware? && !@names.ncname?(name_id)
       syntax_error("Entity name '#{@names[name_id]}' must not contain a colon")
     end
@@ -135,7 +135,6 @@ class Mica::XML::Reader
     if quote == '"'.ord || quote == '\''.ord
       value = parse_entity_value(quote)
       if normalization_checked?
-        check_normalized_name(name_id)
         check_normalized(value, "entity replacement text")
       end
       entity = DTD::Entity.new(name_id, value, nil, nil, nil, parameter)
@@ -147,7 +146,7 @@ class Mica::XML::Reader
         syntax_error("Expected white space before NDATA") unless had_space
         @pos += 5
         require_spaces("after NDATA")
-        notation = @names[scan_name_id]
+        notation = @names[scan_declared_name_id]
       end
       entity = DTD::Entity.new(name_id, nil, system_id, public_id, notation, parameter)
     end
@@ -390,7 +389,7 @@ class Mica::XML::Reader
   private def parse_element_declaration : Nil
     @pos += 9
     require_spaces("after '<!ELEMENT'")
-    scan_name_id
+    scan_declared_name_id
     require_spaces("after the element name")
     if peek_byte == '('.ord
       parse_content_model
@@ -425,7 +424,7 @@ class Mica::XML::Reader
       when '|'.ord
         @pos += 1
         skip_spaces
-        scan_name_span
+        scan_declared_name_span
         names += 1
       when ')'.ord
         @pos += 1
@@ -453,7 +452,7 @@ class Mica::XML::Reader
         @pos += 1
         parse_content_group(depth + 1)
       else
-        scan_name_span
+        scan_declared_name_span
       end
       skip_content_modifier
       skip_spaces
@@ -483,7 +482,7 @@ class Mica::XML::Reader
   private def parse_notation_declaration : Nil
     @pos += 10
     require_spaces("after '<!NOTATION'")
-    name_id = scan_name_id
+    name_id = scan_declared_name_id
     if @options.namespace_aware? && !@names.ncname?(name_id)
       syntax_error("Notation name '#{@names[name_id]}' must not contain a colon")
     end
@@ -493,5 +492,21 @@ class Mica::XML::Reader
     expect_byte('>', "to close the notation declaration")
     name = @names[name_id]
     @dtd.notations[name] = {public_id, system_id} unless @dtd.notations.has_key?(name)
+  end
+
+  # Reads a Name in a declaration. Under XML 1.1 normalization checking
+  # the name is verified as it is read: section 2.13 lists every Name as a
+  # relevant construct, so names in unused declarations are checked too.
+  private def scan_declared_name_id : Int32
+    name_id = scan_name_id
+    check_normalized_name(name_id) if normalization_checked?
+    name_id
+  end
+
+  # Same for a name read as a span (relative to `@mark`).
+  private def scan_declared_name_span : {Int32, Int32}
+    start, size = scan_name_span
+    check_normalized(@buffer[@mark + start, size], "name") if normalization_checked?
+    {start, size}
   end
 end

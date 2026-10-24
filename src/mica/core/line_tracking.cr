@@ -30,21 +30,33 @@ module Mica::Core
     # Folds the characters between the line start and the end of the bytes
     # about to be discarded (`buffer[0, keep]`, first byte at decoded offset
     # *base*) into `@column_offset`, so columns stay exact after the buffer
-    # moves. Each discarded byte is counted at most once.
-    private def fold_discarded_columns(buffer : Bytes, keep : Int32, base : Int64) : Nil
+    # moves. Each discarded byte is counted at most once. Returns the bytes
+    # examined, for the format to charge.
+    private def fold_discarded_columns(buffer : Bytes, keep : Int32, base : Int64) : Int32
       discard_end = base + keep
-      return unless @line_start < discard_end
+      return 0 unless @line_start < discard_end
       from = Math.max(@line_start - base, 0_i64).to_i32
       discarded = buffer[from, keep - from]
       # Characters are the bytes that are not UTF-8 continuation bytes.
       @column_offset += discarded.size - discarded.count { |byte| byte & 0xC0 == 0x80 }
       @line_start = discard_end
       @column_cache_offset = -1_i64
+      discarded.size
     end
 
     # Returns the 1-based column of byte *pos* of *buffer* (first byte at
     # decoded offset *base*) on the current line.
     private def column_at(buffer : Bytes, pos : Int32, base : Int64) : Int32
+      column_at(buffer, pos, base) { }
+    end
+
+    # Bytes counted between two calls of the step block of `column_at`.
+    POSITION_STEP_CHUNK = 65_536
+
+    # Same, calling the block with the bytes examined at least every
+    # POSITION_STEP_CHUNK bytes and before the count goes on, so a work
+    # meter can stop a long count partway.
+    private def column_at(buffer : Bytes, pos : Int32, base : Int64, & : Int32 ->) : Int32
       absolute = base + pos
       return (absolute - @line_start).to_i32 + 1 if @line_start < base || @line_start > absolute
       start = (@line_start - base).to_i32
@@ -55,10 +67,13 @@ module Mica::Core
         column = @column_cache_value
       end
       index = start
-      @column_steps += pos - start if pos > start
       while index < pos
-        column += 1 unless buffer[index] & 0xC0 == 0x80
-        index += 1
+        chunk_end = pos - index > POSITION_STEP_CHUNK ? index + POSITION_STEP_CHUNK : pos
+        yield chunk_end - index
+        @column_steps += chunk_end - index
+        counted = buffer[index, chunk_end - index]
+        column += counted.size - counted.count { |byte| byte & 0xC0 == 0x80 }
+        index = chunk_end
       end
       @column_cache_offset = absolute
       @column_cache_value = column
