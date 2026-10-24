@@ -152,9 +152,9 @@ class Mica::XML::Reader
   # it, or composes with the last starter without being blocked. A
   # composing character of class 0 that does not compose is itself the
   # last starter for what follows. Since the prefix is canonically ordered,
-  # *mark* is blocked exactly when the character before it (after the last
-  # starter) has the same class. Each test normalizes at most three
-  # characters.
+  # *mark* is blocked exactly when a non-starter comes between it and the
+  # last starter and *mark* has class 0 or the same class as the character
+  # before it. Each test normalizes at most three characters.
   private def blamed_in_segment(bytes : Bytes, start : Int32, first_composing : Int32, stop : Int32) : Int32
     starter = String.new(bytes[start, first_composing - start])
     return start unless starter.unicode_normalized?(:nfc)
@@ -165,13 +165,17 @@ class Mica::XML::Reader
       length = Math.max(length, 1)
       mark = String.new(bytes[index, length])
       return index unless mark.unicode_normalized?(:nfc)
+      nonzero = nonzero_combining_class?(mark)
       blocked = false
       if previous
         return index if reordered?(previous, mark)
-        blocked = same_combining_class?(previous, mark)
+        # A non-starter before *mark* blocks it unless *mark* has a higher
+        # class (canonical order already holds, so only equal classes and
+        # class 0 remain).
+        blocked = !nonzero || same_combining_class?(previous, mark)
       end
       return index if !blocked && !(starter + mark).unicode_normalized?(:nfc)
-      if nonzero_combining_class?(mark)
+      if nonzero
         previous = mark
       else
         starter = mark

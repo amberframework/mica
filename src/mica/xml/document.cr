@@ -96,15 +96,22 @@ module Mica::XML
     DEFAULT_EDIT_BUDGET = Core::WorkBudget.new(operations_per_unit: 64, base_operations: 1_000_000)
 
     # The work budget edits run under (see `edit_meter`).
-    property edit_budget : Core::WorkBudget = DEFAULT_EDIT_BUDGET
+    getter edit_budget : Core::WorkBudget = DEFAULT_EDIT_BUDGET
+
+    # Sets the edit budget. The next edit starts a fresh meter on it.
+    def edit_budget=(budget : Core::WorkBudget) : Core::WorkBudget
+      @edit_meter = nil
+      @edit_budget = budget
+    end
 
     @edit_meter : Core::WorkMeter? = nil
 
     # Returns the meter that edits through `Node` (setting, renaming and
     # removing attributes, names and content) are charged to. Its units are
-    # the document's nodes when it starts plus the bytes each edit is given,
-    # so the work of any sequence of edits stays linear in the document and
-    # the edits' input; a sequence that would do more stops with a
+    # the document's nodes and name bytes when it starts, plus one per edit
+    # call and the bytes each call is given (names, values, text), so the
+    # work of any sequence of edits stays linear in the document and the
+    # edits' input; a sequence that would do more stops with a
     # `Mica::WorkBudgetExceededError`. Created on the first edit.
     def edit_meter : Core::WorkMeter
       @edit_meter ||= new_edit_meter(@edit_budget)
@@ -118,7 +125,7 @@ module Mica::XML
 
     private def new_edit_meter(budget : Core::WorkBudget) : Core::WorkMeter
       meter = Core::WorkMeter.new(budget)
-      meter.add_units(@size)
+      meter.add_units(@size + @names.name_bytes)
       meter
     end
 
@@ -134,7 +141,7 @@ module Mica::XML
 
     # :nodoc:
     #
-    # Records *bytes* of input given to an edit (names, values, text).
+    # Records one edit call given *bytes* of input (names, values, text).
     def add_edit_units(bytes : Int) : Nil
       edit_meter.add_units(bytes + 1)
     end
@@ -153,9 +160,9 @@ module Mica::XML
       reader = Reader.new(source, options, meter)
       document = new(reader.names)
       document.build_from(reader)
-      # The finished document owns the names now: later edits are not
-      # charged to the parse's meter.
-      reader.names.before_rebuild = nil
+      # The finished document owns the names now: rehashes that later
+      # edits cause are charged to the edit meter, not the parse's.
+      reader.names.before_rebuild = ->(work : Int64) { document.charge_edit(work) }
       document
     end
 
@@ -489,7 +496,6 @@ module Mica::XML
 
     # :nodoc:
     def set_value(index : Int32, value : String) : Nil
-      add_edit_units(value.bytesize)
       charge_edit(1 + value.bytesize)
       store_value(index, value.to_slice)
     end
@@ -534,7 +540,6 @@ module Mica::XML
     #
     # Replaces the children of *index* with one text node holding *text*.
     def replace_children_with_text(index : Int32, text : String) : Nil
-      add_edit_units(text.bytesize)
       charge_edit(1 + text.bytesize)
       child = data(index).first_child
       while child >= 0
@@ -562,12 +567,21 @@ module Mica::XML
       getter by_declared_prefix = {} of Int32 => Int32
       # Attribute nodes by local name id, in list order (by `order`). Entries
       # of removed or renamed attributes stay until they reach the front,
-      # where a lookup drops them, so each entry is dropped once.
-      getter by_local_name = {} of Int32 => Array(Int32)
+      # where a lookup steps past them, so each entry is passed once.
+      getter by_local_name = {} of Int32 => LocalCandidates
       # The position of each indexed attribute in the list (increasing).
       getter order = {} of Int32 => Int32
       property next_order = 0
       property tail : Int32 = -1
+    end
+
+    # :nodoc:
+    #
+    # The attributes sharing one local name, in list order, from `head` on
+    # (entries before `head` were stepped past).
+    class LocalCandidates
+      getter list = [] of Int32
+      property head = 0
     end
 
     # :nodoc:
@@ -592,11 +606,13 @@ module Mica::XML
     # name is *local_id*, or nil.
     def attribute_with_local_name(element : Int32, local_id : Int32) : Int32?
       candidates = attribute_index(element).by_local_name[local_id]? || return
-      while first = candidates.first?
+      list = candidates.list
+      while candidates.head < list.size
         charge_edit(1)
+        first = list[candidates.head]
         record = data(first)
         return first if record.parent == element && record.kind.attribute_node? && @names.local_id(record.name_id) == local_id
-        candidates.shift
+        candidates.head += 1
       end
       nil
     end
@@ -636,23 +652,32 @@ module Mica::XML
       if record.namespace_uri_id != NameTable::EMPTY_ID
         index.by_expanded_name[{record.namespace_uri_id, local_id}] ||= attribute
       end
-      insert_in_order(index, index.by_local_name.put_if_absent(local_id) { [] of Int32 }, attribute)
+      insert_in_order(index, index.by_local_name.put_if_absent(local_id) { LocalCandidates.new }, attribute)
     end
 
     # Inserts *attribute* into *candidates* by list position. Appends land
-    # at the end in O(1); a rename finds its place by binary search.
-    private def insert_in_order(index : AttributeIndex, candidates : Array(Int32), attribute : Int32) : Nil
-      position = index.order[attribute]
-      last = candidates.last?
-      if last.nil? || index.order[last] < position
-        candidates << attribute
-      else
-        at = candidates.bsearch_index { |candidate| index.order[candidate] >= position } || candidates.size
-        return if candidates[at]? == attribute
-        # The insertion moves every later candidate.
-        charge_edit(candidates.size - at)
-        candidates.insert(at, attribute)
+    # at the end in O(1); a rename finds its place by binary search and
+    # moves the later candidates, all charged. Stepped-past entries are
+    # dropped first when they are at least half the list, so the list
+    # stays proportional to its live entries.
+    private def insert_in_order(index : AttributeIndex, candidates : LocalCandidates, attribute : Int32) : Nil
+      list = candidates.list
+      if candidates.head > 0 && candidates.head * 2 >= list.size
+        charge_edit(list.size)
+        list.delete_at(0, candidates.head)
+        candidates.head = 0
       end
+      position = index.order[attribute]
+      last = list.last?
+      if last.nil? || index.order[last] < position
+        list << attribute
+        return
+      end
+      charge_edit(Math.log2(list.size + 1).ceil.to_i + 1)
+      at = (candidates.head...list.size).bsearch { |slot| index.order[list[slot]] >= position } || list.size
+      return if list[at]? == attribute
+      charge_edit(list.size - at)
+      list.insert(at, attribute)
     end
 
     private def unindex_attribute(index : AttributeIndex, attribute : Int32) : Nil
@@ -671,7 +696,6 @@ module Mica::XML
     # Adds an attribute (or namespace declaration) at the end of the
     # element's attribute list.
     def append_attribute(element : Int32, name_id : Int32, namespace_uri_id : Int32, value : String, kind : Node::Type) : Int32
-      add_edit_units(@names[name_id].bytesize + value.bytesize)
       charge_edit(1 + value.bytesize)
       index = attribute_index(element)
       attribute = add_attribute_node(kind, element, name_id, namespace_uri_id, value.to_slice, index.tail)
@@ -686,7 +710,6 @@ module Mica::XML
 
     # :nodoc:
     def rename(index : Int32, name_id : Int32, namespace_uri_id : Int32) : Nil
-      add_edit_units(@names[name_id].bytesize)
       charge_edit(1)
       record = data(index)
       named = record.kind.element_node? || record.kind.attribute_node?

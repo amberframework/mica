@@ -153,6 +153,7 @@ module Mica::XML
     #
     # Raises `Mica::Error` for an invalid name or an unbound prefix.
     def name=(new_name : String) : String
+      meter_edit(new_name.bytesize)
       unless element? || attribute? || processing_instruction?
         raise Error.new("Cannot set the name of a #{type} node")
       end
@@ -264,6 +265,7 @@ module Mica::XML
     # Sets the content. For an element this replaces its children with one
     # text node holding *text* (escaped on output, never parsed as markup).
     def content=(text : String) : String
+      meter_edit(text.bytesize)
       Escape.check_text(text, xml11_document?)
       if comment? && (text.includes?("--") || text.ends_with?('-'))
         raise Error.new("A comment cannot contain '--' or end with '-'")
@@ -311,8 +313,9 @@ module Mica::XML
 
     # Sets attribute *name* to *value*, adding it when missing.
     def []=(name : String, value) : String
-      raise Error.new("Only elements have attributes") unless element?
       text = value.to_s
+      meter_edit(name.bytesize + text.bytesize)
+      raise Error.new("Only elements have attributes") unless element?
       Escape.check_text(text, xml11_document?)
       if attribute = find_exact_attribute(name)
         if @document.kind(attribute).namespace_decl? && @document.value_string(attribute) != text
@@ -420,11 +423,20 @@ module Mica::XML
 
     # Removes attribute *name* and returns its value, or nil when missing.
     def delete(name : String) : String?
+      meter_edit(name.bytesize)
       attribute = find_attribute(name, for_edit: true)
       return unless attribute
       value = @document.value_string(attribute)
       @document.unlink(attribute)
       value
+    end
+
+    # Records an edit call given *bytes* of input and charges validating,
+    # hashing and copying them, before the edit does anything else (also
+    # when it then fails).
+    private def meter_edit(bytes : Int) : Nil
+      @document.add_edit_units(bytes)
+      @document.charge_edit(2 * bytes + 1)
     end
 
     private def find_exact_attribute(name : String) : Int32?
@@ -592,6 +604,7 @@ module Mica::XML
     # Raises `Mica::Error` when this node is a namespace declaration that a
     # name in its element's subtree still resolves through.
     def unlink : Nil
+      meter_edit(0)
       check_declaration_unused if @document.kind(@index).namespace_decl?
       @document.unlink(@index)
     end

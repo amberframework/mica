@@ -695,7 +695,11 @@ module Mica::XML::XPath
                 elsif left.is_a?(Float64) || right.is_a?(Float64)
                   to_number(left) == to_number(right)
                 else
-                  to_string(left) == to_string(right)
+                  left_string = to_string(left)
+                  right_string = to_string(right)
+                  # Literals are compared again for every context node.
+                  charge(Math.min(left_string.bytesize, right_string.bytesize) + 1)
+                  left_string == right_string
                 end
         return operator == "=" ? equal : !equal
       end

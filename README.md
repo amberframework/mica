@@ -135,7 +135,7 @@ checked at least every 65,536 operations and at every read from a stream.
 |---|---|---|---|
 | Parse (`ParserOptions::DEFAULT_WORK_BUDGET`) | 1,000,000 + 64 per byte | 60 s | at most 4.2 operations per byte (fuzz maximum) |
 | XPath (`XPath::DEFAULT_WORK_BUDGET`) | 1,000,000 + 64 per node | 10 s | about 2 operations per node for `count(//*)` |
-| DOM edits (`Document::DEFAULT_EDIT_BUDGET`) | 1,000,000 + 64 per node and per byte given to edits | none | a few operations per edit |
+| DOM edits (`Document::DEFAULT_EDIT_BUDGET`) | 1,000,000 + 64 per node, name byte, edit call and byte given to edits | none | a few operations per edit |
 
 The defaults leave more than ten times headroom over the most expensive
 valid input that the fuzzer and the benchmarks found, and they stop any
@@ -170,9 +170,10 @@ document.xpath_nodes("//item", meter: meter)
 ```
 
 Edits through `Node` (`[]=`, `delete`, `name=`, `content=`, `unlink`) are
-charged to `Document#edit_meter`, whose units are the document's nodes plus
-the bytes each edit is given; a document edited in rounds over a long life
-calls `Document#renew_edit_meter` between rounds.
+charged to `Document#edit_meter`, whose units are the document's nodes and
+name bytes plus one per edit call and the bytes each call is given; a
+document edited in rounds over a long life calls
+`Document#renew_edit_meter` between rounds.
 
 A long-lived stream (a protocol session over a socket) calls
 `Reader#renew_meter` between messages instead of disabling the budget. The

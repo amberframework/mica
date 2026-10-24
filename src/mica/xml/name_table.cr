@@ -44,9 +44,10 @@ module Mica::XML
     # (see `unpaid_operations`).
     getter prepaid_operations : Int64 = 0_i64
 
-    # Bytes of all interned names plus one per name, kept as names are
-    # added so a reseed knows its rehash work without walking the names.
-    @name_bytes = 0_i64
+    # Returns the bytes of all interned names plus one per name, kept as
+    # names are added so a reseed knows its rehash work without walking
+    # the names.
+    getter name_bytes = 0_i64
 
     @reseeds = 0
     @fixed_seed = false
