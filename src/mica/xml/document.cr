@@ -148,14 +148,14 @@ module Mica::XML
     #
     # Runs one edit call given *bytes* of input (names, values, text): adds
     # its units, charges validating, hashing and copying the input before
-    # anything else (also when the edit then fails), and points the name
-    # table's rehash hook at the edit meter for the duration, so a rehash
-    # the edit causes is charged to it even when the table is shared with
-    # a reader (`Reader#expand`).
+    # anything else (also when the edit then fails), takes a private copy
+    # of a name table shared with a reader (`Reader#expand`), and points
+    # the table's rehash hook at the edit meter for the duration.
     def editing(bytes : Int64, &)
       meter = edit_meter
       meter.add_units(bytes + 1)
       charge_edit(2 * bytes + 1)
+      unshare_names if @shared_names
       previous_hook = @names.before_rebuild
       @names.before_rebuild = edit_rebuild_hook
       unpaid_before = @names.unpaid_operations
@@ -165,6 +165,16 @@ module Mica::XML
         @names.before_rebuild = previous_hook
         settle_name_work(unpaid_before)
       end
+    end
+
+    # Gives the document its own copy of a name table shared with a reader,
+    # so edits never add names, lookups or later rehash work to the
+    # reader's table and meter. The copy is linear in the table and charged
+    # here; the edit allowance already counts the table's name bytes.
+    private def unshare_names : Nil
+      charge_edit(@names.name_bytes + @names.size)
+      @names = @names.copy
+      @shared_names = false
     end
 
     # Charges the name-table work an edit did (lookups and interning) to
@@ -183,8 +193,14 @@ module Mica::XML
 
     @edit_rebuild_hook : Proc(Int64, Nil)? = nil
 
+    # True while the document uses a name table it shares with the reader
+    # that built it (`Reader#expand`); the first edit takes a private copy.
+    @shared_names = false
+
     # :nodoc:
-    def initialize(@names : NameTable = NameTable.new)
+    #
+    # With *shared_names*, *names* belongs to a reader that keeps parsing.
+    def initialize(@names : NameTable = NameTable.new, *, @shared_names : Bool = false)
       @xmlns_namespace_id = @names.intern(Reader::XMLNS_NAMESPACE)
       @xml_namespace_id = @names.intern(Reader::XML_NAMESPACE)
       @xml_prefix_id = @names.intern("xml")

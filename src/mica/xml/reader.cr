@@ -387,7 +387,7 @@ module Mica::XML
       unless @node_type.element?
         raise Error.new("Reader#expand needs the reader on an element, not #{@node_type}")
       end
-      document = Document.new(@names)
+      document = Document.new(@names, shared_names: true)
       document.build_subtree_from(self)
       document.first_element_child || raise Error.new("Reader#expand produced no element")
     end

@@ -22,7 +22,7 @@ class Mica::XML::Reader
       @attrs.each do |slot|
         check_normalized_name(slot.name_id, attribute_ordinal: slot.specified ? ordinal : nil)
         ordinal += 1 if slot.specified
-        check_normalized(attribute_value_bytes(slot), "attribute value")
+        check_normalized_attribute_value(slot)
       end
     when .text?, .significant_whitespace?
       check_normalized_value("character content")
@@ -168,6 +168,24 @@ class Mica::XML::Reader
       index += 1
     end
     index
+  end
+
+  # Checks an attribute value. When the value lies unchanged in the tag an
+  # error points at the offending character; a value that was rewritten
+  # (references expanded, white space normalized) no longer matches the
+  # source byte for byte, so its error points at the tag.
+  private def check_normalized_attribute_value(slot : AttributeSlot) : Nil
+    bytes = attribute_value_bytes(slot)
+    check_normalized(bytes, "attribute value", nil) do |offending|
+      start = @token_position
+      if start.nil?
+        error_position
+      elsif slot.specified && !slot.in_scratch && @frames.empty?
+        position_after(start, @mark, @mark + slot.value_start + offending)
+      else
+        start
+      end
+    end
   end
 
   # Checks the current event's value; an error points at the offending

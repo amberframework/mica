@@ -863,7 +863,10 @@ module Mica::XML::XPath
         text = string_argument(arguments, 0, node, position, size)
         needle = string_argument(arguments, 1, node, position, size)
         found = search(text, needle)
-        found ? text.byte_slice(found + needle.bytesize) : ""
+        return "" unless found
+        # The search stopped at the match: the suffix copy is charged here.
+        charge(text.bytesize - found)
+        text.byte_slice(found + needle.bytesize)
       when "substring"
         substring(arguments, node, position, size)
       when "string-length"

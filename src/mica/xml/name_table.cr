@@ -89,6 +89,24 @@ module Mica::XML
       @strings.size
     end
 
+    # Returns an independent copy of the table (same ids, same seed, no
+    # rehash hook). Linear in the table.
+    def copy : NameTable
+      table = dup
+      table.detach_state
+      table
+    end
+
+    protected def detach_state : Nil
+      @strings = @strings.dup
+      @hashes = @hashes.dup
+      @local_ids = @local_ids.dup
+      @prefix_ids = @prefix_ids.dup
+      @qname_states = @qname_states.dup
+      @slots = @slots.dup
+      @before_rebuild = nil
+    end
+
     # Returns the string for *id*.
     @[AlwaysInline]
     def [](id : Int32) : String
