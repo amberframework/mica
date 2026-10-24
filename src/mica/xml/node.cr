@@ -650,7 +650,8 @@ module Mica::XML
     # runs out.
     def xpath(path : String, namespaces : Hash(String, String)? = nil, variables : Hash(String, XPath::Value)? = nil,
               *, budget : Core::WorkBudget = XPath::DEFAULT_WORK_BUDGET, meter : Core::WorkMeter? = nil) : XPath::Value
-      XPath.compile(path).evaluate(self, namespaces, variables, budget: budget, meter: meter)
+      work_meter = meter || Core::WorkMeter.new(budget)
+      XPath.compile(path, work_meter).evaluate(self, namespaces, variables, meter: work_meter)
     end
 
     # Evaluates *path* and returns the resulting node set. Raises
@@ -671,19 +672,22 @@ module Mica::XML
     # rules: a node set gives its first node's string value).
     def xpath_string(path : String, namespaces : Hash(String, String)? = nil, variables : Hash(String, XPath::Value)? = nil,
                      *, budget : Core::WorkBudget = XPath::DEFAULT_WORK_BUDGET, meter : Core::WorkMeter? = nil) : String
-      XPath.to_xpath_string(xpath(path, namespaces, variables, budget: budget, meter: meter))
+      work_meter = meter || Core::WorkMeter.new(budget)
+      XPath.compile(path, work_meter).evaluate_string(self, namespaces, variables, meter: work_meter)
     end
 
     # Evaluates *path* and converts the result to a number.
     def xpath_float(path : String, namespaces : Hash(String, String)? = nil, variables : Hash(String, XPath::Value)? = nil,
                     *, budget : Core::WorkBudget = XPath::DEFAULT_WORK_BUDGET, meter : Core::WorkMeter? = nil) : Float64
-      XPath.to_xpath_number(xpath(path, namespaces, variables, budget: budget, meter: meter))
+      work_meter = meter || Core::WorkMeter.new(budget)
+      XPath.compile(path, work_meter).evaluate_number(self, namespaces, variables, meter: work_meter)
     end
 
     # Evaluates *path* and converts the result to a boolean.
     def xpath_bool(path : String, namespaces : Hash(String, String)? = nil, variables : Hash(String, XPath::Value)? = nil,
                    *, budget : Core::WorkBudget = XPath::DEFAULT_WORK_BUDGET, meter : Core::WorkMeter? = nil) : Bool
-      XPath.to_xpath_boolean(xpath(path, namespaces, variables, budget: budget, meter: meter))
+      work_meter = meter || Core::WorkMeter.new(budget)
+      XPath.compile(path, work_meter).evaluate_boolean(self, namespaces, variables, meter: work_meter)
     end
   end
 end

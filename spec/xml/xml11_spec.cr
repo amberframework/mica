@@ -89,4 +89,28 @@ describe "XML 1.1" do
     expect_raises(Mica::ParseError) { Mica::XML.parse(%(<?xml version="2.0"?><a/>)) }
     Mica::XML.parse(%(<?xml version="1.7"?><a/>)).version.should eq("1.7")
   end
+
+  it_satisfies "XML11-2.13-normalization", "reports a leading composing character at the start of the text" do
+    error = expect_raises(Mica::XML::NormalizationError) { parse11("<a>\u0301x</a>", checking) }
+    error.byte_offset.should eq(%(<?xml version="1.1"?><a>).bytesize)
+    error.column_number.should eq(25)
+  end
+
+  it_satisfies "XML11-2.13-normalization", "checks declarations even when they are never used" do
+    expect_raises(Mica::XML::NormalizationError, /entity replacement text/) do
+      parse11(%(<!DOCTYPE a [<!ENTITY e "e\u0301">]><a/>), checking)
+    end
+    expect_raises(Mica::XML::NormalizationError, /name token/) do
+      parse11(%(<!DOCTYPE a [<!ATTLIST a t (\u0301x|y) #IMPLIED>]><a/>), checking)
+    end
+    expect_raises(Mica::XML::NormalizationError, /attribute default value/) do
+      parse11(%(<!DOCTYPE a [<!ATTLIST a t CDATA "e\u0301">]><a/>), checking)
+    end
+  end
+
+  it_satisfies "XML11-4.1-char-refs", "keeps controls from character references in entity replacement text" do
+    document = parse11(%(<!DOCTYPE a [<!ENTITY e "&#x1;&gt;&#x86;">]><a>&e;</a>))
+    root_of(document).content.should eq("\u0001>\u0086")
+    expect_raises(Mica::ParseError) { parse11("<!DOCTYPE a [<!ENTITY e \"\u0001\">]><a>&e;</a>") }
+  end
 end

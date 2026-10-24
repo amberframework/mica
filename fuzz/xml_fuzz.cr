@@ -41,6 +41,10 @@ module XMLFuzz
   # their containment is checked.
   TIGHT_BUDGET = Mica::Core::WorkBudget.new(operations_per_unit: 2, base_operations: 100)
 
+  # A fixed name-table seed, so operation counts (which include hash
+  # probes) and therefore budget trips are reproducible.
+  NAME_SEED = 0x5EED5EED_u32
+
   # Parses *bytes* in memory and through a trickle IO, compares the two,
   # and checks that an accepted document round-trips stably. Raises
   # (making the campaign record a crash) on anything but a Mica::Error.
@@ -49,9 +53,9 @@ module XMLFuzz
     budget = tight ? TIGHT_BUDGET : Mica::XML::ParserOptions::DEFAULT_WORK_BUDGET
     options = Mica::XML::ParserOptions.new(work_budget: budget)
     meter = Mica::Core::WorkMeter.new(budget)
-    in_memory = full_events(Mica::XML::Reader.new(bytes, options, meter))
+    in_memory = full_events(Mica::XML::Reader.new(bytes, options, meter, name_seed: NAME_SEED))
     chunk = 1 + iteration % 7
-    streamed = full_events(Mica::XML::Reader.new(TrickleIO.new(bytes, chunk), options))
+    streamed = full_events(Mica::XML::Reader.new(TrickleIO.new(bytes, chunk), options, name_seed: NAME_SEED))
     failures = [] of String
     if in_memory[0] != streamed[0] && !budget_error?(in_memory[1]) && !budget_error?(streamed[1])
       failures << "String and #{chunk}-byte IO disagree: #{in_memory[0][0, 200].inspect} vs #{streamed[0][0, 200].inspect}"

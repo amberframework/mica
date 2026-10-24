@@ -209,7 +209,11 @@ module Mica::XML
       previous = -1
       reader.event_attributes.each do |slot|
         kind = slot.namespace_uri_id == @xmlns_namespace_id ? Node::Type::NAMESPACE_DECL : Node::Type::ATTRIBUTE_NODE
-        attribute = add_node(kind, element, slot.name_id, slot.namespace_uri_id, reader.attribute_value_bytes(slot))
+        value = reader.attribute_value_bytes(slot)
+        # Charge each value's copy before making it, so a tag with many
+        # large values is stopped between copies.
+        reader.charge(value.size)
+        attribute = add_node(kind, element, slot.name_id, slot.namespace_uri_id, value)
         link_attribute(element, attribute, previous)
         previous = attribute
       end

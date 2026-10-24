@@ -36,16 +36,20 @@ module Mica::XML::XPath
 
     @tokens = [] of Token
 
-    def initialize(@source : String)
+    def initialize(@source : String, @meter : Core::WorkMeter? = nil)
       @reader = Char::Reader.new(@source)
     end
 
     def tokenize : Array(Token)
+      scanned = 0
       loop do
         skip_spaces
         break unless @reader.has_next?
         start = @reader.pos
         @tokens << next_token.copy_with(offset: start)
+        # One operation per byte scanned (spaces included) and per token.
+        XPath.charge_compile(@meter, @reader.pos - scanned + 1, @source, start)
+        scanned = @reader.pos
       end
       @tokens << Token.new(TokenKind::End, "", offset: @source.bytesize)
       @tokens

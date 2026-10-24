@@ -90,37 +90,59 @@ class Mica::XML::Reader
   # Scans a Name and returns its start (relative to the mark) and size.
   private def scan_name_span : {Int32, Int32}
     start = @pos - @mark
-    first = true
+    if (byte = peek_byte) >= 0 && byte < 0x80
+      syntax_error("Expected a name") if CharClass.flags(byte.to_u8) & CharClass::NAME_START == 0
+      @pos += 1
+    elsif byte >= 0x80
+      code, length = decode_at_pos
+      syntax_error("Expected a name") unless CharClass.name_start_char?(code)
+      @pos += length
+    end
+    scan_name_chars(start, "Name")
+    size = @pos - @mark - start
+    syntax_error("Expected a name") if size == 0
+    {start, size}
+  end
+
+  # Consumes NameChar characters of a name or name token that started at
+  # *start* (relative to the mark).
+  #
+  # ASCII name characters are skipped in runs with `Slice#index` over a
+  # window that ends at most `max_name_bytes + 1` bytes past the start and
+  # at most SCAN_CHUNK bytes ahead, so an over-long name stops at the limit
+  # and the budget is checked every chunk; non-ASCII characters are decoded
+  # and checked one at a time.
+  private def scan_name_chars(start : Int32, what : String) : Nil
+    max_name_bytes = @options.max_name_bytes
     loop do
       if @pos >= @limit
         break unless fill
       end
-      byte = @buffer[@pos]
-      if byte < 0x80
-        flags = CharClass.flags(byte)
-        if first
-          break if flags & CharClass::NAME_START == 0
+      if @buffer[@pos] < 0x80
+        # Room left under the name limit (plus the one byte that proves it
+        # exceeded), the bytes buffered and the scan chunk bound the run.
+        room = max_name_bytes.to_i64 - (@pos - @mark - start) + 1
+        window = Math.min(Math.min(room, (@limit - @pos).to_i64), SCAN_CHUNK.to_i64).to_i32
+        stop = @pos + window
+        run = @buffer[@pos, stop - @pos].index { |next_byte| CharClass.flags(next_byte) & CharClass::NAME_CHAR == 0 }
+        if run
+          @pos += run
+          # An ASCII byte ends the name; a non-ASCII byte is decoded next.
+          break if @buffer[@pos] < 0x80
         else
-          break if flags & CharClass::NAME_CHAR == 0
+          @pos = stop
+          scan_checkpoint
         end
-        @pos += 1
       else
         code, length = decode_at_pos
-        if first
-          break unless CharClass.name_start_char?(code)
-        else
-          break unless CharClass.name_char?(code)
-        end
+        break unless CharClass.name_char?(code)
         @pos += length
+        scan_checkpoint if @pos - @mark - @token_precharged >= SCAN_CHUNK
       end
-      first = false
-      if @pos - @mark - start > @options.max_name_bytes
-        limit_error("Name exceeds max_name_bytes (#{@options.max_name_bytes})")
+      if @pos - @mark - start > max_name_bytes
+        limit_error("#{what} exceeds max_name_bytes (#{max_name_bytes})")
       end
     end
-    size = @pos - @mark - start
-    syntax_error("Expected a name") if size == 0
-    {start, size}
   end
 
   # Scans a Name and interns it.
@@ -134,23 +156,7 @@ class Mica::XML::Reader
   private def scan_nmtoken : Int32
     # Relative to the mark: a refill may compact the buffer.
     start = @pos - @mark
-    loop do
-      if @pos >= @limit
-        break unless fill
-      end
-      byte = @buffer[@pos]
-      if byte < 0x80
-        break if CharClass.flags(byte) & CharClass::NAME_CHAR == 0
-        @pos += 1
-      else
-        code, length = decode_at_pos
-        break unless CharClass.name_char?(code)
-        @pos += length
-      end
-      if @pos - @mark - start > @options.max_name_bytes
-        limit_error("Name token exceeds max_name_bytes (#{@options.max_name_bytes})")
-      end
-    end
+    scan_name_chars(start, "Name token")
     size = @pos - @mark - start
     syntax_error("Expected a name token") if size == 0
     size
@@ -181,12 +187,16 @@ class Mica::XML::Reader
   end
 
   # Raises unless *code* (from a non-ASCII sequence) may appear literally.
+  # Replacement text of an internal entity may hold any Char of the
+  # document's version: its restricted characters came from character
+  # references, which were checked when the entity was declared.
   @[AlwaysInline]
   private def check_literal_char(code : Int32) : Nil
     return if code >= 0xA0 && code <= 0xD7FF
     if @xml11
       return if CharClass.xml11_literal_char?(code)
-      if CharClass.xml_char?(code)
+      if CharClass.xml11_char?(code)
+        return unless @in_document_source
         syntax_error("Character U+#{hex_code(code)} must be written as a character reference in XML 1.1")
       end
     else
@@ -195,9 +205,15 @@ class Mica::XML::Reader
     syntax_error("Character U+#{hex_code(code)} is not allowed in XML")
   end
 
-  # Handles an ASCII control byte that stopped a scan loop: DEL (0x7F) is a
-  # character in XML 1.0 and is consumed; everything else is an error.
+  # Handles an ASCII control byte that stopped a scan loop and consumes it
+  # when it is allowed: DEL (0x7F) is a character in XML 1.0, and in XML 1.1
+  # replacement text every control but NUL came from a character reference.
+  # Everything else is an error.
   private def accept_ascii_control(byte : UInt8) : Nil
+    if @xml11 && !@in_document_source && byte != 0
+      @pos += 1
+      return
+    end
     if byte == 0x7F
       unless @xml11
         @pos += 1
@@ -247,7 +263,7 @@ class Mica::XML::Reader
           return 0x09
         else
           accept_ascii_control(byte)
-          return 0x7F
+          return byte.to_i32
         end
       end
       @pos += 1

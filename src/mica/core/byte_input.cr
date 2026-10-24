@@ -105,15 +105,24 @@ module Mica::Core
         @pin -= keep if pin >= 0
       end
       if @limit == @buffer.size
-        if @buffer.size.to_i64 >= input_token_limit.to_i64 + TOKEN_SLACK
+        capacity = input_token_limit.to_i64 + TOKEN_SLACK
+        if @buffer.size.to_i64 >= capacity
           input_limit_error("Token exceeds the token size limit (#{input_token_limit} bytes)")
         end
-        grown = Bytes.new(@buffer.size * 2)
+        # Double, but never past the token limit plus its slack.
+        grown = Bytes.new(Math.min(@buffer.size.to_i64 * 2, capacity).to_i32)
         grown.copy_from(@buffer[0, @limit])
         @input_bytes_moved += @limit
         @buffer = grown
       end
-      read = io.read(@buffer[@limit, @buffer.size - @limit])
+      space = @buffer.size - @limit
+      if max = input_size_limit
+        # Read at most one byte past the input size limit, enough to detect
+        # that it was exceeded.
+        remaining = max - @input_bytes + 1
+        space = remaining.clamp(1_i64, space.to_i64).to_i32
+      end
+      read = io.read(@buffer[@limit, space])
       if read == 0
         @io_eof = true
         return false

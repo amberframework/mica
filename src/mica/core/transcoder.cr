@@ -62,14 +62,22 @@ module Mica::Core
 
     # Fills *slice* with UTF-8. Returns 0 at the end of the source. Needs
     # room for one encoded code point (4 bytes); smaller slices get the
-    # bytes one read at a time through an internal carry.
+    # bytes one read at a time through an internal carry. Each call reads
+    # from the source at most once for every code unit it needs to
+    # complete (at most four reads), then returns what it has decoded.
     def read(slice : Bytes) : Int32
       return read_small(slice) if slice.size < 4
       written = 0
+      refilled = false
       while written + 4 <= slice.size
         unit_size = unit_bytes
         if @input_end - @input_start < unit_size
+          # Return what is decoded rather than wait on the source again, so
+          # the caller regains control (and checks its deadline) after at
+          # most one round of source reads per call.
+          break if refilled && written > 0
           refill(unit_size)
+          refilled = true
           if @input_end - @input_start < unit_size
             written = finish(slice, written)
             break

@@ -113,7 +113,7 @@ describe "Mica work budget and deadline" do
 
   it_satisfies "MICA-BUDGET-XPATH", "bounds XPath evaluation and reports the position in the expression" do
     document = Mica::XML.parse(large_document(2_000))
-    budget = Mica::Core::WorkBudget.new(operations_per_unit: 1, base_operations: 0)
+    budget = Mica::Core::WorkBudget.new(operations_per_unit: 1, base_operations: 1_000)
     error = expect_raises(Mica::WorkBudgetExceededError, /in XPath/) do
       document.xpath("count(//item[@id = //item/@id])", budget: budget)
     end
@@ -151,5 +151,68 @@ describe "Mica work budget and deadline" do
     meter.verdict.should eq(Mica::Core::WorkMeter::Verdict::BudgetExceeded)
     meter.add_units(100)
     meter.verdict.should eq(Mica::Core::WorkMeter::Verdict::Within)
+  end
+
+  it_satisfies "MICA-BUDGET-XPATH", "charges compiling an expression to the meter" do
+    document = Mica::XML.parse("<r/>")
+    expression = "1" + " + 1" * 20_000
+    budget = Mica::Core::WorkBudget.new(operations_per_unit: 0, base_operations: 1_000)
+    error = expect_raises(Mica::WorkBudgetExceededError, /compiling XPath/) { document.xpath(expression, budget: budget) }
+    error.byte_offset.should be < expression.bytesize
+  end
+
+  it_satisfies "MICA-BUDGET-XPATH", "charges string and number conversions of the result" do
+    document = Mica::XML.parse("<r>#{"<i>#{"x" * 1_000}</i>" * 100}</r>")
+    budget = Mica::Core::WorkBudget.new(operations_per_unit: 1, base_operations: 0)
+    expect_raises(Mica::WorkBudgetExceededError) { document.xpath_string("/", budget: budget) }
+    expect_raises(Mica::WorkBudgetExceededError) { document.xpath_float("/", budget: budget) }
+    document.xpath_string("string(/r/i[1])").size.should eq(1_000)
+  end
+
+  it_satisfies "MICA-BUDGET-DEADLINE", "checks the deadline when reading starts and before the document completes" do
+    reader = Mica::XML::Reader.new("<a/>", Mica::XML::ParserOptions.new(work_budget: Mica::Core::WorkBudget.new(timeout: 1.millisecond)))
+    sleep 5.milliseconds
+    expect_raises(Mica::DeadlineExceededError) { reader.read }
+  end
+
+  it_satisfies "MICA-BUDGET-ERROR", "stops a long name within one check interval when max_name_bytes is raised" do
+    name = "n" * 1_000_000
+    options = Mica::XML::ParserOptions.new(max_name_bytes: Int32::MAX, work_budget: Mica::Core::WorkBudget.new(operations_per_unit: 0, base_operations: 1_000))
+    meter = Mica::Core::WorkMeter.new(options.work_budget)
+    expect_raises(Mica::WorkBudgetExceededError) { Mica::XML.parse("<#{name}/>", options, meter) }
+    (meter.operations - meter.allowance).should be <= 70_000
+  end
+
+  it_satisfies "MICA-BUDGET-RENEW", "gives a renewed meter the units of bytes already buffered" do
+    budget = Mica::Core::WorkBudget.new(operations_per_unit: 8, base_operations: 0)
+    reader = Mica::XML::Reader.new("<r><m>#{"x" * 1_000}</m><m>#{"y" * 1_000}</m></r>", Mica::XML::ParserOptions.new(work_budget: budget))
+    reader.read
+    meter = reader.renew_meter
+    meter.units.should be > 2_000
+    while reader.read
+    end
+  end
+
+  it_satisfies "MICA-BUDGET-CORE", "rejects negative charges and saturates at Int64::MAX" do
+    meter = Mica::Core::WorkMeter.new(Mica::Core::WorkBudget.unlimited)
+    expect_raises(ArgumentError) { meter.charge(-1) }
+    expect_raises(ArgumentError) { meter.add_units(-1) }
+    meter.charge(Int64::MAX)
+    meter.charge(Int64::MAX)
+    meter.operations.should eq(Int64::MAX)
+  end
+
+  it_satisfies "MICA-BUDGET-CORE", "counts name-table probes reproducibly with a fixed seed" do
+    xml = "<r>#{(1..2_000).join { |index| "<e#{index}/>" }}</r>"
+    counts = Array.new(2) do
+      reader = Mica::XML::Reader.new(xml, name_seed: 42_u32)
+      while reader.read
+      end
+      reader.operations
+    end
+    counts.uniq.size.should eq(1)
+    table = Mica::XML::NameTable.new(7_u32)
+    2_000.times { |index| table.intern("name#{index}") }
+    table.operations.should be >= table.probes
   end
 end

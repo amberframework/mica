@@ -1,6 +1,6 @@
 require "../spec_helper"
 
-# Linear-time proofs. Each example builds an adversarial input at size count and
+# Linear-time proofs. Each example builds an adversarial input at size n and
 # 4n, counts the operations Mica charges to its work meter (never wall
 # time), and requires the count to grow by at most 4 * 1.25. A quadratic
 # path grows by 16. The shapes include the REXML 2024 CVE inputs.
@@ -53,7 +53,7 @@ private def linear(name : String, size : Int32, & : Int32 -> Int64) : Nil
   result.small.should be > 10_000
 end
 
-describe "Mica::XML linear time (operation counts at count and 4n)" do
+describe "Mica::XML linear time (operation counts at n and 4n)" do
   describe "attributes" do
     it_satisfies "MICA-LINEAR-ATTRIBUTES", "checks duplicates on one very wide element" do
       linear("wide element, duplicate check", 5_000) { |count| parse_operations("<a " + (1..count).join(' ') { |i| %(a#{i}="1") } + "/>") }
@@ -89,7 +89,16 @@ describe "Mica::XML linear time (operation counts at count and 4n)" do
 
     it_satisfies "MICA-LINEAR-CVE-2024-35176", "stops at the first '<' in an attribute value and scans escaped '<' linearly (CVE-2024-35176 shape)" do
       linear("many &lt; in an attribute value", 50_000) { |count| parse_operations(%(<a v="#{"&lt;" * count}"/>)) }
-      linear("many < in an attribute value", 50_000) { |count| parse_operations(%(<a v="x) + "<" * count + %("/>)) + count }
+    end
+
+    it_satisfies "MICA-LINEAR-CVE-2024-35176", "rejects a '<' in an attribute value at the first one, whatever follows" do
+      list_of_operations = {1_000, 4_000, 16_000}.map do |count|
+        meter = Mica::Core::WorkMeter.new(Mica::Core::WorkBudget.unlimited)
+        error = expect_raises(Mica::ParseError, /</) { Mica::XML.parse(%(<a v="x) + "<" * count + %("/>), OPEN, meter) }
+        error.byte_offset.should eq(7)
+        meter.operations
+      end
+      list_of_operations.to_a.uniq.size.should eq(1)
     end
 
     it "normalizes attribute values with long white-space runs" do
@@ -108,7 +117,13 @@ describe "Mica::XML linear time (operation counts at count and 4n)" do
       linear("many character references", 50_000) { |count| parse_operations("<a>#{"&#65;&#x42;" * count}</a>") }
       linear("long decimal reference", 100_000) { |count| parse_operations("<a>&##{"0" * count}65;</a>") }
       linear("long hex reference", 100_000) { |count| parse_operations("<a>&#x#{"0" * count}41;</a>") }
-      linear("unterminated digit runs", 50_000) { |count| parse_operations("<a>#{"&#" + "0" * 20 + "x;"}#{"1" * count}</a>") + count }
+      linear("unterminated digit runs", 50_000) do |count|
+        meter = Mica::Core::WorkMeter.new(Mica::Core::WorkBudget.unlimited)
+        # The scan must reach the end of the digits before it fails.
+        error = expect_raises(Mica::ParseError) { Mica::XML.parse("<a>&##{"1" * count}</a>", OPEN, meter) }
+        error.byte_offset.should be >= 5 + count
+        meter.operations
+      end
     end
 
     it_satisfies "MICA-LINEAR-ENTITIES", "expands many entity references (CVE-2024-41946 shape, pull parser)" do
@@ -201,6 +216,30 @@ describe "Mica::XML linear time (operation counts at count and 4n)" do
             reader.column_number
             reader.move_to_element
           end
+        end
+        meter.operations
+      end
+      {true, false}.each do |big_endian|
+        linear("byte offset after every event, UTF-16 #{big_endian ? "BE" : "LE"}", 20_000) do |count|
+          meter = Mica::Core::WorkMeter.new(Mica::Core::WorkBudget.unlimited)
+          reader = Mica::XML::Reader.new(utf16("<r>#{"<b a='1'>t\u00E9</b>" * count}</r>", big_endian), OPEN, meter)
+          while reader.read
+            reader.position
+          end
+          meter.operations
+        end
+      end
+      linear("byte offset after every event, ISO-8859-1", 20_000) do |count|
+        meter = Mica::Core::WorkMeter.new(Mica::Core::WorkBudget.unlimited)
+        head = %(<?xml version="1.0" encoding="ISO-8859-1"?><r>).to_slice
+        body = ("<b a='1'>t" + "\u00E9" + "</b>") * count
+        latin1 = Mica::Testing::ByteMutator.new([Bytes[0x3C]]).latin1((body + "</r>").to_slice)
+        bytes = Bytes.new(head.size + latin1.size)
+        bytes[0, head.size].copy_from(head)
+        bytes[head.size, latin1.size].copy_from(latin1)
+        reader = Mica::XML::Reader.new(bytes, OPEN, meter)
+        while reader.read
+          reader.position
         end
         meter.operations
       end

@@ -33,6 +33,7 @@ class Mica::XML::Reader
     loop do
       @mark = @pos
       @token_precharged = 0
+      @token_position = error_position if normalization_checked?
       if @pos >= @limit && !fill
         if @frames.empty?
           finish_document

@@ -66,13 +66,24 @@ module HostileMatrix
   end
 
   # Returns the offset of the first code point in *sample* that is not
-  # allowed literally, or nil.
+  # allowed literally, or nil. Decodes with the standard library's
+  # Char::Reader, independently of Mica's decoder.
   def self.first_disallowed(sample : Bytes, version : String) : Int32?
-    index = 0
-    while index < sample.size
-      code, length = Mica::Core::UTF8.decode(sample[index, sample.size - index])
-      return index unless literal_char?(code, version)
-      index += length
+    reader = Char::Reader.new(String.new(sample))
+    while reader.has_next?
+      return reader.pos if reader.error || !literal_char?(reader.current_char.ord, version)
+      reader.next_char
+    end
+    nil
+  end
+
+  # Returns the offset of the first invalid UTF-8 sequence, or nil, from
+  # the standard library's Char::Reader.
+  def self.first_invalid(bytes : Bytes) : Int32?
+    reader = Char::Reader.new(String.new(bytes))
+    while reader.has_next?
+      return reader.pos if reader.error
+      reader.next_char
     end
     nil
   end
@@ -95,7 +106,7 @@ describe "Mica::XML hostile bytes matrix" do
   it_satisfies({"MICA-HOSTILE-MATRIX", "XML10-4.3.3-encoding-errors"}, "reports invalid UTF-8 as an EncodingError at the first invalid byte") do
     checked = 0
     list_of_cells.each do |cell|
-      invalid = Mica::Core::UTF8.first_invalid_offset(cell.bytes)
+      invalid = HostileMatrix.first_invalid(cell.bytes)
       next unless invalid
       label = "#{cell.version} #{cell.context} #{cell.hostile_class} #{cell.bytes.hexstring}"
       error = expect_raises(Mica::ParseError) { Mica::XML.parse(cell.bytes) }
@@ -118,7 +129,7 @@ describe "Mica::XML hostile bytes matrix" do
     checked = 0
     list_of_cells.each do |cell|
       next unless HostileMatrix::CHARACTER_CONTEXTS.includes?(cell.context)
-      next if Mica::Core::UTF8.first_invalid_offset(cell.bytes)
+      next if HostileMatrix.first_invalid(cell.bytes)
       sample = cell.bytes[cell.offset, cell.bytes.size - cell.offset - (HostileMatrix::CONTEXTS[cell.context].split('H', 2)[1].bytesize)]
       label = "#{cell.version} #{cell.context} #{cell.hostile_class} #{cell.bytes.hexstring}"
       if disallowed = HostileMatrix.first_disallowed(sample, cell.version)

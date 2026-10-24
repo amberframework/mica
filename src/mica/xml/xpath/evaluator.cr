@@ -28,6 +28,21 @@ module Mica::XML::XPath
       to_value(evaluate(expression, text_run_start(context), 1, 1))
     end
 
+    # Evaluates and converts with `string()`, charging the conversion.
+    def run_string(expression : Expr, context : Int32) : String
+      to_string(evaluate(expression, text_run_start(context), 1, 1))
+    end
+
+    # Evaluates and converts with `number()`, charging the conversion.
+    def run_number(expression : Expr, context : Int32) : Float64
+      to_number(evaluate(expression, text_run_start(context), 1, 1))
+    end
+
+    # Evaluates and converts with `boolean()`.
+    def run_boolean(expression : Expr, context : Int32) : Bool
+      to_boolean(evaluate(expression, text_run_start(context), 1, 1))
+    end
+
     # Characters of the expression quoted in a budget error.
     EXCERPT_CHARS = 120
 
@@ -41,14 +56,20 @@ module Mica::XML::XPath
     private def work_limit_reached : Nil
       verdict = @meter.verdict
       return if verdict.within?
-      column = @source.byte_index_to_char_index(@offset) || @source.size
-      position = Core::Position.new(@offset.to_i64, 1, column + 1)
+      @meter.raise_exceeded(verdict, expression_position, expression_context)
+    end
+
+    # The expression, quoted (at most `EXCERPT_CHARS` characters), for
+    # budget messages.
+    private def expression_context : String
       excerpt = @source.size > EXCERPT_CHARS ? "#{@source[0, EXCERPT_CHARS]}..." : @source
-      message = "#{@meter.describe(verdict)} in XPath #{excerpt.inspect}"
-      if verdict.deadline_exceeded?
-        raise DeadlineExceededError.new(message, position, @meter.elapsed)
-      end
-      raise WorkBudgetExceededError.new(message, position, @meter.operations, @meter.allowance)
+      "in XPath #{excerpt.inspect}"
+    end
+
+    # The position of the expression part being evaluated: line 1, the
+    # column in characters and the byte offset.
+    private def expression_position : Core::Position
+      XPath.expression_position(@source, @offset)
     end
 
     # XPath sees a run of adjacent text and CDATA siblings as one node, so a

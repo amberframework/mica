@@ -12,9 +12,11 @@ module Mica::XML
   # and rehash, so a lookup never costs more than its name's length plus
   # MAX_PROBES, and a run of collisions cannot persist.
   #
-  # `operations` counts work deterministically (name bytes plus one per
-  # lookup) for the reader's work meter; the probe count depends on the
-  # random seed, so it is kept separately in `probes` for diagnostics.
+  # `operations` counts all the work for the reader's work meter: each
+  # lookup's name bytes (hashing), every slot probed, the bytes compared,
+  # and every name rehashed when the table grows or reseeds. Probe counts
+  # depend on the seed; tests that need reproducible operation counts pass
+  # a fixed *seed*.
   class NameTable
     # Longest probe sequence tolerated before reseeding. With a random seed
     # and a load factor of at most 1/2, sequences this long are vanishingly
@@ -28,11 +30,11 @@ module Mica::XML
     # Returns the number of slots examined by all lookups so far.
     getter probes : Int64 = 0_i64
 
-    # Returns the deterministic work of all lookups so far: each one's name
-    # bytes plus one.
+    # Returns the work of all lookups, growth and reseeding so far.
     getter operations : Int64 = 0_i64
 
     @reseeds = 0
+    @fixed_seed = false
 
     @strings : Array(String)
     @hashes : Array(UInt32)
@@ -45,7 +47,11 @@ module Mica::XML
 
     EMPTY_ID = 0
 
-    def initialize
+    # *seed* fixes the hash seed (for reproducible tests); by default each
+    # table draws a random one, and reseeding always draws a fresh one
+    # unless a seed was given.
+    def initialize(seed : UInt32? = nil)
+      @fixed_seed = !seed.nil?
       @strings = [] of String
       @hashes = [] of UInt32
       @local_ids = [] of Int32
@@ -53,7 +59,7 @@ module Mica::XML
       @qname_states = [] of Int8
       @slots = Slice(Int32).new(256, -1)
       @mask = 255
-      @seed = Random::Secure.rand(UInt32)
+      @seed = seed || Random::Secure.rand(UInt32)
       intern("".to_slice)
     end
 
@@ -77,13 +83,18 @@ module Mica::XML
         @probes += 1
         id = @slots[index]
         if id < 0
+          @operations += steps
           id = add(bytes, hash, index)
           reseed if steps > MAX_PROBES
           return id
         end
-        if @hashes[id] == hash && @strings[id].to_slice == bytes
-          reseed if steps > MAX_PROBES
-          return id
+        if @hashes[id] == hash
+          @operations += bytes.size
+          if @strings[id].to_slice == bytes
+            @operations += steps
+            reseed if steps > MAX_PROBES
+            return id
+          end
         end
         index = (index + 1) & @mask
         steps += 1
@@ -102,10 +113,12 @@ module Mica::XML
       index = hash.to_i32! & @mask
       loop do
         @probes += 1
+        @operations += 1
         id = @slots[index]
         return -1 if id < 0
-        if @hashes[id] == hash && @strings[id].to_slice == bytes
-          return id
+        if @hashes[id] == hash
+          @operations += bytes.size
+          return id if @strings[id].to_slice == bytes
         end
         index = (index + 1) & @mask
       end
@@ -190,9 +203,10 @@ module Mica::XML
     private def reseed : Nil
       @reseeds += 1
       raise Mica::Error.new("Name table hash collisions persist after #{MAX_RESEEDS} reseeds") if @reseeds > MAX_RESEEDS
-      @seed = Random::Secure.rand(UInt32)
+      @seed = @fixed_seed ? mix_seed(@seed &+ @reseeds) : Random::Secure.rand(UInt32)
       @strings.each_with_index do |string, id|
         @probes += string.bytesize
+        @operations += string.bytesize + 1
         @hashes[id] = hash_bytes(string.to_slice)
       end
       rebuild(@slots.size)
@@ -203,12 +217,23 @@ module Mica::XML
       @mask = new_size - 1
       @hashes.each_with_index do |hash, id|
         index = hash.to_i32! & @mask
+        @operations += 1
         while @slots[index] >= 0
           @probes += 1
+          @operations += 1
           index = (index + 1) & @mask
         end
         @slots[index] = id
       end
+    end
+
+    # Derives the next seed of a table with a fixed seed.
+    private def mix_seed(value : UInt32) : UInt32
+      value ^= value >> 16
+      value &*= 0x7feb352d_u32
+      value ^= value >> 15
+      value &*= 0x846ca68b_u32
+      value ^ (value >> 16)
     end
 
     # Seeded FNV-1a over the bytes followed by a final avalanche step.

@@ -112,12 +112,16 @@ Every operation runs under a `WorkMeter`:
 3. Charge work with `meter.charge(n)`: one operation per byte scanned, and
    one per step of every loop that does not advance through the input
    (hash probes, declaration lookups, tree walks, comparisons). Charging
-   is an add and a compare; when it returns true, call `meter.verdict` and
-   raise the positioned budget or deadline error.
+   is an add and a compare; when it returns true, call
+   `meter.enforce { position }`, which raises the positioned
+   `Mica::WorkBudgetExceededError` or `Mica::DeadlineExceededError` when
+   the budget or the deadline has run out (the block runs only then).
 4. In long scanning loops, charge at least every 64 KiB (`SCAN_CHUNK` in
    the XML reader) so a single huge token cannot outrun the meter.
-5. Check `meter.deadline_passed?` after each IO read, and offer
-   `renew_meter` for long-lived streams.
+5. Call `meter.enforce_deadline { position }` after each IO read (in the
+   `input_received` hook), when an operation starts and before it reports
+   success, and offer `renew_meter` for long-lived streams (giving the new
+   meter the units of bytes already buffered).
 
 Pick the default budget from measurement: run the format's corpus and its
 fuzz campaign, read `max_ops_per_unit` from the report, and set

@@ -156,17 +156,21 @@ module Mica::XML
     @predefined_ids : StaticArray(Int32, 5)
 
     # Creates a reader over *string*. The string's bytes are read in place.
-    def self.new(string : String, options : ParserOptions = ParserOptions.default, meter : Core::WorkMeter? = nil) : self
-      new(string.to_slice, options, meter)
+    def self.new(string : String, options : ParserOptions = ParserOptions.default, meter : Core::WorkMeter? = nil, *, name_seed : UInt32? = nil) : self
+      new(string.to_slice, options, meter, name_seed: name_seed)
     end
 
     # Creates a reader over *bytes* (UTF-8, or UTF-16 with a byte order
     # mark). The bytes are read in place and must not change while the
     # reader is in use. *meter* lets several operations share one budget;
     # without it the reader starts a meter from `options.work_budget`.
-    def initialize(bytes : Bytes, @options : ParserOptions = ParserOptions.default, meter : Core::WorkMeter? = nil)
+    #
+    # *name_seed* (`:nodoc:`, for reproducible tests and fuzzing) fixes the
+    # name table's hash seed; leave it nil in production so each reader
+    # draws a random seed.
+    def initialize(bytes : Bytes, @options : ParserOptions = ParserOptions.default, meter : Core::WorkMeter? = nil, *, name_seed : UInt32? = nil)
       @meter = meter || Core::WorkMeter.new(@options.work_budget)
-      @names = NameTable.new
+      @names = NameTable.new(name_seed)
       @dtd = DTD.new
       @xmlns_id = @names.intern("xmlns")
       @xml_id = @names.intern("xml")
@@ -177,9 +181,9 @@ module Mica::XML
     end
 
     # Creates a streaming reader over *io*.
-    def initialize(io : IO, @options : ParserOptions = ParserOptions.default, meter : Core::WorkMeter? = nil)
+    def initialize(io : IO, @options : ParserOptions = ParserOptions.default, meter : Core::WorkMeter? = nil, *, name_seed : UInt32? = nil)
       @meter = meter || Core::WorkMeter.new(@options.work_budget)
-      @names = NameTable.new
+      @names = NameTable.new(name_seed)
       @dtd = DTD.new
       @xmlns_id = @names.intern("xmlns")
       @xml_id = @names.intern("xml")
@@ -199,7 +203,11 @@ module Mica::XML
     # protocol session over a socket) call this between messages instead of
     # disabling the budget.
     def renew_meter(budget : Core::WorkBudget = @options.work_budget) : Core::WorkMeter
-      @meter = Core::WorkMeter.new(budget)
+      meter = Core::WorkMeter.new(budget)
+      # Bytes already buffered but not yet consumed arrived under the old
+      # meter; the new one gets their units so it can afford to scan them.
+      meter.add_units(@limit - @pos)
+      @meter = meter
     end
 
     # Moves to the next node. Returns false at the end of the document.
@@ -214,7 +222,7 @@ module Mica::XML
         start_document
       end
       produced = advance
-      verify_normalization if produced && @xml11 && @options.check_normalization?
+      verify_normalization if produced && normalization_checked?
       produced
     end
 
@@ -406,13 +414,13 @@ module Mica::XML
     # `Core::LineTracking`); the counting is charged to the work meter.
     def position : Core::Position
       position = error_position
-      steps = @column_steps
-      charge(steps - @charged_column_steps + 1)
-      @charged_column_steps = steps
+      steps = @column_steps + @offset_steps
+      charge(steps - @charged_position_steps + 1)
+      @charged_position_steps = steps
       position
     end
 
-    @charged_column_steps = 0_i64
+    @charged_position_steps = 0_i64
 
     # Returns the public identifier of the DOCTYPE, if any.
     def public_id : String?
@@ -521,14 +529,7 @@ module Mica::XML
     end
 
     private def work_limit_reached : Nil
-      verdict = @meter.verdict
-      return if verdict.within?
-      position = error_position
-      message = @meter.describe(verdict)
-      if verdict.deadline_exceeded?
-        raise DeadlineExceededError.new(message, position, @meter.elapsed)
-      end
-      raise WorkBudgetExceededError.new(message, position, @meter.operations, @meter.allowance)
+      @meter.enforce { error_position }
     end
 
     # Charges the bytes scanned since the token mark plus fixed per-token
@@ -564,7 +565,7 @@ module Mica::XML
     # have waited on its IO, so the deadline is checked here too.
     private def input_received(count : Int32) : Nil
       @meter.add_units(count)
-      work_limit_reached if @meter.deadline_passed?
+      @meter.enforce_deadline { error_position }
     end
   end
 end

@@ -19,6 +19,13 @@ module Mica::Core
     @transcoded_from : Encoding? = nil
     @transcode_origin = 0_i64
     @source_bytes_before_buffer = 0_i64
+    # Cache for `source_offset_at` on transcoded input: the last decoded
+    # position answered (absolute) and its source size from `from`.
+    @offset_cache_absolute = -1_i64
+    @offset_cache_from = -1_i64
+    @offset_cache_size = 0_i64
+    # Decoded bytes examined by `source_offset_at`, for work accounting.
+    @offset_steps = 0_i64
 
     # Reads *transcoder*'s output as the whole input; *mark_size* source bytes
     # (a byte order mark) came before it.
@@ -44,6 +51,7 @@ module Mica::Core
       @transcoded_from = encoding
       @transcode_origin = @base_offset
       @source_bytes_before_buffer = 0_i64
+      @offset_cache_from = -1_i64
       @io = Transcoder.new(source, encoding, carried)
       @io_eof = false
       @buffer = Bytes.new(ByteInput::INITIAL_BUFFER_SIZE)
@@ -62,17 +70,36 @@ module Mica::Core
       from = @transcode_origin > @base_offset ? (@transcode_origin - @base_offset).to_i32 : 0
       return unless from < keep
       @source_bytes_before_buffer += Transcoder.source_size(encoding, @buffer[from, keep - from])
+      @offset_steps += keep - from
+      @offset_cache_from = -1_i64
     end
 
     # Returns the offset in the original input of byte *pos* of *buffer*,
     # whose first byte is at decoded offset *base*.
+    #
+    # On transcoded input the decoded bytes between the buffer start (or the
+    # transcoding origin) and *pos* are mapped back to source bytes. The last
+    # answer is cached, so asking for positions that only move forward costs
+    # the distance moved, not the distance from the buffer start; the bytes
+    # examined are counted in `@offset_steps` for work accounting.
     private def source_offset_at(buffer : Bytes, pos : Int32, base : Int64) : Int64
       absolute = base + pos
       encoding = @transcoded_from
       return @source_prefix_bytes + absolute if encoding.nil? || absolute <= @transcode_origin
       from = @transcode_origin > base ? (@transcode_origin - base).to_i32 : 0
-      in_buffer = Transcoder.source_size(encoding, buffer[from, pos - from])
-      @source_prefix_bytes + @transcode_origin + @source_bytes_before_buffer + in_buffer
+      from_absolute = base + from
+      scan_from = from
+      size = 0_i64
+      if @offset_cache_from == from_absolute && @offset_cache_absolute >= from_absolute && @offset_cache_absolute <= absolute
+        scan_from = (@offset_cache_absolute - base).to_i32
+        size = @offset_cache_size
+      end
+      size += Transcoder.source_size(encoding, buffer[scan_from, pos - scan_from])
+      @offset_steps += pos - scan_from
+      @offset_cache_from = from_absolute
+      @offset_cache_absolute = absolute
+      @offset_cache_size = size
+      @source_prefix_bytes + @transcode_origin + @source_bytes_before_buffer + size
     end
 
     # Returns a description when *lead* is a `Transcoder` marker byte in

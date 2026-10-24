@@ -40,15 +40,15 @@ class ToyRecordReader
   end
 
   private def charge(count : Int32) : Nil
-    return unless @meter.charge(count)
-    verdict = @meter.verdict
-    return if verdict.within?
-    position = Mica::Core::Position.new(source_offset_at(@buffer, @pos, @base_offset))
-    raise Mica::WorkBudgetExceededError.new(@meter.describe(verdict), position, @meter.operations, @meter.allowance)
+    @meter.enforce { here } if @meter.charge(count)
+  end
+
+  private def here : Mica::Core::Position
+    Mica::Core::Position.new(source_offset_at(@buffer, @pos, @base_offset))
   end
 
   private def error(message : String) : NoReturn
-    raise Mica::ParseError.new(message, Mica::Core::Position.new(source_offset_at(@buffer, @pos, @base_offset)))
+    raise Mica::ParseError.new(message, here)
   end
 
   private def input_token_limit : Int32
@@ -60,14 +60,17 @@ class ToyRecordReader
   end
 
   private def input_limit_error(message : String) : NoReturn
-    raise Mica::LimitExceededError.new(message, Mica::Core::Position.new(source_offset_at(@buffer, @pos, @base_offset)))
+    raise Mica::LimitExceededError.new(message, here)
   end
 
   private def discarding_input(keep : Int32) : Nil
   end
 
+  # New bytes raise the allowance; a read is where the reader may have
+  # waited, so the deadline is checked here.
   private def input_received(count : Int32) : Nil
     @meter.add_units(count)
+    @meter.enforce_deadline { here }
   end
 end
 
@@ -119,6 +122,15 @@ describe Mica::Core::ByteInput do
     budget = Mica::Core::WorkBudget.new(operations_per_unit: 0, base_operations: 1_000)
     error = expect_raises(Mica::WorkBudgetExceededError) { read_all(ToyRecordReader.new(toy_records(100), budget: budget)) }
     error.operations.should be > 1_000
+    error.position.text?.should be_false
+  end
+
+  it_satisfies "MICA-CORE-LIMITS", "enforces a deadline at each read from a stream" do
+    budget = Mica::Core::WorkBudget.new(timeout: 1.nanosecond)
+    error = expect_raises(Mica::DeadlineExceededError) do
+      read_all(ToyRecordReader.new(TrickleIO.new(toy_records(100), 3), budget: budget))
+    end
+    error.elapsed.should be > 1.nanosecond
   end
 
   it_satisfies "MICA-LINEAR-INPUT", "copies each streamed byte O(1) times when compacting the buffer" do
@@ -253,6 +265,41 @@ describe Mica::Core::Transcoder do
   end
 end
 
+# An IO that counts the reads made on it.
+private class CountingIO < IO
+  getter reads = 0
+
+  def initialize(@bytes : Bytes)
+    @offset = 0
+  end
+
+  def read(slice : Bytes) : Int32
+    @reads += 1
+    count = Math.min(Math.min(1, slice.size), @bytes.size - @offset)
+    return 0 if count <= 0
+    slice[0, count].copy_from(@bytes[@offset, count])
+    @offset += count
+    count
+  end
+
+  def write(slice : Bytes) : Nil
+    raise IO::Error.new("read-only")
+  end
+end
+
+describe "Mica::Core::Transcoder reads" do
+  it_satisfies "MICA-CORE-LIMITS", "returns to its caller after one round of source reads" do
+    mutator = Mica::Testing::ByteMutator.new(["x".to_slice])
+    encoded = mutator.utf16(("abc" * 1_000).to_slice, big_endian: true, with_mark: false)
+    source = CountingIO.new(encoded)
+    transcoder = Mica::Core::Transcoder.new(source, Mica::Core::Encoding::UTF16BE)
+    buffer = Bytes.new(64 * 1024)
+    count = transcoder.read(buffer)
+    count.should be > 0
+    source.reads.should be <= 8
+  end
+end
+
 describe Mica::Core::ByteSearch do
   it_satisfies "MICA-LINEAR-SEARCH", "finds the same offsets as the standard library in at most 2(n + m) steps" do
     random = Random::PCG32.new(42_u64)
@@ -265,6 +312,10 @@ describe Mica::Core::ByteSearch do
       steps.should be <= 2 * (haystack.bytesize + needle.bytesize)
     end
     Mica::Core::ByteSearch.index("abc".to_slice, Bytes.empty).should eq(0)
+    reports = [] of Int32
+    Mica::Core::ByteSearch.index(("a" * 100_000).to_slice, ("a" * 50_000 + "b").to_slice) { |count| reports << count }
+    reports.size.should be > 10
+    reports.max.should be <= Mica::Core::ByteSearch::STEP_CHUNK
   end
 end
 

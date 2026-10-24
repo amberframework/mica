@@ -24,8 +24,8 @@ module Mica::XML::XPath
     @position = 0
     @nesting = 0
 
-    def initialize(@source : String)
-      @tokens = Lexer.new(@source).tokenize
+    def initialize(@source : String, @meter : Core::WorkMeter? = nil)
+      @tokens = Lexer.new(@source, @meter).tokenize
     end
 
     # Bounds the expression tree height: long operator chains such as
@@ -47,6 +47,7 @@ module Mica::XML::XPath
 
     private def advance : Token
       token = @tokens[@position]
+      XPath.charge_compile(@meter, 1, @source, token.offset)
       @position += 1 unless token.kind.end?
       token
     end

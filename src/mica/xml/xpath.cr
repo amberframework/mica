@@ -54,16 +54,66 @@ module Mica::XML
       # it runs out.
       def evaluate(node : Node, namespaces : Hash(String, String)? = nil, variables : Hash(String, Value)? = nil,
                    *, budget : Core::WorkBudget = DEFAULT_WORK_BUDGET, meter : Core::WorkMeter? = nil) : Value
+        evaluator(node, namespaces, variables, budget, meter).run(@root, node.index)
+      end
+
+      # Evaluates the expression and converts the result with the XPath
+      # `string()` rules inside the same budget (the string value of a node
+      # set's first node can be the text of the whole document).
+      def evaluate_string(node : Node, namespaces : Hash(String, String)? = nil, variables : Hash(String, Value)? = nil,
+                          *, budget : Core::WorkBudget = DEFAULT_WORK_BUDGET, meter : Core::WorkMeter? = nil) : String
+        evaluator(node, namespaces, variables, budget, meter).run_string(@root, node.index)
+      end
+
+      # Evaluates the expression and converts the result with the XPath
+      # `number()` rules inside the same budget.
+      def evaluate_number(node : Node, namespaces : Hash(String, String)? = nil, variables : Hash(String, Value)? = nil,
+                          *, budget : Core::WorkBudget = DEFAULT_WORK_BUDGET, meter : Core::WorkMeter? = nil) : Float64
+        evaluator(node, namespaces, variables, budget, meter).run_number(@root, node.index)
+      end
+
+      # Evaluates the expression and converts the result with the XPath
+      # `boolean()` rules inside the same budget.
+      def evaluate_boolean(node : Node, namespaces : Hash(String, String)? = nil, variables : Hash(String, Value)? = nil,
+                           *, budget : Core::WorkBudget = DEFAULT_WORK_BUDGET, meter : Core::WorkMeter? = nil) : Bool
+        evaluator(node, namespaces, variables, budget, meter).run_boolean(@root, node.index)
+      end
+
+      private def evaluator(node : Node, namespaces : Hash(String, String)?, variables : Hash(String, Value)?,
+                            budget : Core::WorkBudget, meter : Core::WorkMeter?) : Evaluator
         work_meter = meter || Core::WorkMeter.new(budget)
         work_meter.add_units(node.document.node_count.to_i64 + @source.bytesize)
-        Evaluator.new(node.document, namespaces || XPath.root_namespaces(node), variables, work_meter, @source).run(@root, node.index)
+        Evaluator.new(node.document, namespaces || XPath.root_namespaces(node), variables, work_meter, @source)
       end
     end
 
     # Parses *path*. Raises `Mica::XML::XPathError` on a syntax error or an
-    # unsupported feature.
-    def self.compile(path : String) : Expression
-      Expression.new(path, Parser.new(path).parse)
+    # unsupported feature. With *meter*, lexing and parsing are charged to
+    # it (one operation per byte and per token, with the expression's bytes
+    # as units) and stop with a positioned `Mica::LimitExceededError` when
+    # it runs out.
+    def self.compile(path : String, meter : Core::WorkMeter? = nil) : Expression
+      meter.try(&.add_units(path.bytesize))
+      Expression.new(path, Parser.new(path, meter).parse)
+    end
+
+    # :nodoc:
+    #
+    # Charges *count* operations of compiling *source* to *meter* and raises
+    # when it runs out; *offset* is the byte where compilation is.
+    def self.charge_compile(meter : Core::WorkMeter?, count : Int32, source : String, offset : Int32) : Nil
+      return unless meter
+      return unless meter.charge(count)
+      meter.enforce("compiling XPath #{source[0, Math.min(source.size, 120)].inspect}") { expression_position(source, offset) }
+    end
+
+    # :nodoc:
+    #
+    # Returns the position of byte *offset* of *source*: line 1, the column
+    # in characters, the byte offset.
+    def self.expression_position(source : String, offset : Int32) : Core::Position
+      column = source.byte_index_to_char_index(offset) || source.size
+      Core::Position.new(offset.to_i64, 1, column + 1)
     end
 
     # :nodoc:

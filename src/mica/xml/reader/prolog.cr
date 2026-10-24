@@ -2,6 +2,9 @@ class Mica::XML::Reader
   # Checks the encoding signature and reads the XML declaration.
   private def start_document : Nil
     @phase = Phase::Prolog
+    # The meter may have started long before the first read (and the
+    # signature read may have waited on the IO).
+    @meter.enforce_deadline { error_position }
     if problem = @encoding_problem
       encoding_error(problem)
     end
@@ -182,6 +185,7 @@ class Mica::XML::Reader
       end
     end
     syntax_error("Document has no root element") unless @root_seen
+    @meter.enforce_deadline { error_position }
     @phase = Phase::Done
     @node_type = Type::NONE
     @attrs.clear

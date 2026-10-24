@@ -149,14 +149,26 @@ class Mica::XML::Reader
   end
 
   private def syntax_error(message : String) : NoReturn
+    charge_scanned_before_error
     raise ParseError.new(message, error_position)
   end
 
   private def limit_error(message : String) : NoReturn
+    charge_scanned_before_error
     raise LimitExceededError.new(message, error_position)
   end
 
   private def encoding_error(message : String) : NoReturn
+    charge_scanned_before_error
     raise EncodingError.new(message, error_position)
+  end
+
+  # Records the bytes of the failing token scanned since its last charge,
+  # so the meter's count after an error reflects the work done. Nothing is
+  # enforced: an error is being raised anyway.
+  private def charge_scanned_before_error : Nil
+    scanned = @pos - @mark - @token_precharged
+    @meter.charge(scanned) if scanned > 0
+    @token_precharged += scanned if scanned > 0
   end
 end

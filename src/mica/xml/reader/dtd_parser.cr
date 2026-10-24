@@ -134,6 +134,10 @@ class Mica::XML::Reader
     quote = peek_byte
     if quote == '"'.ord || quote == '\''.ord
       value = parse_entity_value(quote)
+      if normalization_checked?
+        check_normalized_name(name_id)
+        check_normalized(value, "entity replacement text")
+      end
       entity = DTD::Entity.new(name_id, value, nil, nil, nil, parameter)
     else
       public_id, system_id = parse_external_id(require_system: true)
@@ -278,6 +282,11 @@ class Mica::XML::Reader
       type = parse_attribute_type
       require_spaces("after the attribute type")
       default_kind, default_value = parse_default_declaration(type)
+      if normalization_checked?
+        check_normalized_name(element_id)
+        check_normalized_name(attr_id)
+        check_normalized(default_value, "attribute default value")
+      end
       record_attribute_declaration(element_id, DTD::AttributeDecl.new(attr_id, type, default_kind, default_value))
     end
   end
@@ -318,10 +327,14 @@ class Mica::XML::Reader
     expect_byte('(', "to open the enumeration")
     loop do
       skip_spaces
+      start = @pos - @mark
       if notation
         scan_name_span
       else
         scan_nmtoken
+      end
+      if normalization_checked?
+        check_normalized(@buffer[@mark + start, @pos - @mark - start], notation ? "name" : "name token")
       end
       skip_spaces
       case peek_byte

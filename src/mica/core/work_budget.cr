@@ -65,10 +65,10 @@ module Mica::Core
   #
   # Formats call `charge` on their hot paths: it adds and compares, and
   # returns true only when the meter needs a closer look, which the caller
-  # gets from `verdict` (recomputing the allowance and, when a timeout is
+  # gets from `enforce` (recomputing the allowance and, when a timeout is
   # set, reading the monotonic clock at most once every `CLOCK_INTERVAL`
-  # operations). The caller turns a failing verdict into a positioned
-  # `WorkBudgetExceededError` or `DeadlineExceededError`.
+  # operations). `enforce` raises a positioned `WorkBudgetExceededError` or
+  # `DeadlineExceededError` when the budget or the deadline has run out.
   #
   # One meter can be shared by several operations (for example a parse and
   # the queries that follow it in one request), so they draw on one budget.
@@ -103,17 +103,59 @@ module Mica::Core
       @checkpoint = next_checkpoint
     end
 
-    # Adds *count* operations. Returns true when the caller must call
-    # `verdict` (the budget may be exhausted or the clock is due).
+    # Adds *count* operations (saturating at `Int64::MAX`). Returns true
+    # when the caller must call `enforce` or `verdict` (the budget may be
+    # exhausted or the clock is due). Raises `ArgumentError` for a negative
+    # count, so a miscalculated delta can never lower the recorded work.
     @[AlwaysInline]
     def charge(count : Int) : Bool
-      (@operations &+= count) > @checkpoint
+      raise ArgumentError.new("Negative work charge: #{count}") if count < 0
+      @operations = count > Int64::MAX - @operations ? Int64::MAX : @operations + count
+      @operations > @checkpoint
     end
 
-    # Records *count* more units of input, which raises the allowance.
+    # Records *count* more units of input (saturating), which raises the
+    # allowance. Raises `ArgumentError` for a negative count.
     @[AlwaysInline]
     def add_units(count : Int) : Nil
-      @units &+= count
+      raise ArgumentError.new("Negative unit count: #{count}") if count < 0
+      @units = count > Int64::MAX - @units ? Int64::MAX : @units + count
+    end
+
+    # Checks the budget and the deadline (see `verdict`) and raises the
+    # matching positioned error when either has run out:
+    # `Mica::WorkBudgetExceededError` or `Mica::DeadlineExceededError`. The
+    # block computes the position only when an error is raised. *context*
+    # is appended to the message (for example the query being evaluated).
+    #
+    # ```
+    # meter.enforce { Mica::Core::Position.new(offset) } if meter.charge(bytes)
+    # ```
+    def enforce(context : String? = nil, & : -> Position) : Nil
+      verdict = self.verdict
+      return if verdict.within?
+      raise_exceeded(verdict, yield, context)
+    end
+
+    # Reads the clock now and raises `Mica::DeadlineExceededError` when the
+    # timeout has passed. Formats call it at natural pauses: after each read
+    # from an IO, and at the start and end of an operation.
+    def enforce_deadline(context : String? = nil, & : -> Position) : Nil
+      return unless deadline_passed?
+      raise_exceeded(Verdict::DeadlineExceeded, yield, context)
+    end
+
+    # Raises the positioned error for a failing *verdict* (from `verdict`),
+    # with *context* appended to the message. Callers that build an
+    # expensive context string call `verdict` themselves and then this.
+    def raise_exceeded(verdict : Verdict, position : Position, context : String? = nil) : NoReturn
+      message = describe(verdict)
+      message = "#{message} #{context}" if context
+      if verdict.deadline_exceeded?
+        raise DeadlineExceededError.new(message, position, elapsed)
+      end
+      raise WorkBudgetExceededError.new(message, position, @operations, allowance) if verdict.budget_exceeded?
+      raise ArgumentError.new("raise_exceeded needs a failing verdict")
     end
 
     # Returns the operations allowed for the units seen so far.
