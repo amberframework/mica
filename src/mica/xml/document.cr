@@ -214,6 +214,7 @@ module Mica::XML
       parent
     end
 
+    @[AlwaysInline]
     private def add_element(reader : Reader, parent : Int32) : Int32
       element = append_new(Node::Type::ELEMENT_NODE, parent, reader.event_name_id, reader.event_namespace_uri_id, Bytes.empty)
       previous = -1
@@ -238,6 +239,7 @@ module Mica::XML
     # Adds text under *parent*. Adjacent text events (around entity
     # boundaries) merge into one node; the merged text is collected in a
     # buffer and stored once, so merging stays linear.
+    @[AlwaysInline]
     private def add_text(parent : Int32, bytes : Bytes) : Nil
       last = data(parent).last_child
       if last >= 0 && data(last).kind.text_node?
@@ -335,6 +337,7 @@ module Mica::XML
     end
 
     # Creates node *index* with its links and value in one record write.
+    @[AlwaysInline]
     private def add_node(kind : Node::Type, parent : Int32, name_id : Int32, namespace_uri_id : Int32, value : Bytes, previous_sibling : Int32 = -1) : Int32
       index = @size
       if index & PAGE_MASK == 0
@@ -358,6 +361,7 @@ module Mica::XML
     end
 
     # Adds a node as the last child of *parent*.
+    @[AlwaysInline]
     private def append_new(kind : Node::Type, parent : Int32, name_id : Int32, namespace_uri_id : Int32, value : Bytes) : Int32
       parent_record = data(parent)
       last = parent_record.last_child

@@ -4,6 +4,7 @@ class Mica::XML::Reader
     syntax_error("Expected '#{literal}' #{context}")
   end
 
+  @[AlwaysInline]
   private def expect_byte(byte : Char, context : String) : Nil
     if peek_byte == byte.ord
       @pos += 1
@@ -15,6 +16,7 @@ class Mica::XML::Reader
   # Skips white space and returns true when there was any. In an XML 1.1
   # document entity, NEL and LSEP are line ends and so count as white
   # space.
+  @[AlwaysInline]
   private def skip_spaces : Bool
     skipped = false
     run = 0
@@ -88,6 +90,7 @@ class Mica::XML::Reader
   end
 
   # Scans a Name and returns its start (relative to the mark) and size.
+  @[AlwaysInline]
   private def scan_name_span : {Int32, Int32}
     start = @pos - @mark
     if (byte = peek_byte) >= 0 && byte < 0x80

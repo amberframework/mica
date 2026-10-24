@@ -94,6 +94,7 @@ class Mica::XML::Reader
 
   # Returns true when the *size* bytes at *offset* in the buffer spell name
   # *name_id*.
+  @[AlwaysInline]
   private def end_tag_matches?(name_id : Int32, offset : Int32, size : Int32) : Bool
     expected = @names[name_id].to_slice
     expected.size == size && Core::ByteScan.matches?(@buffer, offset, expected)
@@ -369,6 +370,7 @@ class Mica::XML::Reader
   end
 
   # Parses an end tag and checks it against the open element.
+  @[AlwaysInline]
   private def parse_end_tag : Nil
     @pos += 2
     start, size = scan_name_span

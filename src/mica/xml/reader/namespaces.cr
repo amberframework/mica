@@ -95,6 +95,7 @@ class Mica::XML::Reader
 
   # Returns the namespace URI id bound to *prefix_id* (EMPTY_ID for no
   # namespace). Raises when a non-empty prefix is unbound (or undeclared).
+  @[AlwaysInline]
   private def resolve_prefix(prefix_id : Int32, name_id : Int32) : Int32
     return @xml_namespace_id if prefix_id == @xml_id
     charge_in_token(1)

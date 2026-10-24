@@ -220,6 +220,12 @@ module Mica::XML::XPath
 
     private def sort_unique(nodes : Array(Int32)) : Array(Int32)
       return nodes if nodes.size < 2
+      if @document.index_order?
+        # Often already in order (a child step over contexts in document
+        # order): one pass checks, and the sort is skipped.
+        charge(nodes.size)
+        return nodes if strictly_increasing?(nodes)
+      end
       # Comparison sort: n log2 n comparisons.
       charge(nodes.size * (64 - nodes.size.leading_zeros_count))
       if @document.index_order?
@@ -228,8 +234,27 @@ module Mica::XML::XPath
         charge(@document.node_count) unless @document.order_keys_ready?
         nodes.sort_by! { |node| @document.order_key(node) }
       end
-      nodes.uniq!
-      nodes
+      drop_adjacent_duplicates(nodes)
+    end
+
+    private def strictly_increasing?(nodes : Array(Int32)) : Bool
+      index = 1
+      while index < nodes.size
+        return false unless nodes[index - 1] < nodes[index]
+        index += 1
+      end
+      true
+    end
+
+    # Removes repeats from sorted *nodes* in place (no hashing).
+    private def drop_adjacent_duplicates(nodes : Array(Int32)) : Array(Int32)
+      kept = 0
+      nodes.each_with_index do |node, index|
+        next if index > 0 && node == nodes[kept - 1]
+        nodes[kept] = node
+        kept += 1
+      end
+      nodes.truncate(0, kept)
     end
 
     private def resolve(test : NodeTest) : Matcher
@@ -249,13 +274,13 @@ module Mica::XML::XPath
     private def matches?(node : Int32, axis : Axis, matcher : Matcher) : Bool
       kind = @document.kind(node)
       # XPath sees a run of adjacent text and CDATA nodes as one text node,
-      # represented here by the first node of the run.
-      return false if text_continuation?(node, kind)
+      # represented here by the first node of the run. Only the tests that
+      # accept text nodes need the check.
       case matcher.kind
       when .any_node?
-        true
+        !text_continuation?(node, kind)
       when .text?
-        kind.text_node? || kind.cdata_section_node?
+        (kind.text_node? || kind.cdata_section_node?) && !text_continuation?(node, kind)
       when .comment?
         kind.comment_node?
       when .pi?
@@ -407,10 +432,8 @@ module Mica::XML::XPath
       when .descendant?, .descendant_or_self?
         yield node if axis.descendant_or_self?
         return if attribute_like?(node)
-        each_descendant(node) do |descendant|
-          charge(1)
-          yield descendant
-        end
+        # each_descendant charges every node it visits.
+        each_descendant(node) { |descendant| yield descendant }
       when .self?
         yield node
       when .parent?
@@ -455,14 +478,22 @@ module Mica::XML::XPath
       end
     end
 
+    # Nodes a descendant walk visits per work charge.
+    private WALK_CHUNK = 1024
+
     private def each_descendant(node : Int32, &) : Nil
       if @document.index_order?
         stop = @document.subtree_end(node)
         current = node + 1
         while current < stop
-          charge(1)
-          yield current unless attribute_like?(current)
-          current += 1
+          # Each chunk is charged before it is walked, so a long walk stops
+          # between chunks and never runs past the budget.
+          chunk_end = stop - current > WALK_CHUNK ? current + WALK_CHUNK : stop
+          charge(chunk_end - current)
+          while current < chunk_end
+            yield current unless attribute_like?(current)
+            current += 1
+          end
         end
       else
         current = @document.following_in_order(node, node)

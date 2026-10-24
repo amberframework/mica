@@ -107,6 +107,16 @@ describe Mica::XML::XPath do
       values("//c | //b | //b[1]").should eq(["one", "two", "three", "c-text"])
     end
 
+    it_satisfies "XPATH10-3.3-node-sets", "keeps a step from many contexts in document order without duplicates" do
+      document = Mica::XML.parse("<r><a id='1'><b>1</b></a><a id='2'><b>2</b><b>3</b></a></r>")
+      document.xpath_nodes("//b/..").map { |node| node["id"] }.should eq(["1", "2"])
+      document.xpath_nodes("//b/../b").map(&.content).should eq(["1", "2", "3"])
+      # After an edit, node indexes no longer follow document order.
+      node_at(document, "//a[1]").content = "x"
+      document.xpath_nodes("//a/node()").map(&.content).should eq(["x", "2", "3"])
+      document.xpath_nodes("//b/..").map { |node| node["id"] }.should eq(["2"])
+    end
+
     it "selects the document node with /" do
       Mica::XML.parse(DOC).xpath_nodes("/").first.document?.should be_true
     end
