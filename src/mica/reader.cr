@@ -98,6 +98,7 @@ module Mica
     @ascii_only = false
     @line = 1
     @line_start = 0_i64
+    @column_offset = 0
 
     # Event state.
     @phase = Phase::Start

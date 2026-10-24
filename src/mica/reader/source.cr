@@ -91,6 +91,7 @@ class Mica::Reader
     pin = @pin
     keep = pin if pin >= 0 && pin < keep
     if keep > 0
+      preserve_line_start(keep)
       count = @limit - keep
       @buffer.to_unsafe.move_from(@buffer.to_unsafe + keep, count) if count > 0
       @base_offset += keep
@@ -116,6 +117,21 @@ class Mica::Reader
     @input_bytes += read
     check_input_size
     true
+  end
+
+  # Before bytes up to *keep* are discarded, folds the characters between
+  # the current line start and *keep* into `@column_offset`, so columns stay
+  # exact on streamed input.
+  private def preserve_line_start(keep : Int32) : Nil
+    discard_end = @base_offset + keep
+    return unless @line_start < discard_end
+    from = Math.max(@line_start - @base_offset, 0_i64).to_i32
+    index = from
+    while index < keep
+      @column_offset += 1 unless @buffer.unsafe_fetch(index) & 0xC0 == 0x80
+      index += 1
+    end
+    @line_start = discard_end
   end
 
   private def check_input_size : Nil
@@ -199,6 +215,7 @@ class Mica::Reader
     return unless @in_document_source
     @line += 1
     @line_start = @base_offset + @pos
+    @column_offset = 0
   end
 
   # Returns `{line, column}` of the current position in the document
@@ -214,7 +231,7 @@ class Mica::Reader
       base = frame.base_offset
     end
     absolute = base + pos
-    column = 1
+    column = 1 + @column_offset
     if @line_start >= base && @line_start <= absolute
       start = (@line_start - base).to_i32
       index = start
