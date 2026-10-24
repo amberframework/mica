@@ -106,9 +106,14 @@ module Mica::XML
 
     @edit_meter : Core::WorkMeter? = nil
 
+    # Bytes of all node values stored so far (the edit allowance counts
+    # them, since an edit may read or copy any of them).
+    @stored_value_bytes = 0_i64
+
     # Returns the meter that edits through `Node` (setting, renaming and
     # removing attributes, names and content) are charged to. Its units are
-    # the document's nodes and name bytes when it starts, plus one per edit
+    # the document's nodes, name bytes and value bytes when it starts, plus
+    # one per edit
     # call and the bytes each call is given (names, values, text), so the
     # work of any sequence of edits stays linear in the document and the
     # edits' input; a sequence that would do more stops with a
@@ -125,7 +130,7 @@ module Mica::XML
 
     private def new_edit_meter(budget : Core::WorkBudget) : Core::WorkMeter
       meter = Core::WorkMeter.new(budget)
-      meter.add_units(@size + @names.name_bytes)
+      meter.add_units(@size + @names.name_bytes + @stored_value_bytes)
       meter
     end
 
@@ -153,11 +158,23 @@ module Mica::XML
       charge_edit(2 * bytes + 1)
       previous_hook = @names.before_rebuild
       @names.before_rebuild = edit_rebuild_hook
+      unpaid_before = @names.unpaid_operations
       begin
         yield
       ensure
         @names.before_rebuild = previous_hook
+        settle_name_work(unpaid_before)
       end
+    end
+
+    # Charges the name-table work an edit did (lookups and interning) to
+    # the edit meter and marks it paid, so a reader sharing the table never
+    # charges it to its parse.
+    private def settle_name_work(unpaid_before : Int64) : Nil
+      work = @names.unpaid_operations - unpaid_before
+      return unless work > 0
+      @names.mark_paid(work)
+      charge_edit(work)
     end
 
     private def edit_rebuild_hook : Proc(Int64, Nil)
@@ -478,6 +495,7 @@ module Mica::XML
     # Copies non-empty *value* into the value heap and returns its
     # reference: a chunk offset, or a negative large-value index.
     private def copy_value(value : Bytes) : Int32
+      @stored_value_bytes += value.size
       size = value.size
       if size > LARGE_VALUE
         @large_values << value.dup

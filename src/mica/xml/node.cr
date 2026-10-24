@@ -313,10 +313,9 @@ module Mica::XML
       attribute ? @document.value_string(attribute) : nil
     end
 
-    # Sets attribute *name* to *value*, adding it when missing. A value that
-    # is not a `String` is converted with `to_s` first, as the caller's
-    # work; the edit meters the resulting text.
-    def []=(name : String, value) : String
+    # Sets attribute *name* to *value*, adding it when missing. A number or
+    # Bool is written with `to_s` (at most a few dozen bytes).
+    def []=(name : String, value : String | Int::Primitive | Float::Primitive | Bool) : String
       text = value.to_s
       @document.editing(name.bytesize.to_i64 + text.bytesize) do
         raise Error.new("Only elements have attributes") unless element?
@@ -431,6 +430,8 @@ module Mica::XML
       @document.editing(name.bytesize.to_i64) do
         attribute = find_attribute(name, for_edit: true)
         return unless attribute
+        # The removed value is copied out for the caller.
+        @document.charge_edit(@document.value_bytes(attribute).size)
         value = @document.value_string(attribute)
         @document.unlink(attribute)
         value

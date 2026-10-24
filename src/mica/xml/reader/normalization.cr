@@ -52,21 +52,44 @@ class Mica::XML::Reader
   end
 
   # Returns *start* (the position of buffer byte *index*) advanced over the
-  # buffer bytes from *index* to *stop*.
+  # buffer bytes from *index* to *stop*, with the document's line ends (in
+  # XML 1.1 also NEL and LSEP, and CR NEL as one).
   private def position_after(start : Core::Position, index : Int32, stop : Int32) : Core::Position
     line = start.line
     column = start.column
     while index < stop
-      byte = @buffer[index]
-      if byte == 0x0A || (byte == 0x0D && !(index + 1 < stop && @buffer[index + 1] == 0x0A))
+      length = line_end_length(index, stop)
+      if length > 0
         line += 1
         column = 1
-      elsif byte & 0xC0 != 0x80 && byte != 0x0D
-        column += 1
+        index += length
+        next
       end
+      column += 1 unless @buffer[index] & 0xC0 == 0x80
       index += 1
     end
     Core::Position.new(source_offset_at(@buffer, stop, @base_offset), line, column)
+  end
+
+  # Returns the bytes of the line end at *index* (before *stop*), or 0.
+  private def line_end_length(index : Int32, stop : Int32) : Int32
+    byte = @buffer[index]
+    return 1 if byte == 0x0A
+    if byte == 0x0D
+      return 2 if index + 1 < stop && @buffer[index + 1] == 0x0A
+      return 1 + xml11_line_end_length(index + 1, stop) if @xml11 && index + 1 < stop && @buffer[index + 1] == 0xC2
+      return 1
+    end
+    @xml11 ? xml11_line_end_length(index, stop) : 0
+  end
+
+  # Returns the bytes of an XML 1.1 NEL (C2 85) or LSEP (E2 80 A8) at
+  # *index*, or 0.
+  private def xml11_line_end_length(index : Int32, stop : Int32) : Int32
+    rest = @buffer[index, stop - index]
+    return 2 if rest.size >= 2 && rest[0] == 0xC2 && rest[1] == 0x85
+    return 3 if rest.size >= 3 && rest[0] == 0xE2 && rest[1] == 0x80 && rest[2] == 0xA8
+    0
   end
 
   # Where the current token started (set only while normalization is
@@ -114,15 +137,15 @@ class Mica::XML::Reader
     count = 0
     while index < stop
       byte = @buffer[index]
-      if white_space_byte?(byte)
-        index += 1
+      if (space = white_space_length(index, stop)) > 0
+        index += space
         next
       end
       return if byte == '/'.ord || byte == '>'.ord
       return index - @mark if count == ordinal
       index = skip_until(index, stop, '='.ord.to_u8) + 1
-      while index < stop && white_space_byte?(@buffer[index])
-        index += 1
+      while index < stop && (space = white_space_length(index, stop)) > 0
+        index += space
       end
       return if index >= stop
       index = skip_until(index + 1, stop, @buffer[index]) + 1
@@ -131,8 +154,12 @@ class Mica::XML::Reader
     nil
   end
 
-  private def white_space_byte?(byte : UInt8) : Bool
-    byte == 0x20 || byte == 0x09 || byte == 0x0A || byte == 0x0D
+  # Returns the bytes of the white space at *index*: a space, tab or line
+  # end (in XML 1.1 including NEL and LSEP), or 0.
+  private def white_space_length(index : Int32, stop : Int32) : Int32
+    byte = @buffer[index]
+    return 1 if byte == 0x20 || byte == 0x09
+    line_end_length(index, stop)
   end
 
   # Returns the index of the first *target* byte from *index*, or *stop*.

@@ -304,8 +304,14 @@ module Mica::XML
       true
     end
 
+    # Records *work* in `operations` as charged by an owner other than the
+    # one reading `unpaid_operations` (an edit of a shared table).
+    def mark_paid(work : Int64) : Nil
+      @prepaid_operations += work
+    end
+
     # Returns the work in `operations` not yet reported through
-    # `before_rebuild`; it never decreases.
+    # `before_rebuild` or `mark_paid`; it never decreases.
     def unpaid_operations : Int64
       @operations - @prepaid_operations
     end
