@@ -91,6 +91,54 @@ module Mica::XML
     # (`ParserOptions#namespace_aware`). Edits follow the same rules.
     property? namespace_aware : Bool = true
 
+    # The default budget for edits: the same rate as parsing, without a
+    # deadline (edits are calls the application makes one at a time).
+    DEFAULT_EDIT_BUDGET = Core::WorkBudget.new(operations_per_unit: 64, base_operations: 1_000_000)
+
+    # The work budget edits run under (see `edit_meter`).
+    property edit_budget : Core::WorkBudget = DEFAULT_EDIT_BUDGET
+
+    @edit_meter : Core::WorkMeter? = nil
+
+    # Returns the meter that edits through `Node` (setting, renaming and
+    # removing attributes, names and content) are charged to. Its units are
+    # the document's nodes when it starts plus the bytes each edit is given,
+    # so the work of any sequence of edits stays linear in the document and
+    # the edits' input; a sequence that would do more stops with a
+    # `Mica::WorkBudgetExceededError`. Created on the first edit.
+    def edit_meter : Core::WorkMeter
+      @edit_meter ||= new_edit_meter(@edit_budget)
+    end
+
+    # Replaces the edit meter with a fresh one for *budget*, for documents
+    # that are edited in rounds over a long life.
+    def renew_edit_meter(budget : Core::WorkBudget = @edit_budget) : Core::WorkMeter
+      @edit_meter = new_edit_meter(budget)
+    end
+
+    private def new_edit_meter(budget : Core::WorkBudget) : Core::WorkMeter
+      meter = Core::WorkMeter.new(budget)
+      meter.add_units(@size)
+      meter
+    end
+
+    # :nodoc:
+    #
+    # Charges *count* operations of an edit; raises
+    # `Mica::WorkBudgetExceededError` when the edit budget has run out.
+    def charge_edit(count : Int) : Nil
+      meter = edit_meter
+      return unless meter.charge(count)
+      meter.enforce("while editing the document") { Core::Position.new(0_i64) }
+    end
+
+    # :nodoc:
+    #
+    # Records *bytes* of input given to an edit (names, values, text).
+    def add_edit_units(bytes : Int) : Nil
+      edit_meter.add_units(bytes + 1)
+    end
+
     # :nodoc:
     def initialize(@names : NameTable = NameTable.new)
       @xmlns_namespace_id = @names.intern(Reader::XMLNS_NAMESPACE)
@@ -441,6 +489,8 @@ module Mica::XML
 
     # :nodoc:
     def set_value(index : Int32, value : String) : Nil
+      add_edit_units(value.bytesize)
+      charge_edit(1 + value.bytesize)
       store_value(index, value.to_slice)
     end
 
@@ -448,6 +498,7 @@ module Mica::XML
     #
     # Detaches node *index* from its parent (or element, for attributes).
     def unlink(index : Int32) : Nil
+      charge_edit(1)
       record = data(index)
       parent = record.parent
       return if parent < 0
@@ -483,6 +534,8 @@ module Mica::XML
     #
     # Replaces the children of *index* with one text node holding *text*.
     def replace_children_with_text(index : Int32, text : String) : Nil
+      add_edit_units(text.bytesize)
+      charge_edit(1 + text.bytesize)
       child = data(index).first_child
       while child >= 0
         following = data(child).next_sibling
@@ -540,6 +593,7 @@ module Mica::XML
     def attribute_with_local_name(element : Int32, local_id : Int32) : Int32?
       candidates = attribute_index(element).by_local_name[local_id]? || return
       while first = candidates.first?
+        charge_edit(1)
         record = data(first)
         return first if record.parent == element && record.kind.attribute_node? && @names.local_id(record.name_id) == local_id
         candidates.shift
@@ -559,6 +613,7 @@ module Mica::XML
         index = AttributeIndex.new
         current = data(element).first_attribute
         while current >= 0
+          charge_edit(1)
           index.order[current] = index.next_order
           index.next_order += 1
           index_attribute(index, current)
@@ -570,6 +625,7 @@ module Mica::XML
     end
 
     private def index_attribute(index : AttributeIndex, attribute : Int32) : Nil
+      charge_edit(1)
       record = data(attribute)
       index.by_name[record.name_id] ||= attribute
       if record.kind.namespace_decl?
@@ -592,7 +648,10 @@ module Mica::XML
         candidates << attribute
       else
         at = candidates.bsearch_index { |candidate| index.order[candidate] >= position } || candidates.size
-        candidates.insert(at, attribute) unless candidates[at]? == attribute
+        return if candidates[at]? == attribute
+        # The insertion moves every later candidate.
+        charge_edit(candidates.size - at)
+        candidates.insert(at, attribute)
       end
     end
 
@@ -612,6 +671,8 @@ module Mica::XML
     # Adds an attribute (or namespace declaration) at the end of the
     # element's attribute list.
     def append_attribute(element : Int32, name_id : Int32, namespace_uri_id : Int32, value : String, kind : Node::Type) : Int32
+      add_edit_units(@names[name_id].bytesize + value.bytesize)
+      charge_edit(1 + value.bytesize)
       index = attribute_index(element)
       attribute = add_attribute_node(kind, element, name_id, namespace_uri_id, value.to_slice, index.tail)
       index.order[attribute] = index.next_order
@@ -625,6 +686,8 @@ module Mica::XML
 
     # :nodoc:
     def rename(index : Int32, name_id : Int32, namespace_uri_id : Int32) : Nil
+      add_edit_units(@names[name_id].bytesize)
+      charge_edit(1)
       record = data(index)
       named = record.kind.element_node? || record.kind.attribute_node?
       attribute_index = attribute_owner_index(record)
@@ -666,6 +729,7 @@ module Mica::XML
     end
 
     private def count_prefix_uses : Hash(Int32, Int32)
+      charge_edit(@size)
       counts = {} of Int32 => Int32
       @size.times do |node|
         record = data(node)
@@ -687,15 +751,19 @@ module Mica::XML
     # Resolves *prefix_id* on element *index* through the namespace
     # declarations in scope. Returns the URI id, `NameTable::EMPTY_ID` for no
     # namespace (or an unbound empty prefix), or -1 when a prefix is unbound.
-    # Used by edits: each element on the way is indexed (once), so repeated
-    # resolutions cost O(depth) each, not the size of the attribute lists.
+    # Used by edits: each element on the way is indexed (once), so a
+    # resolution costs O(depth) after the first, not the size of the
+    # attribute lists; the walk is charged to the edit meter.
     def resolve_prefix(index : Int32, prefix_id : Int32) : Int32
       return @xml_namespace_id if prefix_id == @xml_prefix_id
       current = index
       while current >= 0
+        charge_edit(1)
         if kind(current).element_node?
           if declaration = attribute_index(current).by_declared_prefix[prefix_id]?
-            return @names.intern(value_bytes(declaration))
+            uri = value_bytes(declaration)
+            charge_edit(uri.size)
+            return @names.intern(uri)
           end
         end
         current = data(current).parent

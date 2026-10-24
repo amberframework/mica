@@ -12,6 +12,9 @@ end
 
 # Regression specs for the fourth Codex code review of 2026-10-24.
 describe "Codex review 4 findings" do
+  # Every refill with a mark past the buffer start moves the bytes from the
+  # mark to the start, so IO chunks of 41 to 43 bytes move the buffer
+  # while the name is being scanned (the stale-index version fails here).
   it "1: positions a DTD name's normalization error correctly when a refill moves the buffer mid-name" do
     xml = "<?xml version='1.1'?><!DOCTYPE r [<!ELEMENT é EMPTY>]><r/>"
     bytes = xml.to_slice

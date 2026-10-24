@@ -133,10 +133,11 @@ checked at least every 65,536 operations and at every read from a stream.
 
 | Operation | Default budget | Default deadline | Measured cost of valid input |
 |---|---|---|---|
-| Parse (`ParserOptions::DEFAULT_WORK_BUDGET`) | 1,000,000 + 64 per byte | 60 s | at most 3 operations per byte |
+| Parse (`ParserOptions::DEFAULT_WORK_BUDGET`) | 1,000,000 + 64 per byte | 60 s | at most 4.2 operations per byte (fuzz maximum) |
 | XPath (`XPath::DEFAULT_WORK_BUDGET`) | 1,000,000 + 64 per node | 10 s | about 2 operations per node for `count(//*)` |
+| DOM edits (`Document::DEFAULT_EDIT_BUDGET`) | 1,000,000 + 64 per node and per byte given to edits | none | a few operations per edit |
 
-The defaults leave about twenty times headroom over the most expensive
+The defaults leave more than ten times headroom over the most expensive
 valid input that the fuzzer and the benchmarks found, and they stop any
 input that needs superlinear work. When a budget trips, Mica raises
 `Mica::WorkBudgetExceededError` (with `operations` and `allowance`) or
@@ -167,6 +168,11 @@ meter = Mica::Core::WorkMeter.new(Mica::Core::WorkBudget.new(timeout: 1.second))
 document = Mica::XML.parse(body, meter: meter)
 document.xpath_nodes("//item", meter: meter)
 ```
+
+Edits through `Node` (`[]=`, `delete`, `name=`, `content=`, `unlink`) are
+charged to `Document#edit_meter`, whose units are the document's nodes plus
+the bytes each edit is given; a document edited in rounds over a long life
+calls `Document#renew_edit_meter` between rounds.
 
 A long-lived stream (a protocol session over a socket) calls
 `Reader#renew_meter` between messages instead of disabling the budget. The

@@ -48,7 +48,10 @@ module Mica::XML::XPath
           value = @document.value_bytes(attribute)
           charge(value.size)
           prefix_id = @document.declared_prefix_id(record.name_id)
-          @namespaces[prefix_id == NameTable::EMPTY_ID ? "xmlns" : @names[prefix_id]] = String.new(value)
+          prefix = prefix_id == NameTable::EMPTY_ID ? "xmlns" : @names[prefix_id]
+          # The prefix is hashed into the table.
+          charge(prefix.bytesize)
+          @namespaces[prefix] = String.new(value)
         end
         attribute = record.next_sibling
       end
@@ -299,11 +302,13 @@ module Mica::XML::XPath
         uri = @namespaces[prefix]? || raise XPathError.new("Undefined namespace prefix '#{prefix}'")
         prepaid += 2 * uri.bytesize + 2
       end
+      # The local name, or a processing-instruction target, becomes a name
+      # id here, so matching compares ids.
       local = test.local
-      prepaid += 2 * local.bytesize + 2 if local && !test.kind.pi?
+      prepaid += 2 * local.bytesize + 2 if local
       charge(prepaid)
       name_operations = @names.unpaid_operations
-      local_id = @names.lookup(local.to_slice) if local && !test.kind.pi?
+      local_id = @names.lookup(local.to_slice) if local
       if uri
         uri_id = @names.lookup(uri.to_slice)
         uri_id = -2 if uri_id < 0
@@ -326,8 +331,7 @@ module Mica::XML::XPath
         kind.comment_node?
       when .pi?
         return false unless kind.pi_node?
-        target = matcher.target
-        target.nil? || @names[@document.data(node).name_id] == target
+        matcher.target.nil? || @document.data(node).name_id == matcher.local_id
       else
         principal = axis.attribute? ? kind.attribute_node? : kind.element_node?
         return false unless principal
@@ -915,6 +919,9 @@ module Mica::XML::XPath
       when "local-name"
         return @names[record.name_id] if kind.pi_node?
         return "" unless kind.element_node? || kind.attribute_node?
+        # Without namespace processing a name has no local part to split
+        # off (and splitting would intern uncharged work).
+        return @names[record.name_id] unless @namespace_aware
         @names[@names.local_id(record.name_id)]
       else
         return @names[record.name_id] if kind.pi_node? || kind.element_node? || kind.attribute_node?

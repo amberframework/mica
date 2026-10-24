@@ -368,6 +368,9 @@ module Mica::XML
       return false unless @document.prefix_used?(prefix_id)
       current = @index
       while current >= 0
+        # Each node visited, and each attribute examined below, is charged
+        # to the edit meter.
+        @document.charge_edit(1)
         if @document.kind(current).element_node?
           if current != @index && declares_prefix?(current, prefix_id)
             current = following_outside_subtree(current)
@@ -376,6 +379,7 @@ module Mica::XML
           return true if names.prefix_id(@document.data(current).name_id) == prefix_id
           unless prefix_id == NameTable::EMPTY_ID
             Node.new(@document, current).each_attribute_index do |attribute|
+              @document.charge_edit(1)
               return true if names.prefix_id(@document.data(attribute).name_id) == prefix_id
             end
           end
@@ -387,6 +391,7 @@ module Mica::XML
 
     private def declares_prefix?(element : Int32, prefix_id : Int32) : Bool
       Node.new(@document, element).each_attribute_index(include_declarations: true) do |attribute|
+        @document.charge_edit(1)
         record = @document.data(attribute)
         return true if record.kind.namespace_decl? && @document.declared_prefix_id(record.name_id) == prefix_id
       end

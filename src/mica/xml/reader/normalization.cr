@@ -121,12 +121,9 @@ class Mica::XML::Reader
   # Returns the byte index of the character that makes *bytes* (known not
   # to be NFC) fail. The bytes are split into segments of one
   # non-composing character and the composing characters after it; the
-  # first segment that is not NFC on its own holds the failure. Within it
-  # the blamed character is the first whose prefix of the segment is not
-  # NFC: the leading character alone, or the composing character that
-  # first breaks canonical order or composes. At most
-  # MAX_BLAMED_NON_STARTERS + 1 prefixes of at most that many characters
-  # are checked, so the search stays linear in the size.
+  # first segment that is not NFC on its own holds the failure, and
+  # `blamed_in_segment` finds in it the first character whose prefix is
+  # not NFC, in one pass with constant work per character.
   private def offending_normalization_index(bytes : Bytes) : Int32
     index = 0
     while index < bytes.size
@@ -152,29 +149,34 @@ class Mica::XML::Reader
   # The leading character is blamed when it is not NFC alone. Each later
   # character *mark* extends an NFC prefix, which stays NFC unless *mark*
   # is not NFC alone, is out of canonical order after the character before
-  # it, or composes with the leading character without being blocked. The
-  # prefix is canonically ordered so far, so *mark* is blocked exactly when
-  # a class-0 character came before it or the character before it has the
-  # same class. Each test normalizes at most three characters.
+  # it, or composes with the last starter without being blocked. A
+  # composing character of class 0 that does not compose is itself the
+  # last starter for what follows. Since the prefix is canonically ordered,
+  # *mark* is blocked exactly when the character before it (after the last
+  # starter) has the same class. Each test normalizes at most three
+  # characters.
   private def blamed_in_segment(bytes : Bytes, start : Int32, first_composing : Int32, stop : Int32) : Int32
     starter = String.new(bytes[start, first_composing - start])
     return start unless starter.unicode_normalized?(:nfc)
     previous = nil
-    class_zero_seen = false
     index = first_composing
     while index < stop
       _, length = Core::UTF8.decode(bytes, index, stop)
       length = Math.max(length, 1)
       mark = String.new(bytes[index, length])
       return index unless mark.unicode_normalized?(:nfc)
-      blocked = class_zero_seen
+      blocked = false
       if previous
         return index if reordered?(previous, mark)
-        blocked ||= same_combining_class?(previous, mark)
+        blocked = same_combining_class?(previous, mark)
       end
       return index if !blocked && !(starter + mark).unicode_normalized?(:nfc)
-      class_zero_seen ||= !nonzero_combining_class?(mark)
-      previous = mark
+      if nonzero_combining_class?(mark)
+        previous = mark
+      else
+        starter = mark
+        previous = nil
+      end
       index += length
     end
     first_composing
