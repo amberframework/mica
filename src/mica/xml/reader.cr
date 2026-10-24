@@ -27,7 +27,7 @@ module Mica::XML
   #
   # WARNING: This type is not concurrency-safe.
   class Reader
-    include Core::ByteInput
+    include Core::TextInput
     include Core::LineTracking
 
     # :nodoc:
@@ -144,8 +144,8 @@ module Mica::XML
     @expansion_bytes = 0_i64
     @attribute_entity_stack = [] of DTD::Entity
 
-    # Name-table probes already charged to the meter.
-    @charged_probes = 0_i64
+    # Name-table operations already charged to the meter.
+    @charged_name_operations = 0_i64
 
     # Interned names used by the scanner.
     @xmlns_id : Int32
@@ -191,6 +191,14 @@ module Mica::XML
     # Returns the operations charged to this reader's meter so far.
     def operations : Int64
       @meter.operations
+    end
+
+    # Replaces the work meter with a fresh one for *budget*: the operation
+    # count and the deadline start again from now. Long-lived streams (a
+    # protocol session over a socket) call this between messages instead of
+    # disabling the budget.
+    def renew_meter(budget : Core::WorkBudget = @options.work_budget) : Core::WorkMeter
+      @meter = Core::WorkMeter.new(budget)
     end
 
     # Moves to the next node. Returns false at the end of the document.
@@ -382,18 +390,26 @@ module Mica::XML
 
     # Returns the line of the current read position (1-based).
     def line_number : Int32
-      error_position.line
+      position.line
     end
 
     # Returns the column of the current read position (1-based, characters).
     def column_number : Int32
-      error_position.column
+      position.column
     end
 
     # Returns the current read position (line, column and byte offset).
+    # Asking after every event stays linear overall (see
+    # `Core::LineTracking`); the counting is charged to the work meter.
     def position : Core::Position
-      error_position
+      position = error_position
+      steps = @column_steps
+      charge(steps - @charged_column_steps + 1)
+      @charged_column_steps = steps
+      position
     end
+
+    @charged_column_steps = 0_i64
 
     # Returns the public identifier of the DOCTYPE, if any.
     def public_id : String?
@@ -513,13 +529,13 @@ module Mica::XML
     end
 
     # Charges the bytes scanned since the token mark plus fixed per-token
-    # work and any name-table probes since the last charge.
+    # work and the name-table work since the last charge.
     @[AlwaysInline]
     private def charge_token : Nil
-      probes = @names.probes
-      charge(@pos - @mark - @token_precharged + TOKEN_OPERATIONS + (probes - @charged_probes))
+      name_operations = @names.operations
+      charge(@pos - @mark - @token_precharged + TOKEN_OPERATIONS + (name_operations - @charged_name_operations))
       @token_precharged = 0
-      @charged_probes = probes
+      @charged_name_operations = name_operations
     end
 
     # Core::ByteInput hooks.
@@ -538,10 +554,14 @@ module Mica::XML
 
     private def discarding_input(keep : Int32) : Nil
       fold_discarded_columns(@buffer, keep, @base_offset)
+      account_transcoded_discard(keep)
     end
 
+    # New input raises the allowance; a refill is also where the reader may
+    # have waited on its IO, so the deadline is checked here too.
     private def input_received(count : Int32) : Nil
       @meter.add_units(count)
+      work_limit_reached if @meter.deadline_passed?
     end
   end
 end

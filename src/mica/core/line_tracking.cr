@@ -15,6 +15,8 @@ module Mica::Core
     @column_cache_offset = -1_i64
     @column_cache_value = 0
     @column_cache_line_start = -1_i64
+    # Bytes examined by `column_at`, for work accounting.
+    @column_steps = 0_i64
 
     # Records a line end; the next line starts at decoded offset
     # *next_line_start*.
@@ -55,6 +57,7 @@ module Mica::Core
         column = @column_cache_value
       end
       index = start
+      @column_steps += pos - start if pos > start
       while index < pos
         column += 1 unless buffer[index] & 0xC0 == 0x80
         index += 1

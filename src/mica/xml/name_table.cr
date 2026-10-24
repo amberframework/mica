@@ -8,9 +8,13 @@ module Mica::XML
   #
   # The hash is seeded per table so that an attacker who controls the
   # document cannot precompute colliding names. As a second line of defense
-  # every probe is counted (the reader charges them to its work meter), and
   # a probe sequence longer than MAX_PROBES makes the table pick a new seed
-  # and rehash, so a run of collisions cannot persist.
+  # and rehash, so a lookup never costs more than its name's length plus
+  # MAX_PROBES, and a run of collisions cannot persist.
+  #
+  # `operations` counts work deterministically (name bytes plus one per
+  # lookup) for the reader's work meter; the probe count depends on the
+  # random seed, so it is kept separately in `probes` for diagnostics.
   class NameTable
     # Longest probe sequence tolerated before reseeding. With a random seed
     # and a load factor of at most 1/2, sequences this long are vanishingly
@@ -23,6 +27,10 @@ module Mica::XML
 
     # Returns the number of slots examined by all lookups so far.
     getter probes : Int64 = 0_i64
+
+    # Returns the deterministic work of all lookups so far: each one's name
+    # bytes plus one.
+    getter operations : Int64 = 0_i64
 
     @reseeds = 0
 
@@ -61,6 +69,7 @@ module Mica::XML
 
     # Returns the id of *bytes*, adding it if needed.
     def intern(bytes : Bytes) : Int32
+      @operations += bytes.size + 1
       hash = hash_bytes(bytes)
       index = hash.to_i32! & @mask
       steps = 0
@@ -88,6 +97,7 @@ module Mica::XML
 
     # Returns the id of *bytes* or -1 if it was never interned.
     def lookup(bytes : Bytes) : Int32
+      @operations += bytes.size + 1
       hash = hash_bytes(bytes)
       index = hash.to_i32! & @mask
       loop do

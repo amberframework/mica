@@ -1,4 +1,4 @@
-# Differential fuzzing: the same seeded cases as spec/mica/fuzz_spec.cr,
+# Differential fuzzing: the same seeded cases as spec/xml/fuzz_spec.cr,
 # judged by Mica and by stdlib XML (libxml2, strict: NONET without RECOVER).
 #
 #   crystal-alpha run --release fuzz/differential.cr -- SEED ITERATIONS
@@ -9,7 +9,7 @@
 # are printed for triage.
 require "xml"
 require "../src/mica"
-require "./mutator"
+require "./xml_fuzz"
 
 seed = (ARGV[0]? || "20261024").to_i64
 iterations = (ARGV[1]? || "20000").to_i
@@ -20,12 +20,12 @@ mica_only_rejects = Hash(String, Int32).new(0)
 mica_only_accepts = [] of {Int32, String}
 
 iterations.times do |iteration|
-  bytes = Fuzz.case_bytes(seed, iteration)
+  bytes = XMLFuzz::MUTATOR.case_bytes(seed, iteration)
   mica_error = nil
   begin
     Mica::XML.parse(bytes)
   rescue error : Mica::Error
-    mica_error = error.message.to_s.sub(/ \(line.*\z/, "").gsub(/'[^']*'/, "'…'")
+    mica_error = error.is_a?(Mica::ParseError) ? error.detail.gsub(/'[^']*'/, "'…'") : error.message.to_s
   end
   libxml2_error = nil
   begin

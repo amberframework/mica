@@ -17,9 +17,15 @@ class Mica::XML::Reader
   # space.
   private def skip_spaces : Bool
     skipped = false
+    run = 0
     loop do
       if @pos >= @limit
         break unless fill
+      end
+      run += 1
+      if run == SCAN_CHUNK
+        scan_checkpoint
+        run = 0
       end
       byte = @buffer[@pos]
       case byte
@@ -167,16 +173,8 @@ class Mica::XML::Reader
   end
 
   private def invalid_encoding(lead : UInt8, problem_code : Int32) : NoReturn
-    if encoding = @transcoded_from
-      if lead == Core::Transcoder::INVALID_UNIT
-        if encoding.utf16?
-          encoding_error("Unpaired UTF-16 surrogate")
-        else
-          encoding_error("Invalid #{encoding.label} code unit")
-        end
-      elsif lead == Core::Transcoder::TRUNCATED_BYTE
-        encoding_error("Input ends inside a #{encoding.label} code unit")
-      end
+    if marker = describe_transcoder_marker(lead)
+      encoding_error(marker)
     end
     problem = Core::UTF8.problem(problem_code)
     encoding_error("Invalid UTF-8: #{problem.describe} at byte 0x#{hex_byte(lead)}")
@@ -223,6 +221,11 @@ class Mica::XML::Reader
   # the source. Used by the DTD and literal scanners, which are not hot.
   private def next_char : Int32
     return -1 if @pos >= @limit && !fill
+    @literal_chars += 1
+    if @literal_chars == SCAN_CHUNK
+      scan_checkpoint
+      @literal_chars = 0
+    end
     byte = @buffer[@pos]
     if byte < 0x80
       if byte < 0x20 || byte == 0x7F
@@ -262,6 +265,9 @@ class Mica::XML::Reader
     @pos += length
     code
   end
+
+  # Characters read by `next_char` since the last budget check.
+  @literal_chars = 0
 
   # Grows the scratch buffer to hold *extra* more bytes.
   @[AlwaysInline]

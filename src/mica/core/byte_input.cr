@@ -11,13 +11,15 @@ module Mica::Core
   # limit. Offsets held across a `fill` must therefore be relative to
   # `@mark`.
   #
-  # Positions: `@base_offset + @pos` is the decoded (UTF-8) offset of the
-  # current byte; `source_offset_at` maps it back to an offset in the
-  # original input (a byte order mark included, transcoded bytes counted in
-  # their source encoding).
+  # Positions: `@base_offset + @pos` is the offset of the current byte in
+  # the bytes the scanner sees; `source_offset_at` maps it to an offset in
+  # the original input (here: plus any skipped prefix such as a byte order
+  # mark; `TextInput` adds transcoded input).
   #
-  # The including type implements the hooks below. Text formats also include
-  # `LineTracking`; binary formats (CBOR) need only this module.
+  # This module is byte-oriented and knows nothing about characters, so
+  # binary formats (CBOR) include it alone. Text formats include
+  # `TextInput` (which includes this module) and `LineTracking`. The
+  # including type implements the hooks below.
   module ByteInput
     # Initial size of the stream buffer.
     INITIAL_BUFFER_SIZE = 64 * 1024
@@ -35,10 +37,8 @@ module Mica::Core
     @io_eof = true
     @base_offset = 0_i64
     @input_bytes = 0_i64
+    @input_bytes_moved = 0_i64
     @source_prefix_bytes = 0_i64
-    @transcoded_from : Encoding? = nil
-    @transcode_origin = 0_i64
-    @source_bytes_before_buffer = 0_i64
 
     # Returns the largest token, in bytes, the buffer must hold.
     private abstract def input_token_limit : Int32
@@ -82,31 +82,6 @@ module Mica::Core
       input_received(carried.size)
     end
 
-    # Reads the rest of the input, from the current position on, through a
-    # `Transcoder` from *encoding*. Used after an in-band encoding
-    # declaration names an encoding that is not UTF-8. Everything before the
-    # current position must have been ASCII.
-    private def switch_to_transcoder(encoding : Encoding) : Nil
-      discarding_input(@pos)
-      rest = @buffer[@pos, @limit - @pos]
-      io = @io
-      source = io || IO::Memory.new(rest, writable: false)
-      carried = io ? rest.dup : Bytes.empty
-      @input_bytes -= rest.size
-      @base_offset += @pos
-      @transcoded_from = encoding
-      @transcode_origin = @base_offset
-      @source_bytes_before_buffer = 0_i64
-      transcoder = Transcoder.new(source, encoding, carried)
-      @io = transcoder
-      @io_eof = false
-      @buffer = Bytes.new(INITIAL_BUFFER_SIZE)
-      @pos = 0
-      @limit = 0
-      @mark = 0
-      @pin = -1
-    end
-
     # Makes at least one more byte available. Returns false at the end of
     # the source. Keeps every byte from `@mark` (and from `@pin` when set),
     # so offsets relative to the mark stay valid.
@@ -117,8 +92,9 @@ module Mica::Core
       pin = @pin
       keep = pin if pin >= 0 && pin < keep
       if keep > 0
-        discard(keep)
+        discarding_input(keep)
         count = @limit - keep
+        @input_bytes_moved += count
         # Overlapping move inside one buffer: both ranges lie in
         # [0, @limit), which is within @buffer.size.
         @buffer.to_unsafe.move_from(@buffer.to_unsafe + keep, count) if count > 0
@@ -134,6 +110,7 @@ module Mica::Core
         end
         grown = Bytes.new(@buffer.size * 2)
         grown.copy_from(@buffer[0, @limit])
+        @input_bytes_moved += @limit
         @buffer = grown
       end
       read = io.read(@buffer[@limit, @buffer.size - @limit])
@@ -146,16 +123,6 @@ module Mica::Core
       input_received(read)
       check_input_size
       true
-    end
-
-    private def discard(keep : Int32) : Nil
-      discarding_input(keep)
-      if encoding = @transcoded_from
-        from = @transcode_origin > @base_offset ? (@transcode_origin - @base_offset).to_i32 : 0
-        if from < keep
-          @source_bytes_before_buffer += Transcoder.source_size(encoding, @buffer[from, keep - from])
-        end
-      end
     end
 
     private def check_input_size : Nil
@@ -212,14 +179,18 @@ module Mica::Core
     end
 
     # Returns the offset in the original input of byte *pos* of *buffer*,
-    # whose first byte is at decoded offset *base*.
+    # whose first byte is at offset *base*.
     private def source_offset_at(buffer : Bytes, pos : Int32, base : Int64) : Int64
-      absolute = base + pos
-      encoding = @transcoded_from
-      return @source_prefix_bytes + absolute if encoding.nil? || absolute <= @transcode_origin
-      from = @transcode_origin > base ? (@transcode_origin - base).to_i32 : 0
-      in_buffer = Transcoder.source_size(encoding, buffer[from, pos - from])
-      @source_prefix_bytes + @transcode_origin + @source_bytes_before_buffer + in_buffer
+      @source_prefix_bytes + base + pos
+    end
+
+    # :nodoc:
+    #
+    # Returns the bytes copied while compacting or growing the buffer. Each
+    # token's bytes are copied O(1) times amortized, so this stays linear in
+    # the input; specs assert it.
+    def input_bytes_moved : Int64
+      @input_bytes_moved
     end
   end
 end

@@ -11,7 +11,7 @@ class Mica::XML::Reader
       if encoding.utf16?
         @encoding = "UTF-16"
         transcoder = Core::Transcoder.new(IO::Memory.new(bytes[size, bytes.size - size], writable: false), encoding)
-        setup_transcoded_stream(transcoder, encoding, size)
+        setup_transcoded_stream(transcoder, size)
         return
       end
       setup_in_memory(bytes[size, bytes.size - size], size)
@@ -40,19 +40,13 @@ class Mica::XML::Reader
       rest = prefix[size, prefix.size - size]
       if encoding.utf16?
         @encoding = "UTF-16"
-        setup_transcoded_stream(Core::Transcoder.new(io, encoding, rest), encoding, size)
+        setup_transcoded_stream(Core::Transcoder.new(io, encoding, rest), size)
         return
       end
       setup_stream(io, rest, size)
       return
     end
     setup_stream(io, prefix)
-  end
-
-  private def setup_transcoded_stream(transcoder : Core::Transcoder, encoding : Core::Encoding, mark_size : Int32) : Nil
-    setup_stream(transcoder, Bytes.empty, mark_size)
-    @transcoded_from = encoding
-    @transcode_origin = 0_i64
   end
 
   # Returns a description of an unsupported or malformed encoding signature

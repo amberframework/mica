@@ -1,5 +1,22 @@
 require "spec"
 require "../src/mica"
+require "../src/mica/testing"
+
+# Which spec covers which specification requirement (see
+# Mica::Testing::Traceability and spec/requirements/).
+REQUIREMENTS = Mica::Testing::Traceability::Registry.new
+
+# Defines an example that covers the requirement *requirement_id* (an id
+# from a catalog in spec/requirements/).
+def it_satisfies(requirement_id : String, description : String, file = __FILE__, line = __LINE__, end_line = __END_LINE__, &block)
+  REQUIREMENTS.record(requirement_id, "#{file.sub(Dir.current + "/", "")}:#{line}")
+  it(description, file, line, end_line, tags: "requirement", &block)
+end
+
+# Records that the example being defined also covers *requirement_id*.
+def satisfies(requirement_id : String, file = __FILE__, line = __LINE__) : Nil
+  REQUIREMENTS.record(requirement_id, "#{file.sub(Dir.current + "/", "")}:#{line}")
+end
 
 # An IO that returns at most a few bytes per read, to exercise the reader's
 # buffer refill and compaction at every byte boundary.

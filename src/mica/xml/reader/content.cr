@@ -120,6 +120,7 @@ class Mica::XML::Reader
       end
       syntax_error("Expected white space between attributes") unless had_space
       parse_attribute(name_id)
+      scan_checkpoint
     end
     apply_attribute_declarations(name_id)
     if @options.namespace_aware?
