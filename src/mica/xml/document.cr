@@ -505,6 +505,7 @@ module Mica::XML
     class AttributeIndex
       getter by_name = {} of Int32 => Int32
       getter by_expanded_name = {} of {Int32, Int32} => Int32
+      getter by_declared_prefix = {} of Int32 => Int32
       property tail : Int32 = -1
     end
 
@@ -524,6 +525,13 @@ module Mica::XML
       attribute_index(element).by_expanded_name[{uri_id, local_id}]?
     end
 
+    # :nodoc:
+    #
+    # True when *element* has an attribute index (it was edited).
+    def attribute_index?(element : Int32) : Bool
+      @attribute_indexes.has_key?(element)
+    end
+
     private def attribute_index(element : Int32) : AttributeIndex
       @attribute_indexes[element] ||= begin
         index = AttributeIndex.new
@@ -540,7 +548,9 @@ module Mica::XML
     private def index_attribute(index : AttributeIndex, attribute : Int32) : Nil
       record = data(attribute)
       index.by_name[record.name_id] ||= attribute
-      if record.kind.attribute_node? && record.namespace_uri_id != NameTable::EMPTY_ID
+      if record.kind.namespace_decl?
+        index.by_declared_prefix[declared_prefix_id(record.name_id)] ||= attribute
+      elsif record.namespace_uri_id != NameTable::EMPTY_ID
         index.by_expanded_name[{record.namespace_uri_id, @names.local_id(record.name_id)}] ||= attribute
       end
     end
@@ -550,6 +560,10 @@ module Mica::XML
       index.by_name.delete(record.name_id) if index.by_name[record.name_id]? == attribute
       key = {record.namespace_uri_id, @names.local_id(record.name_id)}
       index.by_expanded_name.delete(key) if index.by_expanded_name[key]? == attribute
+      if record.kind.namespace_decl?
+        prefix_id = declared_prefix_id(record.name_id)
+        index.by_declared_prefix.delete(prefix_id) if index.by_declared_prefix[prefix_id]? == attribute
+      end
     end
 
     # :nodoc:
@@ -598,7 +612,12 @@ module Mica::XML
       return @xml_namespace_id if prefix_id == @xml_prefix_id
       current = index
       while current >= 0
-        if kind(current).element_node?
+        if edited = @attribute_indexes[current]?
+          # An element the edit API has indexed answers without a walk.
+          if declaration = edited.by_declared_prefix[prefix_id]?
+            return @names.intern(value_bytes(declaration))
+          end
+        elsif kind(current).element_node?
           attribute = data(current).first_attribute
           while attribute >= 0
             record = data(attribute)

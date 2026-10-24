@@ -118,12 +118,20 @@ class Mica::XML::Reader
     raise NormalizationError.new("The #{construct} is not in Unicode Normalization Form C (XML 1.1 section 2.13)", yield offending_normalization_index(bytes))
   end
 
+  # Non-starters after one starter that the blame search below examines
+  # one by one: the Unicode stream-safe text format allows at most 30, so
+  # a longer run is itself the anomaly and is blamed where it exceeds 30.
+  MAX_BLAMED_NON_STARTERS = 30
+
   # Returns the byte index of the character that makes *bytes* (known not
-  # to be NFC) fail: the bytes are split into segments of one
-  # non-composing character and the composing characters after it, and the
-  # first segment that is not NFC on its own is blamed. Within it, the
-  # first composing character is blamed when the leading character alone
-  # is NFC, otherwise the leading character. One pass, linear in the size.
+  # to be NFC) fail. The bytes are split into segments of one
+  # non-composing character and the composing characters after it; the
+  # first segment that is not NFC on its own holds the failure. Within it
+  # the blamed character is the first whose prefix of the segment is not
+  # NFC: the leading character alone, or the composing character that
+  # first breaks canonical order or composes. At most
+  # MAX_BLAMED_NON_STARTERS + 1 prefixes of at most that many characters
+  # are checked, so the search stays linear in the size.
   private def offending_normalization_index(bytes : Bytes) : Int32
     index = 0
     while index < bytes.size
@@ -137,10 +145,25 @@ class Mica::XML::Reader
         index += length
       end
       next if String.new(bytes[segment_start, index - segment_start]).unicode_normalized?(:nfc)
-      return segment_start if first_composing == index
-      return segment_start unless String.new(bytes[segment_start, first_composing - segment_start]).unicode_normalized?(:nfc)
-      return first_composing
+      return blamed_in_segment(bytes, segment_start, first_composing, index)
     end
     0
+  end
+
+  # The first character of the non-NFC segment `bytes[start, stop - start]`
+  # (composing characters from *first_composing*) whose prefix is not NFC.
+  private def blamed_in_segment(bytes : Bytes, start : Int32, first_composing : Int32, stop : Int32) : Int32
+    return start unless String.new(bytes[start, first_composing - start]).unicode_normalized?(:nfc)
+    index = first_composing
+    count = 0
+    while index < stop
+      _, length = Core::UTF8.decode(bytes, index, stop)
+      length = Math.max(length, 1)
+      count += 1
+      return index if count > MAX_BLAMED_NON_STARTERS
+      return index unless String.new(bytes[start, index + length - start]).unicode_normalized?(:nfc)
+      index += length
+    end
+    first_composing
   end
 end

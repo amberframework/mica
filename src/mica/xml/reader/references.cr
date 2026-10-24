@@ -95,12 +95,10 @@ class Mica::XML::Reader
       too_large = true if value > 0x10FFFF
       digits += 1
       @pos += 1
-      # Leading zeros make the digit run unbounded: keep it under the token
-      # limit and charge it every chunk.
-      if digits % SCAN_CHUNK == 0
-        check_token_size(@pos - @mark)
-        scan_checkpoint
-      end
+      # Leading zeros make the digit run unbounded: keep every digit under
+      # the token limit and charge the run every chunk.
+      check_token_size(@pos - @mark)
+      scan_checkpoint if digits % SCAN_CHUNK == 0
     end
     syntax_error("Malformed character reference") if digits == 0
     expect_byte(';', "to end the character reference")

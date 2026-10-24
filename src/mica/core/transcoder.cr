@@ -21,6 +21,11 @@ module Mica::Core
     # Returns the encoding of the source bytes.
     getter source_encoding : Encoding
 
+    # Called after every read from the source returns, so the owner can
+    # check its deadline between the several reads one output fill may
+    # need. `TextInput` sets it.
+    property after_source_read : Proc(Nil)? = nil
+
     @input : Bytes
     @input_start = 0
     @input_end = 0
@@ -195,6 +200,7 @@ module Mica::Core
       @input_end = remaining
       while @input_end < needed
         count = @source.read(@input[@input_end, @input.size - @input_end])
+        @after_source_read.try &.call
         if count == 0
           @eof = true
           return

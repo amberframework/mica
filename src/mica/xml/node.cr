@@ -413,7 +413,7 @@ module Mica::XML
 
     # Removes attribute *name* and returns its value, or nil when missing.
     def delete(name : String) : String?
-      attribute = find_attribute(name)
+      attribute = find_attribute(name, for_edit: true)
       return unless attribute
       value = @document.value_string(attribute)
       @document.unlink(attribute)
@@ -427,12 +427,21 @@ module Mica::XML
       @document.attribute_named(@index, id)
     end
 
-    private def find_attribute(name : String) : Int32?
+    # Finds attribute *name* by qualified name, then by local name. Edits
+    # (*for_edit*) build the element's attribute index so that a run of
+    # deletions stays linear; plain reads use an index only when one
+    # exists, so reading never allocates one.
+    private def find_attribute(name : String, for_edit : Bool = false) : Int32?
       return unless element?
       id = names.lookup(name.to_slice)
       return if id < 0
-      each_attribute_index do |attribute|
-        return attribute if @document.data(attribute).name_id == id
+      if for_edit || @document.attribute_index?(@index)
+        exact = @document.attribute_named(@index, id)
+        return exact if exact && @document.kind(exact).attribute_node?
+      else
+        each_attribute_index do |attribute|
+          return attribute if @document.data(attribute).name_id == id
+        end
       end
       each_attribute_index do |attribute|
         return attribute if names.local_id(@document.data(attribute).name_id) == id

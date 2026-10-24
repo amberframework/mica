@@ -33,6 +33,15 @@ module Mica::XML
     # Returns the work of all lookups, growth and reseeding so far.
     getter operations : Int64 = 0_i64
 
+    # The part of `operations` already reported through `before_rebuild`.
+    # An owner charging `operations` to its meter charges only the rest
+    # (see `unpaid_operations`).
+    getter prepaid_operations : Int64 = 0_i64
+
+    # Bytes of all interned names plus one per name, kept as names are
+    # added so a reseed knows its rehash work without walking the names.
+    @name_bytes = 0_i64
+
     @reseeds = 0
     @fixed_seed = false
 
@@ -197,6 +206,7 @@ module Mica::XML
     private def add(bytes : Bytes, hash : UInt32, index : Int32) : Int32
       id = @strings.size
       @strings << String.new(bytes)
+      @name_bytes += bytes.size + 1
       @hashes << hash
       @local_ids << -1
       @prefix_ids << -1
@@ -215,33 +225,45 @@ module Mica::XML
     private def reseed : Nil
       @reseeds += 1
       raise Mica::Error.new("Name table hash collisions persist after #{MAX_RESEEDS} reseeds") if @reseeds > MAX_RESEEDS
-      if hook = @before_rebuild
-        hook.call(@strings.sum(0_i64) { |string| string.bytesize.to_i64 + 1 })
-      end
+      account_rebuild(@name_bytes)
       @seed = @fixed_seed ? mix_seed(@seed &+ @reseeds) : Random::Secure.rand(UInt32)
+      @probes += @name_bytes - @strings.size
       @strings.each_with_index do |string, id|
-        @probes += string.bytesize
-        @operations += string.bytesize + 1
         @hashes[id] = hash_bytes(string.to_slice)
       end
       rebuild(@slots.size)
     end
 
     private def rebuild(new_size : Int32) : Nil
-      if hook = @before_rebuild
-        hook.call(new_size.to_i64 + @hashes.size)
-      end
+      # Slots allocated plus names placed; collision probes are counted
+      # as they happen.
+      account_rebuild(new_size.to_i64 + @hashes.size)
       @slots = Slice(Int32).new(new_size, -1)
       @mask = new_size - 1
       @hashes.each_with_index do |hash, id|
         index = hash.to_i32! & @mask
-        @operations += 1
         while @slots[index] >= 0
           @probes += 1
           @operations += 1
           index = (index + 1) & @mask
         end
         @slots[index] = id
+      end
+    end
+
+    # Returns the work in `operations` not yet reported through
+    # `before_rebuild`; it never decreases.
+    def unpaid_operations : Int64
+      @operations - @prepaid_operations
+    end
+
+    # Counts *work* a rehash is about to do and reports it through
+    # `before_rebuild` (when set) before the rehash starts.
+    private def account_rebuild(work : Int64) : Nil
+      @operations += work
+      if hook = @before_rebuild
+        @prepaid_operations += work
+        hook.call(work)
       end
     end
 

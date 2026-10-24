@@ -119,7 +119,9 @@ Every operation runs under a `WorkMeter`:
 4. In long scanning loops, charge at least every 64 KiB (`SCAN_CHUNK` in
    the XML reader) so a single huge token cannot outrun the meter.
 5. Call `meter.enforce_deadline { position }` after each IO read (in the
-   `input_received` hook), when an operation starts and before it reports
+   `input_received` hook, and for `TextInput` formats also in
+   `source_read_returned`, which runs after each read a transcoder makes
+   from the source), when an operation starts and before it reports
    success, and offer `renew_meter` for long-lived streams (giving the new
    meter the units of bytes already buffered).
 

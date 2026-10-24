@@ -266,7 +266,7 @@ class Mica::XML::Reader
   private def parse_attlist_declaration : Nil
     @pos += 9
     require_spaces("after '<!ATTLIST'")
-    element_id = scan_name_id
+    element_id = scan_declared_name_id
     loop do
       had_space = skip_spaces
       byte = peek_byte
@@ -276,16 +276,12 @@ class Mica::XML::Reader
       end
       syntax_error("Unterminated ATTLIST declaration") if byte < 0
       syntax_error("Expected white space before an attribute definition") unless had_space
-      attr_id = scan_name_id
+      attr_id = scan_declared_name_id
       require_spaces("after the attribute name")
       type = parse_attribute_type
       require_spaces("after the attribute type")
       default_kind, default_value = parse_default_declaration(type)
-      if normalization_checked?
-        check_normalized_name(element_id)
-        check_normalized_name(attr_id)
-        check_normalized(default_value, "attribute default value")
-      end
+      check_normalized(default_value, "attribute default value") if normalization_checked?
       record_attribute_declaration(element_id, DTD::AttributeDecl.new(attr_id, type, default_kind, default_value))
     end
   end
@@ -497,16 +493,30 @@ class Mica::XML::Reader
   # Reads a Name in a declaration. Under XML 1.1 normalization checking
   # the name is verified as it is read: section 2.13 lists every Name as a
   # relevant construct, so names in unused declarations are checked too.
+  # An error points at the offending character of the name.
   private def scan_declared_name_id : Int32
+    start = @pos
     name_id = scan_name_id
-    check_normalized_name(name_id) if normalization_checked?
+    if normalization_checked? && !@normalized_name_ids.includes?(name_id)
+      check_declared_name(start)
+      @normalized_name_ids << name_id
+    end
     name_id
   end
 
   # Same for a name read as a span (relative to `@mark`).
   private def scan_declared_name_span : {Int32, Int32}
-    start, size = scan_name_span
-    check_normalized(@buffer[@mark + start, size], "name") if normalization_checked?
-    {start, size}
+    start = @pos
+    span = scan_name_span
+    check_declared_name(start) if normalization_checked?
+    span
+  end
+
+  # Checks the name in `@buffer` from *start* to the current position.
+  private def check_declared_name(start : Int32) : Nil
+    check_normalized(@buffer[start, @pos - start], "name", nil) do |offending|
+      # Inside parameter-entity text, positions refer to the reference.
+      @frames.empty? ? buffer_position(start + offending) : error_position
+    end
   end
 end

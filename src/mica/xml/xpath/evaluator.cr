@@ -260,8 +260,14 @@ module Mica::XML::XPath
     private def resolve(test : NodeTest) : Matcher
       local_id = -1
       uri_id = NameTable::EMPTY_ID
-      # Name lookups hash and compare their bytes: charge that work too.
-      name_operations = @names.operations
+      # Name lookups hash and compare their bytes: charge that work before
+      # it happens (the bytes hashed and one compare each), then any probes
+      # beyond it.
+      prepaid = 0_i64
+      test.local.try { |local| prepaid += 2 * local.bytesize + 2 }
+      test.prefix.try { |prefix| @namespaces[prefix]?.try { |uri| prepaid += 2 * uri.bytesize + 2 } }
+      charge(prepaid)
+      name_operations = @names.unpaid_operations
       if local = test.local
         local_id = @names.lookup(local.to_slice) unless test.kind.pi?
       end
@@ -270,7 +276,7 @@ module Mica::XML::XPath
         uri_id = @names.lookup(uri.to_slice)
         uri_id = -2 if uri_id < 0
       end
-      charge(@names.operations - name_operations)
+      charge(Math.max(@names.unpaid_operations - name_operations - prepaid, 0_i64))
       Matcher.new(test.kind, local_id, uri_id, test.kind.pi? ? test.local : nil)
     end
 

@@ -12,9 +12,14 @@ module Mica::Core
   # to the original input.
   #
   # The including type calls `account_transcoded_discard(keep)` from its
-  # `discarding_input` hook.
+  # `discarding_input` hook, and defines `source_read_returned`, which runs
+  # after every read from the source under a transcoder (where to check a
+  # deadline).
   module TextInput
     include ByteInput
+
+    # Called after every read a `Transcoder` makes from the source.
+    private abstract def source_read_returned : Nil
 
     @transcoded_from : Encoding? = nil
     @transcode_origin = 0_i64
@@ -30,6 +35,7 @@ module Mica::Core
     # Reads *transcoder*'s output as the whole input; *mark_size* source bytes
     # (a byte order mark) came before it.
     private def setup_transcoded_stream(transcoder : Transcoder, mark_size : Int32) : Nil
+      transcoder.after_source_read = -> { source_read_returned }
       setup_stream(transcoder, Bytes.empty, mark_size)
       @transcoded_from = transcoder.source_encoding
       @transcode_origin = 0_i64
@@ -52,7 +58,9 @@ module Mica::Core
       @transcode_origin = @base_offset
       @source_bytes_before_buffer = 0_i64
       @offset_cache_from = -1_i64
-      @io = Transcoder.new(source, encoding, carried)
+      transcoder = Transcoder.new(source, encoding, carried)
+      transcoder.after_source_read = -> { source_read_returned }
+      @io = transcoder
       @io_eof = false
       @buffer = Bytes.new(ByteInput::INITIAL_BUFFER_SIZE)
       @pos = 0

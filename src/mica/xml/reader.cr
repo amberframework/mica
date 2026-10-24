@@ -577,6 +577,12 @@ module Mica::XML
       account_transcoded_discard(keep)
     end
 
+    # A transcoder may read the source several times for one refill: the
+    # deadline is checked after each of those reads too.
+    private def source_read_returned : Nil
+      @meter.enforce_deadline { error_position }
+    end
+
     # New input raises the allowance; a refill is also where the reader may
     # have waited on its IO, so the deadline is checked here too.
     private def input_received(count : Int32) : Nil

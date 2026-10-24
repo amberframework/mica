@@ -79,7 +79,7 @@ class Mica::XML::Reader
   # it charged.
   @[AlwaysInline]
   private def take_name_operations : Int64
-    name_operations = @names.operations
+    name_operations = @names.unpaid_operations
     delta = name_operations - @charged_name_operations
     @charged_name_operations = name_operations
     delta

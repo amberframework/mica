@@ -144,6 +144,13 @@ class Mica::XML::Reader
     error_position { }
   end
 
+  # Returns the position of byte *index* of the document's buffer, on the
+  # current line (for a byte of the token being read, after its last line
+  # break).
+  private def buffer_position(index : Int32) : Core::Position
+    Core::Position.new(source_offset_at(@buffer, index, @base_offset), @line, column_at(@buffer, index, @base_offset))
+  end
+
   # Same, calling the block with the bytes examined at least every 64 KiB
   # while mapping the position, so `position` can charge a long count as it
   # goes.
