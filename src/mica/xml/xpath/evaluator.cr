@@ -307,13 +307,13 @@ module Mica::XML::XPath
       local = test.local
       prepaid += 2 * local.bytesize + 2 if local
       charge(prepaid)
-      name_operations = @names.unpaid_operations
+      name_operations = @names.lookup_operations
       local_id = @names.lookup(local.to_slice) if local
       if uri
         uri_id = @names.lookup(uri.to_slice)
         uri_id = -2 if uri_id < 0
       end
-      charge(Math.max(@names.unpaid_operations - name_operations - prepaid, 0_i64))
+      charge(Math.max(@names.lookup_operations - name_operations - prepaid, 0_i64))
       Matcher.new(test.kind, local_id, uri_id, test.kind.pi? ? test.local : nil)
     end
 
@@ -865,7 +865,7 @@ module Mica::XML::XPath
         found = search(text, needle)
         return "" unless found
         # The search stopped at the match: the suffix copy is charged here.
-        charge(text.bytesize - found)
+        charge(text.bytesize - found - needle.bytesize)
         text.byte_slice(found + needle.bytesize)
       when "substring"
         substring(arguments, node, position, size)

@@ -22,7 +22,7 @@ class Mica::XML::Reader
       @attrs.each do |slot|
         check_normalized_name(slot.name_id, attribute_ordinal: slot.specified ? ordinal : nil)
         ordinal += 1 if slot.specified
-        check_normalized_attribute_value(slot)
+        check_normalized_attribute_value(slot, slot.specified ? ordinal - 1 : nil)
       end
     when .text?, .significant_whitespace?
       check_normalized_value("character content")
@@ -170,22 +170,99 @@ class Mica::XML::Reader
     index
   end
 
-  # Checks an attribute value. When the value lies unchanged in the tag an
-  # error points at the offending character; a value that was rewritten
-  # (references expanded, white space normalized) no longer matches the
-  # source byte for byte, so its error points at the tag.
-  private def check_normalized_attribute_value(slot : AttributeSlot) : Nil
+  # Checks an attribute value; an error points at the offending character.
+  # A value that lies unchanged in the tag maps directly. A rewritten value
+  # (references expanded, white space normalized) is mapped by replaying
+  # its source (`rewritten_value_source_index`) and points at the
+  # character, or at the reference whose expansion holds it. A DTD default
+  # has no source in the tag, so its error points at the tag.
+  private def check_normalized_attribute_value(slot : AttributeSlot, ordinal : Int32?) : Nil
     bytes = attribute_value_bytes(slot)
     check_normalized(bytes, "attribute value", nil) do |offending|
       start = @token_position
       if start.nil?
         error_position
-      elsif slot.specified && !slot.in_scratch && @frames.empty?
+      elsif !slot.specified || !@frames.empty?
+        start
+      elsif !slot.in_scratch
         position_after(start, @mark, @mark + slot.value_start + offending)
+      elsif ordinal && (index = rewritten_value_source_index(ordinal, bytes, offending))
+        position_after(start, @mark, index)
       else
         start
       end
     end
+  end
+
+  # Returns the buffer index of the source that produced byte *offending*
+  # of the rewritten value *bytes* of the *ordinal*-th specified attribute.
+  # The offending character is never a space, and normalization only
+  # turns white space into spaces and collapses or trims spaces, so the
+  # character is found by counting non-space bytes: the value's source is
+  # replayed until as many non-space bytes have been produced as precede
+  # the character in *bytes*. The replay runs only on the error path and
+  # redoes expansion work the parse already charged.
+  private def rewritten_value_source_index(ordinal : Int32, bytes : Bytes, offending : Int32) : Int32?
+    name_offset = attribute_name_offset(ordinal) || return
+    stop = Math.min(@pos, @limit)
+    index = skip_until(@mark + name_offset, stop, '='.ord.to_u8) + 1
+    while index < stop && (space = white_space_length(index, stop)) > 0
+      index += space
+    end
+    return if index >= stop
+    value_end = skip_until(index + 1, stop, @buffer[index])
+    index += 1
+    remaining = bytes[0, offending].count { |byte| byte != 0x20 }
+    while index < value_end
+      if @buffer[index] == '&'.ord
+        terminator = skip_until(index, value_end, ';'.ord.to_u8)
+        produced = reference_output_size(@buffer[index + 1, terminator - index - 1])
+        return index if remaining < produced
+        remaining -= produced
+        index = terminator + 1
+      elsif (space = white_space_length(index, value_end)) > 0
+        index += space
+      else
+        return index if remaining == 0
+        remaining -= 1
+        index += 1
+      end
+    end
+    nil
+  end
+
+  # Returns the non-space bytes that the reference with *body* (the bytes
+  # between `&` and `;`) adds to an attribute value, as
+  # `parse_attribute_reference` expands it.
+  private def reference_output_size(body : Bytes) : Int32
+    if body.size > 0 && body[0] == '#'.ord
+      code = decode_char_reference_body(body)
+      return code == 0x20 ? 0 : code.chr.bytesize
+    end
+    name_id = @names.lookup(body)
+    return 0 if name_id < 0
+    return 1 if predefined_entity_byte(name_id)
+    text = @dtd.general_entities[name_id]?.try(&.replacement)
+    text ? replacement_output_size(text) : 0
+  end
+
+  # Returns the non-space bytes that replacement text *text* adds to an
+  # attribute value, as `expand_attribute_entity` expands it.
+  private def replacement_output_size(text : Bytes) : Int32
+    size = 0
+    index = 0
+    while index < text.size
+      byte = text[index]
+      if byte == '&'.ord
+        terminator = text.index(';'.ord.to_u8, index) || return size
+        size += reference_output_size(text[index + 1, terminator - index - 1])
+        index = terminator + 1
+        next
+      end
+      size += 1 unless byte == 0x20 || byte == 0x09 || byte == 0x0A || byte == 0x0D
+      index += 1
+    end
+    size
   end
 
   # Checks the current event's value; an error points at the offending

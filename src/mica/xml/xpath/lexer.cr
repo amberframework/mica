@@ -48,6 +48,7 @@ module Mica::XML::XPath
 
     def initialize(@source : String, @meter : Core::WorkMeter? = nil)
       @reader = Char::Reader.new(@source)
+      check_encoding
     end
 
     def tokenize : Array(Token)
@@ -82,7 +83,17 @@ module Mica::XML::XPath
     private def advance : Char
       @steps += 1
       charge_steps(0) if @steps - @charged_steps >= LEX_CHUNK
-      @reader.next_char
+      char = @reader.next_char
+      check_encoding
+      char
+    end
+
+    # Rejects the current character when the source is not valid UTF-8
+    # there, naming the byte offset.
+    private def check_encoding : Nil
+      if byte = @reader.error
+        raise XPathError.new("Invalid UTF-8 byte 0x#{byte.to_s(16, upcase: true, precision: 2)} at byte #{@reader.pos} in #{@source.inspect}")
+      end
     end
 
     private def charge_steps(extra : Int32) : Nil

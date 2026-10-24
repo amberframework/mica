@@ -159,11 +159,12 @@ module Mica::XML
       previous_hook = @names.before_rebuild
       @names.before_rebuild = edit_rebuild_hook
       unpaid_before = @names.unpaid_operations
+      lookups_before = @names.lookup_operations
       begin
         yield
       ensure
         @names.before_rebuild = previous_hook
-        settle_name_work(unpaid_before)
+        settle_name_work(unpaid_before, lookups_before)
       end
     end
 
@@ -178,13 +179,13 @@ module Mica::XML
     end
 
     # Charges the name-table work an edit did (lookups and interning) to
-    # the edit meter and marks it paid, so a reader sharing the table never
-    # charges it to its parse.
-    private def settle_name_work(unpaid_before : Int64) : Nil
+    # the edit meter, marking the interning work paid so a reader sharing
+    # the table never charges it to its parse.
+    private def settle_name_work(unpaid_before : Int64, lookups_before : Int64) : Nil
       work = @names.unpaid_operations - unpaid_before
-      return unless work > 0
-      @names.mark_paid(work)
-      charge_edit(work)
+      @names.mark_paid(work) if work > 0
+      work += @names.lookup_operations - lookups_before
+      charge_edit(work) if work > 0
     end
 
     private def edit_rebuild_hook : Proc(Int64, Nil)

@@ -36,8 +36,16 @@ module Mica::XML
     # Returns the number of slots examined by all lookups so far.
     getter probes : Int64 = 0_i64
 
-    # Returns the work of all lookups, growth and reseeding so far.
+    # Returns the work of all interning, growth and reseeding so far: the
+    # work that adding names does, which the reader filling the table
+    # charges to its parse.
     getter operations : Int64 = 0_i64
+
+    # Returns the work of all `lookup` calls so far. Lookups never add a
+    # name, so they are kept apart from `operations`: the caller that looks
+    # a name up (an XPath evaluator, an edit) charges its own share, and a
+    # reader sharing the table never sees it.
+    getter lookup_operations : Int64 = 0_i64
 
     # The part of `operations` already reported through `before_rebuild`.
     # An owner charging `operations` to its meter charges only the rest
@@ -154,16 +162,16 @@ module Mica::XML
 
     # Returns the id of *bytes* or -1 if it was never interned.
     def lookup(bytes : Bytes) : Int32
-      @operations += bytes.size + 1
+      @lookup_operations += bytes.size + 1
       hash = hash_bytes(bytes)
       index = hash.to_i32! & @mask
       loop do
         @probes += 1
-        @operations += 1
+        @lookup_operations += 1
         id = @slots[index]
         return -1 if id < 0
         if @hashes[id] == hash
-          @operations += bytes.size
+          @lookup_operations += bytes.size
           return id if same_bytes?(@strings[id], bytes)
         end
         index = (index + 1) & @mask
