@@ -364,6 +364,8 @@ module Mica::XML
     # this element. Descendants that redeclare the prefix shadow it, so their
     # subtrees are skipped.
     private def subtree_uses_prefix?(prefix_id : Int32) : Bool
+      # No node anywhere is named with the prefix: nothing to inspect.
+      return false unless @document.prefix_used?(prefix_id)
       current = @index
       while current >= 0
         if @document.kind(current).element_node?
@@ -438,10 +440,10 @@ module Mica::XML
       if for_edit || @document.attribute_index?(@index)
         exact = @document.attribute_named(@index, id)
         return exact if exact && @document.kind(exact).attribute_node?
-      else
-        each_attribute_index do |attribute|
-          return attribute if @document.data(attribute).name_id == id
-        end
+        return @document.attribute_with_local_name(@index, id)
+      end
+      each_attribute_index do |attribute|
+        return attribute if @document.data(attribute).name_id == id
       end
       each_attribute_index do |attribute|
         return attribute if names.local_id(@document.data(attribute).name_id) == id

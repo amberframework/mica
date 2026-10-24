@@ -8,9 +8,10 @@ module Mica::XML
   #
   # The hash is seeded per table so that an attacker who controls the
   # document cannot precompute colliding names. As a second line of defense
-  # a probe sequence longer than MAX_PROBES makes the table pick a new seed
-  # and rehash, so a lookup never costs more than its name's length plus
-  # MAX_PROBES, and a run of collisions cannot persist.
+  # a probe sequence longer than MAX_PROBES, or a run of occupied slots
+  # longer than MAX_RUN, makes the table pick a new seed and rehash, so a
+  # lookup of any name, present or absent, never costs more than its name's
+  # length plus MAX_RUN + 1 probes, and a run of collisions cannot persist.
   #
   # `operations` counts all the work for the reader's work meter: each
   # lookup's name bytes (hashing), every slot probed, the bytes compared,
@@ -23,6 +24,11 @@ module Mica::XML
     # rare, so reseeding only happens under attack (or astronomically bad
     # luck, which it also cures).
     MAX_PROBES = 128
+
+    # Longest run of occupied slots the table keeps. A lookup of any name,
+    # present or absent, stops at the end of its run, so it probes at most
+    # MAX_RUN + 1 slots; a run that grows longer makes the table reseed.
+    MAX_RUN = 2 * MAX_PROBES
 
     # Reseeds allowed per table before giving up with an error.
     MAX_RESEEDS = 16
@@ -212,43 +218,89 @@ module Mica::XML
       @prefix_ids << -1
       @qname_states << 0_i8
       @slots[index] = id
+      reseed if run_too_long?(index)
       grow if @strings.size * 2 > @slots.size
       id
     end
 
-    private def grow : Nil
-      rebuild(@slots.size * 2)
-    end
-
-    # Picks a new seed and rehashes every name (after a probe sequence
-    # longer than MAX_PROBES).
-    private def reseed : Nil
-      @reseeds += 1
-      raise Mica::Error.new("Name table hash collisions persist after #{MAX_RESEEDS} reseeds") if @reseeds > MAX_RESEEDS
-      account_rebuild(@name_bytes)
-      @seed = @fixed_seed ? mix_seed(@seed &+ @reseeds) : Random::Secure.rand(UInt32)
-      @probes += @name_bytes - @strings.size
-      @strings.each_with_index do |string, id|
-        @hashes[id] = hash_bytes(string.to_slice)
+    # True when the run of occupied slots around *index* is longer than
+    # MAX_RUN. Examines at most MAX_RUN + 2 slots.
+    private def run_too_long?(index : Int32) : Bool
+      length = 1
+      left = (index - 1) & @mask
+      while @slots[left] >= 0
+        length += 1
+        break if length > MAX_RUN
+        left = (left - 1) & @mask
       end
-      rebuild(@slots.size)
+      right = (index + 1) & @mask
+      while length <= MAX_RUN && @slots[right] >= 0
+        length += 1
+        right = (right + 1) & @mask
+      end
+      @operations += length
+      length > MAX_RUN
     end
 
-    private def rebuild(new_size : Int32) : Nil
-      # Slots allocated plus names placed; collision probes are counted
-      # as they happen.
-      account_rebuild(new_size.to_i64 + @hashes.size)
+    private def grow : Nil
+      reseed unless rebuild(@slots.size * 2)
+    end
+
+    # Picks a new seed and rehashes every name, until every run is at most
+    # MAX_RUN long (after a probe sequence longer than MAX_PROBES or a run
+    # longer than MAX_RUN).
+    private def reseed : Nil
+      loop do
+        @reseeds += 1
+        raise Mica::Error.new("Name table hash collisions persist after #{MAX_RESEEDS} reseeds") if @reseeds > MAX_RESEEDS
+        account_rebuild(@name_bytes)
+        @seed = @fixed_seed ? mix_seed(@seed &+ @reseeds) : Random::Secure.rand(UInt32)
+        @probes += @name_bytes - @strings.size
+        @strings.each_with_index do |string, id|
+          @hashes[id] = hash_bytes(string.to_slice)
+        end
+        break if rebuild(@slots.size)
+      end
+    end
+
+    # Places every name in a table of *new_size* slots. Returns false, after
+    # bounded work, when a placement probes past MAX_RUN or a run is longer
+    # than MAX_RUN (the caller then reseeds).
+    private def rebuild(new_size : Int32) : Bool
+      # Slots allocated, names placed and the run check; collision probes
+      # are counted as they happen.
+      account_rebuild(2 * new_size.to_i64 + @hashes.size)
       @slots = Slice(Int32).new(new_size, -1)
       @mask = new_size - 1
       @hashes.each_with_index do |hash, id|
         index = hash.to_i32! & @mask
+        steps = 0
         while @slots[index] >= 0
           @probes += 1
           @operations += 1
+          steps += 1
+          return false if steps > MAX_RUN
           index = (index + 1) & @mask
         end
         @slots[index] = id
       end
+      runs_bounded?
+    end
+
+    # True when no run of occupied slots is longer than MAX_RUN.
+    private def runs_bounded? : Bool
+      # A run may wrap around the end: start counting after an empty slot.
+      first_empty = @slots.index(-1) || return false
+      length = 0
+      @slots.size.times do |offset|
+        if @slots[(first_empty + offset) & @mask] >= 0
+          length += 1
+          return false if length > MAX_RUN
+        else
+          length = 0
+        end
+      end
+      true
     end
 
     # Returns the work in `operations` not yet reported through

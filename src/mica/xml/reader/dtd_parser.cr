@@ -328,9 +328,7 @@ class Mica::XML::Reader
       else
         scan_nmtoken
       end
-      if normalization_checked?
-        check_normalized(@buffer[@mark + start, @pos - @mark - start], notation ? "name" : "name token")
-      end
+      check_declared_name(start, notation ? "name" : "name token") if normalization_checked?
       skip_spaces
       case peek_byte
       when '|'.ord
@@ -495,7 +493,8 @@ class Mica::XML::Reader
   # relevant construct, so names in unused declarations are checked too.
   # An error points at the offending character of the name.
   private def scan_declared_name_id : Int32
-    start = @pos
+    # Relative to the mark, which a refill keeps in the buffer.
+    start = @pos - @mark
     name_id = scan_name_id
     if normalization_checked? && !@normalized_name_ids.includes?(name_id)
       check_declared_name(start)
@@ -506,17 +505,19 @@ class Mica::XML::Reader
 
   # Same for a name read as a span (relative to `@mark`).
   private def scan_declared_name_span : {Int32, Int32}
-    start = @pos
+    start = @pos - @mark
     span = scan_name_span
     check_declared_name(start) if normalization_checked?
     span
   end
 
-  # Checks the name in `@buffer` from *start* to the current position.
-  private def check_declared_name(start : Int32) : Nil
-    check_normalized(@buffer[start, @pos - start], "name", nil) do |offending|
+  # Checks the name (or name token) from *start* (relative to `@mark`) to
+  # the current position.
+  private def check_declared_name(start : Int32, construct : String = "name") : Nil
+    first = @mark + start
+    check_normalized(@buffer[first, @pos - first], construct, nil) do |offending|
       # Inside parameter-entity text, positions refer to the reference.
-      @frames.empty? ? buffer_position(start + offending) : error_position
+      @frames.empty? ? buffer_position(first + offending) : error_position
     end
   end
 end

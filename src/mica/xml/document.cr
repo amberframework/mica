@@ -498,14 +498,22 @@ module Mica::XML
     # The attribute list of one edited element, indexed so that each edit
     # costs O(1) expected instead of a walk over the list: the attribute (or
     # namespace declaration) for each qualified name id, the attribute for
-    # each expanded name, and the list tail. Built once per element with
-    # one walk, then kept current by `append_attribute`, `unlink` and
-    # `rename`, so *n* edits on an element cost O(n + k) for *k* parsed
-    # attributes.
+    # each expanded name, the declaration for each prefix, the attributes
+    # for each local name in list order, and the list tail. Built once per
+    # element with one walk, then kept current by `append_attribute`,
+    # `unlink` and `rename`, so *n* edits on an element cost O(n + k) for
+    # *k* parsed attributes.
     class AttributeIndex
       getter by_name = {} of Int32 => Int32
       getter by_expanded_name = {} of {Int32, Int32} => Int32
       getter by_declared_prefix = {} of Int32 => Int32
+      # Attribute nodes by local name id, in list order (by `order`). Entries
+      # of removed or renamed attributes stay until they reach the front,
+      # where a lookup drops them, so each entry is dropped once.
+      getter by_local_name = {} of Int32 => Array(Int32)
+      # The position of each indexed attribute in the list (increasing).
+      getter order = {} of Int32 => Int32
+      property next_order = 0
       property tail : Int32 = -1
     end
 
@@ -527,6 +535,20 @@ module Mica::XML
 
     # :nodoc:
     #
+    # Returns the first attribute of *element* (in list order) whose local
+    # name is *local_id*, or nil.
+    def attribute_with_local_name(element : Int32, local_id : Int32) : Int32?
+      candidates = attribute_index(element).by_local_name[local_id]? || return
+      while first = candidates.first?
+        record = data(first)
+        return first if record.parent == element && record.kind.attribute_node? && @names.local_id(record.name_id) == local_id
+        candidates.shift
+      end
+      nil
+    end
+
+    # :nodoc:
+    #
     # True when *element* has an attribute index (it was edited).
     def attribute_index?(element : Int32) : Bool
       @attribute_indexes.has_key?(element)
@@ -537,6 +559,8 @@ module Mica::XML
         index = AttributeIndex.new
         current = data(element).first_attribute
         while current >= 0
+          index.order[current] = index.next_order
+          index.next_order += 1
           index_attribute(index, current)
           index.tail = current
           current = data(current).next_sibling
@@ -550,8 +574,25 @@ module Mica::XML
       index.by_name[record.name_id] ||= attribute
       if record.kind.namespace_decl?
         index.by_declared_prefix[declared_prefix_id(record.name_id)] ||= attribute
-      elsif record.namespace_uri_id != NameTable::EMPTY_ID
-        index.by_expanded_name[{record.namespace_uri_id, @names.local_id(record.name_id)}] ||= attribute
+        return
+      end
+      local_id = @names.local_id(record.name_id)
+      if record.namespace_uri_id != NameTable::EMPTY_ID
+        index.by_expanded_name[{record.namespace_uri_id, local_id}] ||= attribute
+      end
+      insert_in_order(index, index.by_local_name.put_if_absent(local_id) { [] of Int32 }, attribute)
+    end
+
+    # Inserts *attribute* into *candidates* by list position. Appends land
+    # at the end in O(1); a rename finds its place by binary search.
+    private def insert_in_order(index : AttributeIndex, candidates : Array(Int32), attribute : Int32) : Nil
+      position = index.order[attribute]
+      last = candidates.last?
+      if last.nil? || index.order[last] < position
+        candidates << attribute
+      else
+        at = candidates.bsearch_index { |candidate| index.order[candidate] >= position } || candidates.size
+        candidates.insert(at, attribute) unless candidates[at]? == attribute
       end
     end
 
@@ -573,8 +614,11 @@ module Mica::XML
     def append_attribute(element : Int32, name_id : Int32, namespace_uri_id : Int32, value : String, kind : Node::Type) : Int32
       index = attribute_index(element)
       attribute = add_attribute_node(kind, element, name_id, namespace_uri_id, value.to_slice, index.tail)
+      index.order[attribute] = index.next_order
+      index.next_order += 1
       index_attribute(index, attribute)
       index.tail = attribute
+      count_name_use(name_id, 1) if kind.attribute_node?
       mark_order_dirty
       attribute
     end
@@ -582,9 +626,12 @@ module Mica::XML
     # :nodoc:
     def rename(index : Int32, name_id : Int32, namespace_uri_id : Int32) : Nil
       record = data(index)
+      named = record.kind.element_node? || record.kind.attribute_node?
       attribute_index = attribute_owner_index(record)
       unindex_attribute(attribute_index, index) if attribute_index
+      count_name_use(record.name_id, -1) if named
       write_rename(index, name_id, namespace_uri_id)
+      count_name_use(name_id, 1) if named
       index_attribute(attribute_index, index) if attribute_index
     end
 
@@ -603,28 +650,52 @@ module Mica::XML
       end
     end
 
+    # Number of element and attribute nodes (attached or detached) named
+    # with each prefix id, counted once on first use and then kept current
+    # by renames and new attributes. A prefix with no count is used by no
+    # node, so a new declaration of it cannot change how any name resolves.
+    @prefix_use_counts : Hash(Int32, Int32)? = nil
+
+    # :nodoc:
+    #
+    # True when some element or attribute node of the document (attached or
+    # detached) has a name with *prefix_id*.
+    def prefix_used?(prefix_id : Int32) : Bool
+      counts = @prefix_use_counts ||= count_prefix_uses
+      counts.fetch(prefix_id, 0) > 0
+    end
+
+    private def count_prefix_uses : Hash(Int32, Int32)
+      counts = {} of Int32 => Int32
+      @size.times do |node|
+        record = data(node)
+        next unless record.kind.element_node? || record.kind.attribute_node?
+        prefix_id = @names.prefix_id(record.name_id)
+        counts[prefix_id] = counts.fetch(prefix_id, 0) + 1
+      end
+      counts
+    end
+
+    private def count_name_use(name_id : Int32, delta : Int32) : Nil
+      counts = @prefix_use_counts || return
+      prefix_id = @names.prefix_id(name_id)
+      counts[prefix_id] = counts.fetch(prefix_id, 0) + delta
+    end
+
     # :nodoc:
     #
     # Resolves *prefix_id* on element *index* through the namespace
     # declarations in scope. Returns the URI id, `NameTable::EMPTY_ID` for no
     # namespace (or an unbound empty prefix), or -1 when a prefix is unbound.
+    # Used by edits: each element on the way is indexed (once), so repeated
+    # resolutions cost O(depth) each, not the size of the attribute lists.
     def resolve_prefix(index : Int32, prefix_id : Int32) : Int32
       return @xml_namespace_id if prefix_id == @xml_prefix_id
       current = index
       while current >= 0
-        if edited = @attribute_indexes[current]?
-          # An element the edit API has indexed answers without a walk.
-          if declaration = edited.by_declared_prefix[prefix_id]?
+        if kind(current).element_node?
+          if declaration = attribute_index(current).by_declared_prefix[prefix_id]?
             return @names.intern(value_bytes(declaration))
-          end
-        elsif kind(current).element_node?
-          attribute = data(current).first_attribute
-          while attribute >= 0
-            record = data(attribute)
-            if record.kind.namespace_decl? && declared_prefix_id(record.name_id) == prefix_id
-              return @names.intern(value_bytes(attribute))
-            end
-            attribute = record.next_sibling
           end
         end
         current = data(current).parent

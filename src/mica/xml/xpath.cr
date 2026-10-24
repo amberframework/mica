@@ -83,7 +83,7 @@ module Mica::XML
                             budget : Core::WorkBudget, meter : Core::WorkMeter?) : Evaluator
         work_meter = meter || Core::WorkMeter.new(budget)
         work_meter.add_units(node.document.node_count.to_i64 + @source.bytesize)
-        Evaluator.new(node.document, namespaces || XPath.root_namespaces(node), variables, work_meter, @source)
+        Evaluator.new(node.document, namespaces, variables, work_meter, @source)
       end
     end
 
@@ -115,19 +115,6 @@ module Mica::XML
     def self.expression_position(source : String, offset : Int32) : Core::Position
       column = source.byte_index_to_char_index(offset) || source.size
       Core::Position.new(offset.to_i64, 1, column + 1)
-    end
-
-    # :nodoc:
-    def self.root_namespaces(node : Node) : Hash(String, String)
-      namespaces = {} of String => String
-      if root = node.root
-        root.namespace_definitions.each do |definition|
-          href = definition.href
-          next unless href
-          namespaces[definition.prefix || "xmlns"] = href
-        end
-      end
-      namespaces
     end
 
     # Converts *value* with the XPath `string()` rules.

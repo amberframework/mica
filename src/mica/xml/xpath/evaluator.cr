@@ -19,9 +19,39 @@ module Mica::XML::XPath
     @names : NameTable
     @offset = 0
 
-    def initialize(@document : Document, @namespaces : Hash(String, String), @variables : Hash(String, Value)?,
+    # Without *namespaces*, the prefixes declared on the document element
+    # are used; collecting them is charged to *meter*.
+    def initialize(@document : Document, namespaces : Hash(String, String)?, @variables : Hash(String, Value)?,
                    @meter : Core::WorkMeter, @source : String)
       @names = @document.names
+      @namespace_aware = @document.namespace_aware?
+      @namespaces = namespaces || {} of String => String
+      collect_root_namespaces unless namespaces
+    end
+
+    # Reads the namespace declarations of the document element into
+    # `@namespaces`, charging each node visited and each URI byte copied
+    # before the copy.
+    private def collect_root_namespaces : Nil
+      child = @document.data(0).first_child
+      while child >= 0
+        charge(1)
+        break if @document.kind(child).element_node?
+        child = @document.data(child).next_sibling
+      end
+      return if child < 0
+      attribute = @document.data(child).first_attribute
+      while attribute >= 0
+        record = @document.data(attribute)
+        charge(1)
+        if record.kind.namespace_decl?
+          value = @document.value_bytes(attribute)
+          charge(value.size)
+          prefix_id = @document.declared_prefix_id(record.name_id)
+          @namespaces[prefix_id == NameTable::EMPTY_ID ? "xmlns" : @names[prefix_id]] = String.new(value)
+        end
+        attribute = record.next_sibling
+      end
     end
 
     def run(expression : Expr, context : Int32) : Value
@@ -260,19 +290,21 @@ module Mica::XML::XPath
     private def resolve(test : NodeTest) : Matcher
       local_id = -1
       uri_id = NameTable::EMPTY_ID
-      # Name lookups hash and compare their bytes: charge that work before
-      # it happens (the bytes hashed and one compare each), then any probes
-      # beyond it.
+      # Hashing and comparing names is charged before it happens (the bytes
+      # hashed and one compare each); probes beyond that are charged after.
       prepaid = 0_i64
-      test.local.try { |local| prepaid += 2 * local.bytesize + 2 }
-      test.prefix.try { |prefix| @namespaces[prefix]?.try { |uri| prepaid += 2 * uri.bytesize + 2 } }
+      uri = nil
+      if prefix = test.prefix
+        charge(prefix.bytesize + 1)
+        uri = @namespaces[prefix]? || raise XPathError.new("Undefined namespace prefix '#{prefix}'")
+        prepaid += 2 * uri.bytesize + 2
+      end
+      local = test.local
+      prepaid += 2 * local.bytesize + 2 if local && !test.kind.pi?
       charge(prepaid)
       name_operations = @names.unpaid_operations
-      if local = test.local
-        local_id = @names.lookup(local.to_slice) unless test.kind.pi?
-      end
-      if prefix = test.prefix
-        uri = @namespaces[prefix]? || raise XPathError.new("Undefined namespace prefix '#{prefix}'")
+      local_id = @names.lookup(local.to_slice) if local && !test.kind.pi?
+      if uri
         uri_id = @names.lookup(uri.to_slice)
         uri_id = -2 if uri_id < 0
       end
@@ -306,7 +338,10 @@ module Mica::XML::XPath
         when .namespace_any?
           record.namespace_uri_id == matcher.uri_id
         else
-          record.namespace_uri_id == matcher.uri_id && @names.local_id(record.name_id) == matcher.local_id
+          # Without namespace processing a name is one unit ("p:a" is not
+          # an "a"), so the test compares whole names and never splits one.
+          name_id = @namespace_aware ? @names.local_id(record.name_id) : record.name_id
+          record.namespace_uri_id == matcher.uri_id && name_id == matcher.local_id
         end
       end
     end

@@ -118,11 +118,6 @@ class Mica::XML::Reader
     raise NormalizationError.new("The #{construct} is not in Unicode Normalization Form C (XML 1.1 section 2.13)", yield offending_normalization_index(bytes))
   end
 
-  # Non-starters after one starter that the blame search below examines
-  # one by one: the Unicode stream-safe text format allows at most 30, so
-  # a longer run is itself the anomaly and is blamed where it exceeds 30.
-  MAX_BLAMED_NON_STARTERS = 30
-
   # Returns the byte index of the character that makes *bytes* (known not
   # to be NFC) fail. The bytes are split into segments of one
   # non-composing character and the composing characters after it; the
@@ -151,19 +146,64 @@ class Mica::XML::Reader
   end
 
   # The first character of the non-NFC segment `bytes[start, stop - start]`
-  # (composing characters from *first_composing*) whose prefix is not NFC.
+  # (composing characters from *first_composing*) whose prefix of the
+  # segment is not NFC, found in one pass with constant work per character.
+  #
+  # The leading character is blamed when it is not NFC alone. Each later
+  # character *mark* extends an NFC prefix, which stays NFC unless *mark*
+  # is not NFC alone, is out of canonical order after the character before
+  # it, or composes with the leading character without being blocked. The
+  # prefix is canonically ordered so far, so *mark* is blocked exactly when
+  # a class-0 character came before it or the character before it has the
+  # same class. Each test normalizes at most three characters.
   private def blamed_in_segment(bytes : Bytes, start : Int32, first_composing : Int32, stop : Int32) : Int32
-    return start unless String.new(bytes[start, first_composing - start]).unicode_normalized?(:nfc)
+    starter = String.new(bytes[start, first_composing - start])
+    return start unless starter.unicode_normalized?(:nfc)
+    previous = nil
+    class_zero_seen = false
     index = first_composing
-    count = 0
     while index < stop
       _, length = Core::UTF8.decode(bytes, index, stop)
       length = Math.max(length, 1)
-      count += 1
-      return index if count > MAX_BLAMED_NON_STARTERS
-      return index unless String.new(bytes[start, index + length - start]).unicode_normalized?(:nfc)
+      mark = String.new(bytes[index, length])
+      return index unless mark.unicode_normalized?(:nfc)
+      blocked = class_zero_seen
+      if previous
+        return index if reordered?(previous, mark)
+        blocked ||= same_combining_class?(previous, mark)
+      end
+      return index if !blocked && !(starter + mark).unicode_normalized?(:nfc)
+      class_zero_seen ||= !nonzero_combining_class?(mark)
+      previous = mark
       index += length
     end
     first_composing
+  end
+
+  # True when canonical ordering moves *second* before *first*.
+  private def reordered?(first : String, second : String) : Bool
+    (first + second).unicode_normalize(:nfd) != first.unicode_normalize(:nfd) + second.unicode_normalize(:nfd)
+  end
+
+  # True when two non-starters have the same canonical combining class:
+  # canonical ordering keeps them in place in both orders.
+  private def same_combining_class?(first : String, second : String) : Bool
+    nonzero_combining_class?(first) && nonzero_combining_class?(second) &&
+      !reordered?(first, second) && !reordered?(second, first)
+  end
+
+  # U+0345 has class 240 and U+0334 class 1: canonical ordering moves the
+  # first after, or the second before, any character of class 2 to 239.
+  YPOGEGRAMMENI = "\u{0345}"
+  TILDE_OVERLAY = "\u{0334}"
+
+  # True when *mark* (one character) has a non-zero canonical combining
+  # class; the class is not public in the standard library, so it is read
+  # through canonical ordering against two characters of known class.
+  private def nonzero_combining_class?(mark : String) : Bool
+    first = mark.unicode_normalize(:nfd)[0].to_s
+    return true if first == YPOGEGRAMMENI || first == TILDE_OVERLAY
+    return true if (YPOGEGRAMMENI + first).unicode_normalize(:nfd).starts_with?(first)
+    (first + TILDE_OVERLAY).unicode_normalize(:nfd).starts_with?(TILDE_OVERLAY)
   end
 end
