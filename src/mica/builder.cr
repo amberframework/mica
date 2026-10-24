@@ -338,12 +338,9 @@ module Mica
       Escape.check_name(name)
       raise BuilderError.new("A DOCTYPE must come before the root element") if @root_written
       ensure_content_state("start a DTD")
+      check_external_id(pubid, sysid)
       @io << "<!DOCTYPE " << name
-      if pubid
-        raise BuilderError.new("A public identifier needs a system identifier") unless sysid
-        unless pubid.each_char.all? { |char| char != '"' && CharClass.pubid_char?(char.ord) }
-          raise BuilderError.new("Invalid public identifier #{pubid.inspect}")
-        end
+      if pubid && sysid
         @io << %( PUBLIC ") << pubid << '"' << ' '
         write_system_literal(sysid)
       elsif sysid
@@ -514,10 +511,21 @@ module Mica
       @comment_ends_with_dash = content.ends_with?('-')
     end
 
-    private def write_system_literal(literal : String) : Nil
-      if literal.includes?('"') && literal.includes?('\'')
+    private def check_external_id(pubid : String?, sysid : String?) : Nil
+      if pubid
+        raise BuilderError.new("A public identifier needs a system identifier") unless sysid
+        unless pubid.each_char.all? { |char| char != '"' && CharClass.pubid_char?(char.ord) }
+          raise BuilderError.new("Invalid public identifier #{pubid.inspect}")
+        end
+      end
+      return unless sysid
+      Escape.check_text(sysid)
+      if sysid.includes?('"') && sysid.includes?('\'')
         raise BuilderError.new("A system identifier cannot contain both quote characters")
       end
+    end
+
+    private def write_system_literal(literal : String) : Nil
       quote = literal.includes?('"') ? '\'' : '"'
       @io << quote << literal << quote
     end

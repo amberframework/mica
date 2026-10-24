@@ -90,23 +90,32 @@ end
 def run_case(test : TestCase) : Outcome
   bytes = File.read(test.uri).to_slice
   options = Mica::ParserOptions.new(namespace_aware: test.namespace)
-  document = nil
-  error = nil
   begin
     document = Mica.parse(bytes, options)
   rescue ex : Mica::Error
-    error = ex
+    return judge_rejection(test, ex)
   rescue ex
     return Outcome.new(test, "CRASH", "#{ex.class}: #{ex.message}")
   end
+  judge_acceptance(test, document)
+end
 
+def judge_rejection(test : TestCase, error : Mica::Error) : Outcome
   case test.type
   when "valid", "invalid"
-    if error
-      return Outcome.new(test, "FAIL", "rejected: #{error.message}")
-    end
+    Outcome.new(test, "FAIL", "rejected: #{error.message}")
+  when "not-wf"
+    Outcome.new(test, "PASS", "rejected: #{error.message}")
+  else
+    Outcome.new(test, "ERROR-CASE", "rejected: #{error.message}")
+  end
+end
+
+def judge_acceptance(test : TestCase, document : Mica::Document) : Outcome
+  case test.type
+  when "valid", "invalid"
     output = test.output
-    if document && output && test.type == "valid" && test.entities == "none" && File.exists?(output)
+    if output && test.type == "valid" && test.entities == "none" && File.exists?(output)
       expected = File.read(output)
       actual = Canonical.write(document)
       return Outcome.new(test, "OUTPUT-MISMATCH", "expected #{expected.inspect} got #{actual.inspect}") unless expected == actual
@@ -114,15 +123,12 @@ def run_case(test : TestCase) : Outcome
     end
     Outcome.new(test, "PASS", "accepted")
   when "not-wf"
-    if error
-      return Outcome.new(test, "PASS", "rejected: #{error.message}")
-    end
     if test.entities != "none"
       return Outcome.new(test, "EXTERNAL-NA", "accepted; error is in an external entity Mica does not read")
     end
     Outcome.new(test, "FAIL", "accepted a not-wf document")
   else
-    Outcome.new(test, "ERROR-CASE", error ? "rejected: #{error.message}" : "accepted")
+    Outcome.new(test, "ERROR-CASE", "accepted")
   end
 end
 
@@ -132,7 +138,7 @@ counts = Hash(String, Hash(String, Int32)).new { |hash, key| hash[key] = Hash(St
 outcomes.each { |outcome| counts[outcome.test.type][outcome.verdict] += 1 }
 
 puts "xmlconf applicable cases: #{list_of_tests.size} (skipped as XML 1.1 / NS 1.1 / editions 1-4: #{skipped})"
-counts.keys.sort.each do |type|
+counts.keys.sort!.each do |type|
   verdicts = counts[type]
   total = verdicts.values.sum
   summary = verdicts.to_a.sort.map { |verdict, count| "#{verdict}=#{count}" }.join(" ")

@@ -94,4 +94,46 @@ describe "Codex review findings" do
     document = Mica.parse("<a><?p d?></a>")
     expect_raises(Mica::Error, /reserved/) { node_at(document, "//processing-instruction()").name = "XmL" }
   end
+
+  describe "verification pass of the fixes" do
+    it "1: refuses to unlink a declaration that names in scope still use" do
+      document = Mica.parse(%(<r xmlns:p="u"><p:x/></r>))
+      declaration = (0...document.node_count).map { |index| document.node_at(index) }.find!(&.type.namespace_decl?)
+      expect_raises(Mica::Error, /unbind/) { declaration.unlink }
+      document.root.to_s.should contain(%(xmlns:p="u"))
+    end
+
+    it "1: unlinks a declaration that no name uses" do
+      document = Mica.parse(%(<r xmlns:p="u"><x/></r>))
+      declaration = (0...document.node_count).map { |index| document.node_at(index) }.find!(&.type.namespace_decl?)
+      declaration.unlink
+      document.root.try(&.to_xml(indent: 0)).should eq("<r><x/></r>")
+    end
+
+    it "1: accepts an ancestor declaration that a descendant shadows" do
+      document = Mica.parse(%(<r><p:x xmlns:p="u"/></r>))
+      root_of(document)["xmlns:p"] = "v"
+      reparsed = Mica.parse(document.to_xml(indent: 0))
+      node_at(reparsed, "/r/*").namespace.try(&.href).should eq("u")
+    end
+
+    it "5: evaluates from the start of a text run when the context is inside it" do
+      document = Mica.parse(%(<r>a<![CDATA[b]]></r>))
+      cdata = root_of(document).children[1]
+      cdata.xpath_nodes("self::text()").size.should eq(1)
+      cdata.xpath_string("string()").should eq("ab")
+    end
+
+    it "7: rejects system identifiers with characters outside the XML Char production" do
+      expect_raises(Mica::Error, /not allowed/) { Mica.build { |builder| builder.dtd("r", nil, "\u0000"); builder.element("r") } }
+      expect_raises(Mica::Error, /not allowed/) { Mica.build(&.dtd("r", "p", "\u0001")) }
+    end
+
+    it "9: renames a PI to a colon target when namespaces are off" do
+      document = Mica.parse("<a><?p d?></a>", Mica::ParserOptions.new(namespace_aware: false))
+      pi = node_at(document, "//processing-instruction()")
+      pi.name = "p:q"
+      document.to_xml(indent: 0).should contain("<?p:q d?>")
+    end
+  end
 end

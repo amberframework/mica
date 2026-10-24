@@ -43,7 +43,7 @@ module Canonical
     notations = node.document.dtd.notations
     return if notations.empty?
     io << "<!DOCTYPE " << node.name << " [\n"
-    notations.keys.sort.each do |name|
+    notations.keys.sort!.each do |name|
       public_id, system_id = notations[name]
       io << "<!NOTATION " << name
       if public_id

@@ -27,7 +27,7 @@ BenchHarness.run("libxml2") do |workload, path, verify|
         when .element?
           checksum += 1 + reader.name.bytesize
           if reader.move_to_first_attribute
-            while true
+            loop do
               checksum += reader.name.bytesize + reader.value.bytesize
               break unless reader.move_to_next_attribute
             end
@@ -42,7 +42,7 @@ BenchHarness.run("libxml2") do |workload, path, verify|
     end
   when "xpath"
     document = XML.parse(input(path), STRICT)
-    document.xpath_nodes("//s3:Contents/s3:Key", S3_NAMESPACES).sum(0_i64) { |key| key.content.bytesize.to_i64 }
+    document.xpath_nodes("//s3:Contents/s3:Key", S3_NAMESPACES).sum(0_i64, &.content.bytesize.to_i64)
   else
     abort "unknown workload #{workload}"
   end

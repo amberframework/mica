@@ -116,7 +116,7 @@ counts = Hash(String, Hash(String, Int32)).new { |hash, key| hash[key] = Hash(St
 outcomes.each { |outcome| counts[outcome.test.type][outcome.verdict] += 1 }
 
 puts "xmlconf applicable cases: #{list_of_tests.size} (skipped as XML 1.1 / NS 1.1 / editions 1-4: #{skipped})"
-counts.keys.sort.each do |type|
+counts.keys.sort!.each do |type|
   verdicts = counts[type]
   total = verdicts.values.sum
   summary = verdicts.to_a.sort.map { |verdict, count| "#{verdict}=#{count}" }.join(" ")

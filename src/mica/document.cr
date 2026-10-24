@@ -84,6 +84,10 @@ module Mica
     @xml_prefix_id : Int32
     @xmlns_id : Int32
 
+    # True when the document was parsed with Namespaces in XML enforced
+    # (`ParserOptions#namespace_aware`). Edits follow the same rules.
+    property? namespace_aware : Bool = true
+
     # :nodoc:
     def initialize(@names : NameTable = NameTable.new)
       @xmlns_namespace_id = @names.intern(Reader::XMLNS_NAMESPACE)
@@ -126,6 +130,7 @@ module Mica
 
     # :nodoc:
     def build_from(reader : Reader) : Nil
+      @namespace_aware = reader.options.namespace_aware?
       parent = 0
       while reader.read
         parent = add_event(reader, parent)
@@ -139,6 +144,7 @@ module Mica
     # Builds the subtree of the element the reader is on, then leaves the
     # reader on that element's end.
     def build_subtree_from(reader : Reader) : Nil
+      @namespace_aware = reader.options.namespace_aware?
       copy_prolog(reader)
       depth = reader.event_depth
       name_id = reader.event_name_id

@@ -16,7 +16,17 @@ module Mica::XPath
     end
 
     def run(expression : Expr, context : Int32) : Value
-      to_value(evaluate(expression, context, 1, 1))
+      to_value(evaluate(expression, text_run_start(context), 1, 1))
+    end
+
+    # XPath sees a run of adjacent text and CDATA siblings as one node, so a
+    # context inside a run is moved to the run's first node.
+    private def text_run_start(node : Int32) : Int32
+      current = node
+      while text_continuation?(current, @document.kind(current))
+        current = @document.data(current).previous_sibling
+      end
+      current
     end
 
     private def to_value(result : Result) : Value

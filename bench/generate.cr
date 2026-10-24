@@ -6,8 +6,8 @@ require "file_utils"
 DATA_DIRECTORY = File.join(__DIR__, "data")
 FileUtils.mkdir_p(DATA_DIRECTORY)
 
-WORDS = %w(alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa quebec
-  romeo sierra tango uniform victor whiskey xray yankee zulu crystal amber grant micrate storage bucket object)
+WORDS = %w[alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa quebec
+  romeo sierra tango uniform victor whiskey xray yankee zulu crystal amber grant micrate storage bucket object]
 
 def words(random : Random, count : Int32) : String
   String.build do |io|

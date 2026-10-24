@@ -199,7 +199,9 @@ module Mica
       if target.compare("xml", case_insensitive: true) == 0
         raise Error.new("The processing instruction target #{target.inspect} is reserved")
       end
-      raise Error.new("A processing instruction target cannot contain a colon") if target.includes?(':')
+      if @document.namespace_aware? && target.includes?(':')
+        raise Error.new("A processing instruction target cannot contain a colon")
+      end
       @document.rename(@index, name_id, NameTable::EMPTY_ID)
     end
 
@@ -356,11 +358,17 @@ module Mica
     end
 
     # True when an element (or, for a non-empty prefix, an attribute) in this
-    # element's subtree is named with *prefix_id*.
+    # element's subtree is named with *prefix_id* and resolves it through
+    # this element. Descendants that redeclare the prefix shadow it, so their
+    # subtrees are skipped.
     private def subtree_uses_prefix?(prefix_id : Int32) : Bool
       current = @index
       while current >= 0
         if @document.kind(current).element_node?
+          if current != @index && declares_prefix?(current, prefix_id)
+            current = following_outside_subtree(current)
+            next
+          end
           return true if names.prefix_id(@document.data(current).name_id) == prefix_id
           unless prefix_id == NameTable::EMPTY_ID
             Node.new(@document, current).each_attribute_index do |attribute|
@@ -371,6 +379,26 @@ module Mica
         current = @document.following_in_order(current, @index)
       end
       false
+    end
+
+    private def declares_prefix?(element : Int32, prefix_id : Int32) : Bool
+      Node.new(@document, element).each_attribute_index(include_declarations: true) do |attribute|
+        record = @document.data(attribute)
+        return true if record.kind.namespace_decl? && @document.declared_prefix_id(record.name_id) == prefix_id
+      end
+      false
+    end
+
+    # The next node in document order after the subtree of *index*, staying
+    # inside this element's subtree; -1 when there is none.
+    private def following_outside_subtree(index : Int32) : Int32
+      current = index
+      while current != @index && current >= 0
+        following = @document.data(current).next_sibling
+        return following if following >= 0
+        current = @document.data(current).parent
+      end
+      -1
     end
 
     # Raises when another attribute of this element has the expanded name
@@ -549,8 +577,26 @@ module Mica
 
     # Detaches this node (and its subtree) from the document tree. The node
     # stays usable on its own.
+    #
+    # Raises `Mica::Error` when this node is a namespace declaration that a
+    # name in its element's subtree still resolves through.
     def unlink : Nil
+      check_declaration_unused if @document.kind(@index).namespace_decl?
       @document.unlink(@index)
+    end
+
+    private def check_declaration_unused : Nil
+      owner = parent
+      return unless owner
+      prefix_id = @document.declared_prefix_id(@document.data(@index).name_id)
+      if owner.declaration_in_use?(prefix_id)
+        raise Error.new("Removing #{names[@document.data(@index).name_id].inspect} would unbind names in its scope")
+      end
+    end
+
+    # :nodoc:
+    def declaration_in_use?(prefix_id : Int32) : Bool
+      subtree_uses_prefix?(prefix_id)
     end
 
     def to_s(io : IO) : Nil
