@@ -16,11 +16,11 @@ end
 BenchHarness.run("mica") do |workload, path, verify|
   case workload
   when "dom"
-    document = Mica.parse(input(path))
+    document = Mica::XML.parse(input(path))
     verify ? document.xpath_float("count(//*)").to_i64 : 0_i64
   when "reader"
     File.open(path) do |file|
-      reader = Mica::Reader.new(file)
+      reader = Mica::XML::Reader.new(file)
       checksum = 0_i64
       while reader.read
         case reader.node_type
@@ -40,7 +40,7 @@ BenchHarness.run("mica") do |workload, path, verify|
       checksum
     end
   when "xpath"
-    document = Mica.parse(input(path))
+    document = Mica::XML.parse(input(path))
     document.xpath_nodes("//s3:Contents/s3:Key", S3_NAMESPACES).sum(0_i64, &.content.bytesize.to_i64)
   else
     abort "unknown workload #{workload}"

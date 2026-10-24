@@ -23,7 +23,7 @@ iterations.times do |iteration|
   bytes = Fuzz.case_bytes(seed, iteration)
   mica_error = nil
   begin
-    Mica.parse(bytes)
+    Mica::XML.parse(bytes)
   rescue error : Mica::Error
     mica_error = error.message.to_s.sub(/ \(line.*\z/, "").gsub(/'[^']*'/, "'…'")
   end

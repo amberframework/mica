@@ -1,6 +1,6 @@
 require "../spec_helper"
 
-describe Mica::Reader do
+describe Mica::XML::Reader do
   describe "#read" do
     it "walks elements, attributes, text and end tags" do
       reader_events(%(<a x="1"><b>hi</b><c/></a>)).should eq([
@@ -26,15 +26,15 @@ describe Mica::Reader do
     end
 
     it "reports whitespace-only text as SIGNIFICANT_WHITESPACE, like libxml2" do
-      reader = Mica::Reader.new("<a>\n  <b/>\n</a>")
+      reader = Mica::XML::Reader.new("<a>\n  <b/>\n</a>")
       reader.read
       reader.read
-      reader.node_type.should eq(Mica::Reader::Type::SIGNIFICANT_WHITESPACE)
+      reader.node_type.should eq(Mica::XML::Reader::Type::SIGNIFICANT_WHITESPACE)
       reader.value.should eq("\n  ")
     end
 
     it "expands character and predefined entity references" do
-      reader = Mica::Reader.new(%(<a t="&lt;&#65;&#x42;">&amp;&gt;&apos;&quot;&#x1F600;</a>))
+      reader = Mica::XML::Reader.new(%(<a t="&lt;&#65;&#x42;">&amp;&gt;&apos;&quot;&#x1F600;</a>))
       reader.read
       reader["t"].should eq("<AB")
       reader.read
@@ -42,7 +42,7 @@ describe Mica::Reader do
     end
 
     it "normalizes line ends and attribute white space" do
-      reader = Mica::Reader.new("<a t=\"x\ty\r\nz\">1\r\n2\r3</a>")
+      reader = Mica::XML::Reader.new("<a t=\"x\ty\r\nz\">1\r\n2\r3</a>")
       reader.read
       reader["t"].should eq("x y z")
       reader.read
@@ -50,7 +50,7 @@ describe Mica::Reader do
     end
 
     it "is empty_element? only for <x/>" do
-      reader = Mica::Reader.new("<a><b/><c></c></a>")
+      reader = Mica::XML::Reader.new("<a><b/><c></c></a>")
       reader.read
       reader.empty_element?.should be_false
       reader.read
@@ -60,22 +60,22 @@ describe Mica::Reader do
     end
 
     it "returns false at the end and stays there" do
-      reader = Mica::Reader.new("<a/>")
+      reader = Mica::XML::Reader.new("<a/>")
       reader.read.should be_true
       reader.read.should be_false
       reader.read.should be_false
-      reader.node_type.should eq(Mica::Reader::Type::NONE)
+      reader.node_type.should eq(Mica::XML::Reader::Type::NONE)
     end
   end
 
   describe "attributes" do
     it "moves through attributes and back" do
-      reader = Mica::Reader.new(%(<a one="1" two='2'/>))
+      reader = Mica::XML::Reader.new(%(<a one="1" two='2'/>))
       reader.read
       reader.has_attributes?.should be_true
       reader.attributes_count.should eq(2)
       reader.move_to_first_attribute.should be_true
-      reader.node_type.should eq(Mica::Reader::Type::ATTRIBUTE)
+      reader.node_type.should eq(Mica::XML::Reader::Type::ATTRIBUTE)
       reader.name.should eq("one")
       reader.depth.should eq(1)
       reader.move_to_next_attribute.should be_true
@@ -89,7 +89,7 @@ describe Mica::Reader do
     end
 
     it "raises KeyError for a missing attribute with []" do
-      reader = Mica::Reader.new(%(<a/>))
+      reader = Mica::XML::Reader.new(%(<a/>))
       reader.read
       reader["x"]?.should be_nil
       expect_raises(KeyError) { reader["x"] }
@@ -98,7 +98,7 @@ describe Mica::Reader do
 
   describe "namespaces" do
     it "resolves element and attribute namespaces" do
-      reader = Mica::Reader.new(%(<r xmlns="urn:d" xmlns:p="urn:p"><p:e p:a="1" b="2"/></r>))
+      reader = Mica::XML::Reader.new(%(<r xmlns="urn:d" xmlns:p="urn:p"><p:e p:a="1" b="2"/></r>))
       reader.read
       reader.namespace_uri.should eq("urn:d")
       reader.read
@@ -113,14 +113,14 @@ describe Mica::Reader do
     end
 
     it "lets xmlns=\"\" undeclare the default namespace" do
-      reader = Mica::Reader.new(%(<r xmlns="urn:d"><e xmlns=""/></r>))
+      reader = Mica::XML::Reader.new(%(<r xmlns="urn:d"><e xmlns=""/></r>))
       reader.read
       reader.read
       reader.namespace_uri.should be_nil
     end
 
     it "applies a DTD-defaulted xmlns before resolving names" do
-      reader = Mica::Reader.new(%(<!DOCTYPE r [<!ATTLIST r xmlns:p CDATA "urn:p">]><r><p:e/></r>))
+      reader = Mica::XML::Reader.new(%(<!DOCTYPE r [<!ATTLIST r xmlns:p CDATA "urn:p">]><r><p:e/></r>))
       reader.read
       reader.read
       reader.read
@@ -143,7 +143,7 @@ describe Mica::Reader do
     end
 
     it "accepts colons freely when namespace processing is off" do
-      options = Mica::ParserOptions.new(namespace_aware: false)
+      options = Mica::XML::ParserOptions.new(namespace_aware: false)
       reader_events(%(<a:b:c x:y="1"/>), options).should eq([%(ELEMENT:0:a:b:c @x:y="1")])
     end
   end
@@ -202,13 +202,13 @@ describe Mica::Reader do
 
     it "stops processing declarations after an unread parameter entity unless standalone" do
       xml = %(<!DOCTYPE r [<!ENTITY % ext SYSTEM "x.dtd">%ext;<!ATTLIST r a CDATA "d">]><r/>)
-      reader = Mica::Reader.new(xml)
+      reader = Mica::XML::Reader.new(xml)
       reader.read
       reader.read
       reader["a"]?.should be_nil
 
       standalone = %(<?xml version="1.0" standalone="yes"?>) + xml
-      reader = Mica::Reader.new(standalone)
+      reader = Mica::XML::Reader.new(standalone)
       reader.read
       reader.read
       reader["a"].should eq("d")
@@ -216,7 +216,7 @@ describe Mica::Reader do
 
     it "expands internal parameter entities between declarations" do
       xml = %(<!DOCTYPE r [<!ENTITY % decl "<!ENTITY g 'from-pe'>">%decl;]><r>&g;</r>)
-      reader = Mica::Reader.new(xml)
+      reader = Mica::XML::Reader.new(xml)
       reader.read
       reader.read
       reader.read
@@ -225,7 +225,7 @@ describe Mica::Reader do
 
     it "applies ATTLIST defaults and tokenized normalization" do
       xml = %(<!DOCTYPE r [<!ATTLIST r d CDATA "def" t NMTOKENS #IMPLIED>]><r t="  a   b "/>)
-      reader = Mica::Reader.new(xml)
+      reader = Mica::XML::Reader.new(xml)
       reader.read
       reader.read
       reader["d"].should eq("def")
@@ -267,7 +267,7 @@ describe Mica::Reader do
     it "reads UTF-16 big and little endian with a byte order mark" do
       text = %(<?xml version="1.0" encoding="UTF-16"?><a b="é">x😀</a>)
       [true, false].each do |big_endian|
-        reader = Mica::Reader.new(utf16(text, big_endian))
+        reader = Mica::XML::Reader.new(utf16(text, big_endian))
         reader.read
         reader["b"].should eq("é")
         reader.read
@@ -278,21 +278,28 @@ describe Mica::Reader do
 
     it "reads UTF-16 from a trickling IO" do
       bytes = utf16(%(<a>#{"long text " * 100}</a>), false)
-      reader = Mica::Reader.new(TrickleIO.new(bytes, 3))
+      reader = Mica::XML::Reader.new(TrickleIO.new(bytes, 3))
       reader.read
       reader.read
       reader.value.should eq("long text " * 100)
     end
 
     it "skips a UTF-8 byte order mark" do
-      reader = Mica::Reader.new(String.new(Bytes[0xEF, 0xBB, 0xBF] + "<a/>".to_slice))
+      reader = Mica::XML::Reader.new(String.new(Bytes[0xEF, 0xBB, 0xBF] + "<a/>".to_slice))
       reader.read.should be_true
       reader.name.should eq("a")
     end
 
     it "raises a clear EncodingError for other declared encodings" do
-      error = expect_raises(Mica::EncodingError) { reader_events(%(<?xml version="1.0" encoding="ISO-8859-1"?><a/>)) }
-      error.message.to_s.should contain("Unsupported encoding 'ISO-8859-1'")
+      error = expect_raises(Mica::EncodingError) { reader_events(%(<?xml version="1.0" encoding="Shift_JIS"?><a/>)) }
+      error.message.to_s.should contain("Unsupported encoding 'Shift_JIS'")
+    end
+
+    it "decodes ISO-8859-1 after the declaration, from bytes and from a stream" do
+      latin1 = %(<?xml version="1.0" encoding="ISO-8859-1"?><a t="caf\xE9">na\xEFve</a>).to_slice
+      [Mica::XML::Reader.new(latin1), Mica::XML::Reader.new(TrickleIO.new(latin1, 3))].each do |reader|
+        reader_events(reader).should eq([%(ELEMENT:0:a @t="café"), %(TEXT:1:#text="naïve"), "END_ELEMENT:0:a"])
+      end
     end
 
     it "rejects UTF-16 without a byte order mark and a UTF-16 declaration on UTF-8 bytes" do
@@ -313,7 +320,7 @@ describe Mica::Reader do
             %(<r xmlns:p="urn:p" a="1 &amp; 2"><p:b>t&e;ext</p:b><![CDATA[cd]]><!--c--><?pi d?>é😀\r\n</r>)
       expected = reader_events(xml)
       (1..7).each do |chunk|
-        reader_events(Mica::Reader.new(TrickleIO.new(xml.to_slice, chunk))).should eq(expected)
+        reader_events(Mica::XML::Reader.new(TrickleIO.new(xml.to_slice, chunk))).should eq(expected)
       end
     end
 
@@ -323,7 +330,7 @@ describe Mica::Reader do
       20_000.times { |index| io << "<item n=\"" << index << "\">value " << index << "</item>" }
       io << "</list>"
       io.rewind
-      reader = Mica::Reader.new(io)
+      reader = Mica::XML::Reader.new(io)
       count = 0
       while reader.read
         count += 1 if reader.node_type.element?
@@ -334,7 +341,7 @@ describe Mica::Reader do
 
   describe "#next and #next_sibling" do
     it "skips subtrees" do
-      reader = Mica::Reader.new("<a><b><c/></b><d/></a>")
+      reader = Mica::XML::Reader.new("<a><b><c/></b><d/></a>")
       reader.read
       reader.read
       reader.name.should eq("b")
@@ -343,11 +350,11 @@ describe Mica::Reader do
     end
 
     it "moves to the next sibling" do
-      reader = Mica::Reader.new("<a><b><x/></b>text<d/></a>")
+      reader = Mica::XML::Reader.new("<a><b><x/></b>text<d/></a>")
       reader.read
       reader.read
       reader.next_sibling.should be_true
-      reader.node_type.should eq(Mica::Reader::Type::TEXT)
+      reader.node_type.should eq(Mica::XML::Reader::Type::TEXT)
       reader.next_sibling.should be_true
       reader.name.should eq("d")
       reader.next_sibling.should be_false
@@ -356,23 +363,23 @@ describe Mica::Reader do
 
   describe "#expand" do
     it "returns the element subtree and leaves the reader on its end" do
-      reader = Mica::Reader.new(%(<feed><item id="1"><t>one</t></item><item id="2"/></feed>))
+      reader = Mica::XML::Reader.new(%(<feed><item id="1"><t>one</t></item><item id="2"/></feed>))
       reader.read
       reader.read
       item = reader.expand
       item["id"].should eq("1")
       item.xpath_string("string(t)").should eq("one")
-      reader.node_type.should eq(Mica::Reader::Type::END_ELEMENT)
+      reader.node_type.should eq(Mica::XML::Reader::Type::END_ELEMENT)
       reader.read
       reader["id"].should eq("2")
     end
 
     it "serializes inner and outer XML" do
-      reader = Mica::Reader.new(%(<a><b x="1">t<c/></b></a>))
+      reader = Mica::XML::Reader.new(%(<a><b x="1">t<c/></b></a>))
       reader.read
       reader.read
       reader.read_outer_xml.should eq(%(<b x="1">t<c/></b>))
-      reader = Mica::Reader.new(%(<a><b x="1">t<c/></b></a>))
+      reader = Mica::XML::Reader.new(%(<a><b x="1">t<c/></b></a>))
       reader.read
       reader.read_inner_xml.should eq(%(<b x="1">t<c/></b>))
     end

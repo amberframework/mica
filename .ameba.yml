@@ -4,11 +4,16 @@
 # per byte or per node without making the dispatch easier to read.
 Metrics/CyclomaticComplexity:
   Excluded:
-    - src/mica/char_class.cr
-    - src/mica/escape.cr
-    - src/mica/reader/content.cr
-    - src/mica/reader/dtd_parser.cr
-    - src/mica/reader/references.cr
-    - src/mica/reader/source.cr
-    - src/mica/xpath/evaluator.cr
-    - src/mica/xpath/lexer.cr
+    - src/mica/core/utf8.cr
+    - src/mica/core/encoding.cr
+    - src/mica/core/transcoder.cr
+    - src/mica/xml/char_class.cr
+    - src/mica/xml/escape.cr
+    - src/mica/xml/reader/content.cr
+    - src/mica/xml/reader/dtd_parser.cr
+    - src/mica/xml/reader/prolog.cr
+    - src/mica/xml/reader/references.cr
+    - src/mica/xml/reader/scanning.cr
+    - src/mica/xml/reader/source.cr
+    - src/mica/xml/xpath/evaluator.cr
+    - src/mica/xml/xpath/lexer.cr

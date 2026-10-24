@@ -45,7 +45,7 @@ catalogs = [
   "eduni/errata-4e/errata4e.xml", "eduni/misc/ht-bh.xml",
 ]
 
-def applicable?(test : Mica::Node) : Bool
+def applicable?(test : Mica::XML::Node) : Bool
   recommendation = test["RECOMMENDATION"]? || "XML1.0"
   return false unless recommendation.starts_with?("XML1.0") || recommendation.starts_with?("NS1.0")
   return false if test["VERSION"]? == "1.1"
@@ -63,7 +63,7 @@ catalogs.each do |catalog|
   # Some catalogs are fragments (several top-level TEST elements), so wrap
   # the content in one element after dropping the declaration and DOCTYPE.
   text = File.read(catalog_path).sub(/\A<\?xml[^>]*\?>/, "").sub(/<!DOCTYPE[^>]*>/, "")
-  document = Mica.parse("<CATALOG>#{text}</CATALOG>")
+  document = Mica::XML.parse("<CATALOG>#{text}</CATALOG>")
   document.xpath_nodes("//TEST").each do |test|
     unless applicable?(test)
       skipped += 1
@@ -89,9 +89,9 @@ end
 
 def run_case(test : TestCase) : Outcome
   bytes = File.read(test.uri).to_slice
-  options = Mica::ParserOptions.new(namespace_aware: test.namespace)
+  options = Mica::XML::ParserOptions.new(namespace_aware: test.namespace)
   begin
-    document = Mica.parse(bytes, options)
+    document = Mica::XML.parse(bytes, options)
   rescue ex : Mica::Error
     return judge_rejection(test, ex)
   rescue ex
@@ -111,7 +111,7 @@ def judge_rejection(test : TestCase, error : Mica::Error) : Outcome
   end
 end
 
-def judge_acceptance(test : TestCase, document : Mica::Document) : Outcome
+def judge_acceptance(test : TestCase, document : Mica::XML::Document) : Outcome
   case test.type
   when "valid", "invalid"
     output = test.output

@@ -8,7 +8,7 @@ private FUZZ_SEED       = (ENV["MICA_FUZZ_SEED"]? || "20261024").to_i64
 private FUZZ_ITERATIONS = (ENV["MICA_FUZZ_ITERATIONS"]? || "20000").to_i
 
 # Returns the event stream, or the error class and message.
-private def fuzz_outcome(reader : Mica::Reader) : String
+private def fuzz_outcome(reader : Mica::XML::Reader) : String
   reader_events(reader).join('\n')
 rescue error : Mica::Error
   "#{error.class}: #{error.message}"
@@ -23,17 +23,17 @@ describe "Mica fuzzing" do
       bytes = Fuzz.case_bytes(FUZZ_SEED, iteration)
       started = Time.instant
       begin
-        from_string = fuzz_outcome(Mica::Reader.new(bytes))
+        from_string = fuzz_outcome(Mica::XML::Reader.new(bytes))
         chunk = 1 + iteration % 7
-        from_io = fuzz_outcome(Mica::Reader.new(TrickleIO.new(bytes, chunk)))
+        from_io = fuzz_outcome(Mica::XML::Reader.new(TrickleIO.new(bytes, chunk)))
         if from_string != from_io
           failures << "iteration #{iteration}: String and #{chunk}-byte IO disagree:\n#{from_string[0, 300]}\n---\n#{from_io[0, 300]}"
           next
         end
         next if from_string.starts_with?("Mica::")
         accepted += 1
-        first = Mica.parse(bytes).to_xml(indent: 0)
-        second = Mica.parse(first).to_xml(indent: 0)
+        first = Mica::XML.parse(bytes).to_xml(indent: 0)
+        second = Mica::XML.parse(first).to_xml(indent: 0)
         failures << "iteration #{iteration}: round trip not stable" unless first == second
       rescue error
         failures << "iteration #{iteration}: crash #{error.class}: #{error.message}"

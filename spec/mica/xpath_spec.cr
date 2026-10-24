@@ -24,14 +24,14 @@ private DOC = <<-XML
   XML
 
 private def keys(path : String, namespaces = S3_NS) : Array(String)
-  Mica.parse(S3).xpath_nodes(path, namespaces).map(&.content)
+  Mica::XML.parse(S3).xpath_nodes(path, namespaces).map(&.content)
 end
 
 private def values(path : String) : Array(String)
-  Mica.parse(DOC).xpath_nodes(path).map(&.content)
+  Mica::XML.parse(DOC).xpath_nodes(path).map(&.content)
 end
 
-describe Mica::XPath do
+describe Mica::XML::XPath do
   describe "S3 responses with a prefix map" do
     it "selects child and descendant paths" do
       keys("/s3:ListBucketResult/s3:Contents/s3:Key").should eq(["a.txt", "b/c.txt", "d.txt"])
@@ -43,7 +43,7 @@ describe Mica::XPath do
     end
 
     it "registers the root's namespaces when no map is given (default as xmlns)" do
-      document = Mica.parse(S3)
+      document = Mica::XML.parse(S3)
       document.xpath_nodes("//xmlns:Key").size.should eq(3)
       document.xpath_string("string(//xmlns:Name)").should eq("bucket")
     end
@@ -53,11 +53,11 @@ describe Mica::XPath do
     end
 
     it "raises for an undefined prefix" do
-      expect_raises(Mica::XPathError, /Undefined namespace prefix/) { keys("//zz:Key") }
+      expect_raises(Mica::XML::XPathError, /Undefined namespace prefix/) { keys("//zz:Key") }
     end
 
     it "evaluates numbers, strings and booleans" do
-      document = Mica.parse(S3)
+      document = Mica::XML.parse(S3)
       document.xpath_float("count(//s3:Contents)", S3_NS).should eq(3.0)
       document.xpath_float("sum(//s3:Size)", S3_NS).should eq(47.0)
       document.xpath_bool("//s3:IsTruncated = 'true'", S3_NS).should be_false
@@ -97,10 +97,10 @@ describe Mica::XPath do
 
     it "selects text, comments and PIs" do
       values("//b/text()").should eq(["one", "two", "three"])
-      Mica.parse(DOC).xpath_nodes("//comment()").map(&.content).should eq([" note "])
-      Mica.parse(DOC).xpath_nodes("//processing-instruction('target')").size.should eq(1)
-      Mica.parse(DOC).xpath_nodes("//processing-instruction('other')").size.should eq(0)
-      Mica.parse(DOC).xpath_nodes("/root/node()").size.should eq(11)
+      Mica::XML.parse(DOC).xpath_nodes("//comment()").map(&.content).should eq([" note "])
+      Mica::XML.parse(DOC).xpath_nodes("//processing-instruction('target')").size.should eq(1)
+      Mica::XML.parse(DOC).xpath_nodes("//processing-instruction('other')").size.should eq(0)
+      Mica::XML.parse(DOC).xpath_nodes("/root/node()").size.should eq(11)
     end
 
     it "unions in document order without duplicates" do
@@ -108,11 +108,11 @@ describe Mica::XPath do
     end
 
     it "selects the document node with /" do
-      Mica.parse(DOC).xpath_nodes("/").first.document?.should be_true
+      Mica::XML.parse(DOC).xpath_nodes("/").first.document?.should be_true
     end
 
     it "evaluates relative to a context node" do
-      second = node_at(Mica.parse(DOC), "//a[2]")
+      second = node_at(Mica::XML.parse(DOC), "//a[2]")
       second.xpath_nodes("b").map(&.content).should eq(["three"])
       second.xpath_nodes(".//c").map(&.content).should eq(["c-text"])
       second.xpath_string("string(@id)").should eq("2")
@@ -121,7 +121,7 @@ describe Mica::XPath do
 
   describe "functions" do
     it "implements the core string functions" do
-      document = Mica.parse(%(<r><s>  Hello   World  </s></r>))
+      document = Mica::XML.parse(%(<r><s>  Hello   World  </s></r>))
       document.xpath_string("normalize-space(//s)").should eq("Hello World")
       document.xpath_string("substring('12345', 2, 3)").should eq("234")
       document.xpath_string("substring('12345', 1.5, 2.6)").should eq("234")
@@ -138,7 +138,7 @@ describe Mica::XPath do
     end
 
     it "implements number functions and XPath number formatting" do
-      document = Mica.parse("<r/>")
+      document = Mica::XML.parse("<r/>")
       document.xpath_float("floor(2.7)").should eq(2.0)
       document.xpath_float("ceiling(2.1)").should eq(3.0)
       document.xpath_float("round(2.5)").should eq(3.0)
@@ -158,33 +158,33 @@ describe Mica::XPath do
     end
 
     it "binds variables" do
-      document = Mica.parse(DOC)
-      variables = {"wanted" => "2"} of String => Mica::XPath::Value
+      document = Mica::XML.parse(DOC)
+      variables = {"wanted" => "2"} of String => Mica::XML::XPath::Value
       document.xpath_nodes("//a[@id = $wanted]", variables: variables).size.should eq(1)
-      expect_raises(Mica::XPathError, /Undefined XPath variable/) { document.xpath("$missing") }
+      expect_raises(Mica::XML::XPathError, /Undefined XPath variable/) { document.xpath("$missing") }
     end
 
     it "reuses a compiled expression" do
-      expression = Mica::XPath.compile("count(//b)")
-      expression.evaluate(Mica.parse(DOC).node).should eq(3.0)
-      expression.evaluate(Mica.parse("<x><b/></x>").node).should eq(1.0)
+      expression = Mica::XML::XPath.compile("count(//b)")
+      expression.evaluate(Mica::XML.parse(DOC).node).should eq(3.0)
+      expression.evaluate(Mica::XML.parse("<x><b/></x>").node).should eq(1.0)
     end
   end
 
   describe "errors" do
     it "rejects syntax errors and unsupported features" do
-      document = Mica.parse(DOC)
+      document = Mica::XML.parse(DOC)
       ["//a[", "//a]", "", "1 +", "//@", "foo(", "unknown()", "id('x')", "lang('en')", "namespace::*", "//a/b/'x'", "'unterminated"].each do |path|
-        expect_raises(Mica::XPathError) { document.xpath(path) }
+        expect_raises(Mica::XML::XPathError) { document.xpath(path) }
       end
     end
 
     it "raises when a typed accessor gets the wrong result type" do
-      expect_raises(Mica::XPathError) { Mica.parse(DOC).xpath_nodes("count(//a)") }
+      expect_raises(Mica::XML::XPathError) { Mica::XML.parse(DOC).xpath_nodes("count(//a)") }
     end
 
     it "bounds expression nesting" do
-      expect_raises(Mica::XPathError, /nested too deeply/) { Mica.parse(DOC).xpath("(" * 500 + "1" + ")" * 500) }
+      expect_raises(Mica::XML::XPathError, /nested too deeply/) { Mica::XML.parse(DOC).xpath("(" * 500 + "1" + ")" * 500) }
     end
   end
 end

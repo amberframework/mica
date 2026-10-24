@@ -22,7 +22,7 @@ class TrickleIO < IO
 end
 
 # Returns the reader's events as readable strings.
-def reader_events(reader : Mica::Reader) : Array(String)
+def reader_events(reader : Mica::XML::Reader) : Array(String)
   events = [] of String
   while reader.read
     event = "#{reader.node_type}:#{reader.depth}:#{reader.name}"
@@ -39,8 +39,8 @@ def reader_events(reader : Mica::Reader) : Array(String)
   events
 end
 
-def reader_events(xml : String, options : Mica::ParserOptions = Mica::ParserOptions.default) : Array(String)
-  reader_events(Mica::Reader.new(xml, options))
+def reader_events(xml : String, options : Mica::XML::ParserOptions = Mica::XML::ParserOptions.default) : Array(String)
+  reader_events(Mica::XML::Reader.new(xml, options))
 end
 
 def utf16(text : String, big_endian : Bool) : Bytes
@@ -62,10 +62,10 @@ def utf16(text : String, big_endian : Bool) : Bytes
   io.to_slice
 end
 
-def root_of(document : Mica::Document) : Mica::Node
+def root_of(document : Mica::XML::Document) : Mica::XML::Node
   document.root || raise "Document has no root element"
 end
 
-def node_at(context : Mica::Document | Mica::Node, path : String) : Mica::Node
+def node_at(context : Mica::XML::Document | Mica::XML::Node, path : String) : Mica::XML::Node
   context.xpath_node(path) || raise "No node matches #{path}"
 end

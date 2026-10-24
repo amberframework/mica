@@ -3,13 +3,13 @@
 # elements as start and end tag; character data with `&`, `<`, `>`, `"`,
 # TAB, LF and CR escaped; PIs as `<?target data?>`.
 module Canonical
-  def self.write(document : Mica::Document) : String
+  def self.write(document : Mica::XML::Document) : String
     String.build do |io|
       document.node.children.each { |child| write_node(io, child) }
     end
   end
 
-  private def self.write_node(io : IO, node : Mica::Node) : Nil
+  private def self.write_node(io : IO, node : Mica::XML::Node) : Nil
     case node.type
     when .element_node?
       io << '<' << node.qualified_name
@@ -39,7 +39,7 @@ module Canonical
   end
 
   # Second canonical form: a DOCTYPE listing the declared notations.
-  private def self.write_notations(io : IO, node : Mica::Node) : Nil
+  private def self.write_notations(io : IO, node : Mica::XML::Node) : Nil
     notations = node.document.dtd.notations
     return if notations.empty?
     io << "<!DOCTYPE " << node.name << " [\n"
