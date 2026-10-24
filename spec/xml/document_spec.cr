@@ -120,7 +120,7 @@ describe Mica::XML::Document do
       root_of(document).to_xml(indent: 0).should eq("<a><b><c/></b><d>text <i>x</i></d></a>")
     end
 
-    it "round-trips: parse, serialize, parse gives the same tree" do
+    it_satisfies "MICA-ROUND-TRIP", "round-trips: parse, serialize, parse gives the same tree" do
       [SAMPLE, %(<a x="&#9;&#10;&#13;&lt;&amp;&quot;">&#13;]]&gt;<![CDATA[]]]]><![CDATA[>]]></a>), %(<r><x:y xmlns:x="u" x:a="1"/>é😀</r>)].each do |xml|
         first = Mica::XML.parse(xml)
         second = Mica::XML.parse(first.to_xml(indent: 0))

@@ -7,9 +7,16 @@ require "../src/mica/testing"
 REQUIREMENTS = Mica::Testing::Traceability::Registry.new
 
 # Defines an example that covers the requirement *requirement_id* (an id
-# from a catalog in spec/requirements/).
-def it_satisfies(requirement_id : String, description : String, file = __FILE__, line = __LINE__, end_line = __END_LINE__, &block)
-  REQUIREMENTS.record(requirement_id, "#{file.sub(Dir.current + "/", "")}:#{line}")
+# from a catalog in spec/requirements/), or several ids given as a tuple.
+# Ids are recorded when the spec file loads, so the traceability spec sees
+# all of them before any example runs.
+def it_satisfies(requirement_id : String | Tuple, description : String, file = __FILE__, line = __LINE__, end_line = __END_LINE__, &block)
+  location = "#{file.sub(Dir.current + "/", "")}:#{line}"
+  if requirement_id.is_a?(String)
+    REQUIREMENTS.record(requirement_id, location)
+  else
+    requirement_id.each { |id| REQUIREMENTS.record(id.to_s, location) }
+  end
   it(description, file, line, end_line, tags: "requirement", &block)
 end
 
@@ -29,11 +36,6 @@ Spec.after_suite do
   end
 end
 
-# Records that the example being defined also covers *requirement_id*.
-def satisfies(requirement_id : String, file = __FILE__, line = __LINE__) : Nil
-  REQUIREMENTS.record(requirement_id, "#{file.sub(Dir.current + "/", "")}:#{line}")
-end
-
 # An IO that returns at most a few bytes per read, to exercise the reader's
 # buffer refill and compaction at every byte boundary.
 class TrickleIO < IO
@@ -44,7 +46,7 @@ class TrickleIO < IO
   def read(slice : Bytes) : Int32
     count = Math.min(Math.min(@chunk, slice.size), @bytes.size - @offset)
     return 0 if count <= 0
-    slice.copy_from(@bytes.to_unsafe + @offset, count)
+    slice[0, count].copy_from(@bytes[@offset, count])
     @offset += count
     count
   end

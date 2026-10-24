@@ -17,7 +17,7 @@ describe Mica::XML::Builder do
       xml.should eq(%(<?xml version="1.0"?>\n<feed>\n  <title>News</title>\n  <item id="1"/>\n</feed>\n))
     end
 
-    it "escapes text and attribute values" do
+    it_satisfies "XML10-2.4-character-data", "escapes text and attribute values" do
       xml = Mica::XML.build_fragment do |builder|
         builder.element("a", title: %(Tom & "Jerry" <3>\t\n\r)) { builder.text "1 < 2 & 3 > 2\r\n" }
       end
@@ -80,7 +80,7 @@ describe Mica::XML::Builder do
   end
 
   describe "round trip" do
-    it "parses builder output back to the same values" do
+    it_satisfies "MICA-ROUND-TRIP", "parses builder output back to the same values" do
       random = Random.new(42)
       50.times do
         text = String.build { |io| 20.times { io << ['a', '<', '&', '>', '"', '\'', ' ', '\n', '\t', 'é', '😀', ']'].sample(random) } }

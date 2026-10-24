@@ -1,0 +1,43 @@
+# Mica's own hardening requirements (the parsing-family hardening work of
+# 2026-10-24). Format: id<TAB>section<TAB>summary.
+MICA-LINEAR-ATTRIBUTES	linear time	Duplicate-attribute checks are linear in the attributes of an element
+MICA-LINEAR-NAMESPACES	linear time	Prefix resolution is linear in declarations and names
+MICA-LINEAR-ATTLIST	linear time	ATTLIST defaults apply in time linear in declarations and elements
+MICA-LINEAR-CHARREF	linear time	Character references expand in linear time (CVE-2024-49761 shape)
+MICA-LINEAR-ENTITIES	linear time	Entity expansion is linear in the output (CVE-2024-41946 shape)
+MICA-LINEAR-STRUCTURE	linear time	Long names, many siblings and deep nesting parse in linear time
+MICA-LINEAR-DTD	linear time	Content models, enumerations and declarations parse in linear time
+MICA-LINEAR-STREAMING	linear time	Streamed input moves each byte O(1) times
+MICA-LINEAR-INPUT	linear time	Buffer compaction in Core::ByteInput is linear
+MICA-LINEAR-POSITION	linear time	Line and column queries are amortized O(1)
+MICA-LINEAR-SEARCH	linear time	Substring search is linear (KMP)
+MICA-LINEAR-XPATH-DESCENDANT	linear time	Descendant chains never revisit subtrees
+MICA-LINEAR-XPATH-AXES	linear time	Axis steps from many contexts are linear
+MICA-LINEAR-XPATH-COMPARE	linear time	Node-set comparisons and string functions are linear
+MICA-LINEAR-CVE-2024-35176	REXML CVE	Many '<' in attribute values parse in linear time
+MICA-LINEAR-CVE-2024-39908	REXML CVE	Terminator lookalikes in comments, PIs and CDATA parse in linear time
+MICA-LINEAR-CVE-2024-41123	REXML CVE	Runs of ']', '>]' and white space parse in linear time
+MICA-LINEAR-CVE-2024-43398	REXML CVE	Deep elements with same-local-name attributes parse in linear time
+MICA-BUDGET-DEFAULT	work budget	Ordinary documents parse well inside the default budget
+MICA-BUDGET-ERROR	work budget	Budget overruns raise WorkBudgetExceededError with position, operations and allowance
+MICA-BUDGET-DEADLINE	work budget	A wall-clock deadline is enforced during scanning and at every stream refill
+MICA-BUDGET-RENEW	work budget	Long-lived streams renew the meter between messages
+MICA-BUDGET-XPATH	work budget	XPath evaluation runs under a budget and deadline positioned in the expression
+MICA-BUDGET-CORE	work budget	WorkBudget allowances saturate; WorkMeter verdicts
+MICA-HOSTILE-MATRIX	hostile bytes	Every hostile byte class in every context ends in acceptance or a Mica::Error, with exact positions
+MICA-HOSTILE-TRUNCATION	hostile bytes	Every proper prefix of a document is rejected identically from bytes and streams
+MICA-HOSTILE-FUZZ	hostile bytes	Seeded mutation fuzzing finds no crash, overrun or nondeterminism
+MICA-ENTITY-AMPLIFICATION	limits	Billion-laughs and quadratic-blowup inputs stop quickly
+MICA-LIMITS	limits	Depth, attribute, name, token, input and default-attribute limits
+MICA-NO-EXTERNAL	limits	External DTDs and entities are never read
+MICA-HASH-FLOODING	limits	Name hashing is seeded per table
+MICA-ERROR-POSITION	errors	Errors carry line, column (in characters) and byte offset
+MICA-STREAM-EQUIVALENCE	streaming	A String and a trickling IO produce the same events
+MICA-ROUND-TRIP	serialization	Parse, serialize and parse again gives the same tree
+MICA-CORE-UTF8	core	Strict UTF-8 decoding accepts exactly the canonical encodings
+MICA-CORE-ENCODING	core	Byte order marks, labels and transcoding without iconv
+MICA-CORE-BINARY-FORMAT	core	A binary format runs on Core::ByteInput with no core changes
+MICA-CORE-LIMITS	core	Core enforces token, input-size and work limits for any format
+MICA-TESTING-COMPLEXITY	testing	The complexity harness flags superlinear growth
+MICA-TESTING-FUZZ	testing	The fuzz harness is replayable and classifies crashes, overruns and nondeterminism
+MICA-TESTING-TRACEABILITY	testing	The traceability helper reports covered, uncovered and unknown ids

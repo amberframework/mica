@@ -28,6 +28,9 @@ module Mica::XML::XPath
       to_value(evaluate(expression, text_run_start(context), 1, 1))
     end
 
+    # Characters of the expression quoted in a budget error.
+    EXCERPT_CHARS = 120
+
     # Charges *count* operations and raises when the budget or the deadline
     # trips. The error's position is the expression being evaluated.
     @[AlwaysInline]
@@ -40,7 +43,8 @@ module Mica::XML::XPath
       return if verdict.within?
       column = @source.byte_index_to_char_index(@offset) || @source.size
       position = Core::Position.new(@offset.to_i64, 1, column + 1)
-      message = "#{@meter.describe(verdict)} in XPath #{@source.inspect}"
+      excerpt = @source.size > EXCERPT_CHARS ? "#{@source[0, EXCERPT_CHARS]}..." : @source
+      message = "#{@meter.describe(verdict)} in XPath #{excerpt.inspect}"
       if verdict.deadline_exceeded?
         raise DeadlineExceededError.new(message, position, @meter.elapsed)
       end

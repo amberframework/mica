@@ -33,7 +33,7 @@ end
 
 describe Mica::XML::XPath do
   describe "S3 responses with a prefix map" do
-    it "selects child and descendant paths" do
+    it_satisfies "XPATH10-2-location-paths", "selects child and descendant paths" do
       keys("/s3:ListBucketResult/s3:Contents/s3:Key").should eq(["a.txt", "b/c.txt", "d.txt"])
       keys("//s3:Key").should eq(["a.txt", "b/c.txt", "d.txt"])
       keys("//s3:Contents[s3:StorageClass='GLACIER']/s3:Key").should eq(["b/c.txt"])
@@ -56,7 +56,7 @@ describe Mica::XML::XPath do
       expect_raises(Mica::XML::XPathError, /Undefined namespace prefix/) { keys("//zz:Key") }
     end
 
-    it "evaluates numbers, strings and booleans" do
+    it_satisfies "XPATH10-3.4-booleans", "evaluates numbers, strings and booleans" do
       document = Mica::XML.parse(S3)
       document.xpath_float("count(//s3:Contents)", S3_NS).should eq(3.0)
       document.xpath_float("sum(//s3:Size)", S3_NS).should eq(47.0)
@@ -67,7 +67,7 @@ describe Mica::XML::XPath do
   end
 
   describe "location paths" do
-    it "supports abbreviations and axes" do
+    it_satisfies "XPATH10-2.2-axes", "supports abbreviations and axes" do
       values("/root/a/b").should eq(["one", "two", "three"])
       values("//a[@id='2']/*").should eq(["three", "c-text"])
       values("//b[1]").should eq(["one", "three"])
@@ -89,7 +89,7 @@ describe Mica::XML::XPath do
       values("//a/@*").should eq(["1", "x", "2", "3", "y"])
     end
 
-    it "uses proximity positions on reverse axes" do
+    it_satisfies "XPATH10-2.4-predicates", "uses proximity positions on reverse axes" do
       values("//c/preceding-sibling::*[1]").should eq(["three"])
       values("//b[.='two']/preceding::*[1]").should eq(["one"])
       values("//c/ancestor-or-self::*[2]/@id").should eq(["2"])
@@ -103,7 +103,7 @@ describe Mica::XML::XPath do
       Mica::XML.parse(DOC).xpath_nodes("/root/node()").size.should eq(11)
     end
 
-    it "unions in document order without duplicates" do
+    it_satisfies "XPATH10-3.3-node-sets", "unions in document order without duplicates" do
       values("//c | //b | //b[1]").should eq(["one", "two", "three", "c-text"])
     end
 
@@ -120,7 +120,7 @@ describe Mica::XML::XPath do
   end
 
   describe "functions" do
-    it "implements the core string functions" do
+    it_satisfies "XPATH10-4.2-string-functions", "implements the core string functions" do
       document = Mica::XML.parse(%(<r><s>  Hello   World  </s></r>))
       document.xpath_string("normalize-space(//s)").should eq("Hello World")
       document.xpath_string("substring('12345', 2, 3)").should eq("234")
@@ -137,7 +137,7 @@ describe Mica::XML::XPath do
       document.xpath_string("local-name(/r)").should eq("r")
     end
 
-    it "implements number functions and XPath number formatting" do
+    it_satisfies "XPATH10-4.4-number-functions", "implements number functions and XPath number formatting" do
       document = Mica::XML.parse("<r/>")
       document.xpath_float("floor(2.7)").should eq(2.0)
       document.xpath_float("ceiling(2.1)").should eq(3.0)
@@ -165,7 +165,7 @@ describe Mica::XML::XPath do
       document.xpath_bool("true() and not(false())").should be_true
     end
 
-    it "binds variables" do
+    it_satisfies "XPATH10-3.1-variables", "binds variables" do
       document = Mica::XML.parse(DOC)
       variables = {"wanted" => "2"} of String => Mica::XML::XPath::Value
       document.xpath_nodes("//a[@id = $wanted]", variables: variables).size.should eq(1)
@@ -191,7 +191,7 @@ describe Mica::XML::XPath do
       expect_raises(Mica::XML::XPathError) { Mica::XML.parse(DOC).xpath_nodes("count(//a)") }
     end
 
-    it "bounds expression nesting" do
+    it_satisfies "MICA-LIMITS", "bounds expression nesting" do
       expect_raises(Mica::XML::XPathError, /nested too deeply/) { Mica::XML.parse(DOC).xpath("(" * 500 + "1" + ")" * 500) }
     end
   end
