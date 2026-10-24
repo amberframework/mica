@@ -175,7 +175,7 @@ module Mica::XML::XPath
       end
       text = @source.byte_slice(start, @reader.pos - start)
       raise XPathError.new("Malformed number #{text.inspect}") if text.count('.') > 1
-      Token.new(TokenKind::Number, text, text.to_f64)
+      Token.new(TokenKind::Number, text, XPath.string_to_number(text))
     end
 
     private def lex_literal(quote : Char) : Token

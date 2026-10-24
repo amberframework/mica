@@ -13,6 +13,22 @@ def it_satisfies(requirement_id : String, description : String, file = __FILE__,
   it(description, file, line, end_line, tags: "requirement", &block)
 end
 
+# Complexity measurements from spec/xml/complexity_spec.cr. Set
+# MICA_COMPLEXITY_REPORT to a path to write them as TSV.
+COMPLEXITY_RESULTS = [] of Mica::Testing::Complexity::Result
+
+Spec.after_suite do
+  if path = ENV["MICA_COMPLEXITY_REPORT"]?
+    File.open(path, "w") do |file|
+      file << "pattern\tn\tops_n\tops_4n\tratio\tbound\n"
+      COMPLEXITY_RESULTS.each do |result|
+        file << result.name << '\t' << result.size << '\t' << result.small << '\t' << result.large << '\t'
+        file << result.ratio.round(3) << '\t' << result.bound << '\n'
+      end
+    end
+  end
+end
+
 # Records that the example being defined also covers *requirement_id*.
 def satisfies(requirement_id : String, file = __FILE__, line = __LINE__) : Nil
   REQUIREMENTS.record(requirement_id, "#{file.sub(Dir.current + "/", "")}:#{line}")

@@ -127,6 +127,22 @@ module Mica::XML
     # anything else is NaN.
     def self.string_to_number(text : String) : Float64
       bytes = text.to_slice
+      first, last = trim_xpath_space(bytes)
+      negative = first < last && bytes[first] == '-'.ord
+      digits_start = negative ? first + 1 : first
+      integer_end = skip_digits(bytes, digits_start, last)
+      index = integer_end
+      fraction_digits = 0
+      if index < last && bytes[index] == '.'.ord
+        fraction_end = skip_digits(bytes, index + 1, last)
+        fraction_digits = fraction_end - index - 1
+        index = fraction_end
+      end
+      return Float64::NAN if index != last || (integer_end == digits_start && fraction_digits == 0)
+      decimal_to_float(bytes[digits_start, index - digits_start], integer_end - digits_start, negative)
+    end
+
+    private def self.trim_xpath_space(bytes : Bytes) : {Int32, Int32}
       first = 0
       last = bytes.size
       while first < last && xpath_space?(bytes[first])
@@ -135,19 +151,51 @@ module Mica::XML
       while last > first && xpath_space?(bytes[last - 1])
         last -= 1
       end
-      index = first
-      index += 1 if index < last && bytes[index] == '-'.ord
-      integer_end = skip_digits(bytes, index, last)
-      integer_digits = integer_end - index
-      index = integer_end
-      fraction_digits = 0
-      if index < last && bytes[index] == '.'.ord
-        fraction_end = skip_digits(bytes, index + 1, last)
-        fraction_digits = fraction_end - index - 1
-        index = fraction_end
+      {first, last}
+    end
+
+    # Significant digits kept when converting a decimal string; enough for
+    # correct rounding of any binary64 value once a sticky digit is added.
+    MAX_SIGNIFICANT_DIGITS = 800
+
+    # Converts *number* (`Digits ('.' Digits?)?` or `'.' Digits`, already
+    # validated, *integer_digits* before the point) to a Float64 in time
+    # linear in its length. The digits are reduced to at most
+    # `MAX_SIGNIFICANT_DIGITS` plus one sticky digit and a decimal exponent,
+    # so `strtod` never sees an arbitrarily long mantissa, and values
+    # outside the binary64 range become infinity or zero instead of an error.
+    private def self.decimal_to_float(number : Bytes, integer_digits : Int32, negative : Bool) : Float64
+      digits, exponent = significant_digits(number, integer_digits)
+      zero = negative ? -0.0 : 0.0
+      return zero if digits.empty?
+      return (negative ? -Float64::INFINITY : Float64::INFINITY) if exponent > 310
+      return zero if exponent < -330
+      value = "0.#{digits}e#{exponent}".to_f64?(whitespace: false) || (exponent > 0 ? Float64::INFINITY : 0.0)
+      negative ? -value : value
+    end
+
+    # Returns the significant digits of *number* (leading zeros dropped,
+    # capped with a sticky digit) and the exponent *e* with
+    # value = 0.digits * 10^e.
+    private def self.significant_digits(number : Bytes, integer_digits : Int32) : {String, Int32}
+      exponent = integer_digits
+      kept = 0
+      sticky = false
+      digits = String.build(Math.min(number.size, MAX_SIGNIFICANT_DIGITS + 1)) do |io|
+        number.each do |byte|
+          next if byte == '.'.ord
+          if kept == 0 && byte == '0'.ord
+            exponent -= 1
+          elsif kept < MAX_SIGNIFICANT_DIGITS
+            io.write_byte(byte)
+            kept += 1
+          elsif byte != '0'.ord
+            sticky = true
+          end
+        end
+        io.write_byte('1'.ord.to_u8) if sticky
       end
-      return Float64::NAN if index != last || (integer_digits == 0 && fraction_digits == 0)
-      text.byte_slice(first, last - first).to_f64
+      {digits, exponent}
     end
 
     # :nodoc:

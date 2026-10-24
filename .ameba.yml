@@ -17,3 +17,8 @@ Metrics/CyclomaticComplexity:
     - src/mica/xml/reader/source.cr
     - src/mica/xml/xpath/evaluator.cr
     - src/mica/xml/xpath/lexer.cr
+
+# Scratch programs (git-ignored) are not part of the library.
+Excluded:
+  - tmp/**
+  - lib/**

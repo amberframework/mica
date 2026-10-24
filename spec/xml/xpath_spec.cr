@@ -153,6 +153,14 @@ describe Mica::XML::XPath do
       document.xpath_string("string(0.0000001)").should eq("0.0000001")
       document.xpath_float("number('  12  ')").should eq(12.0)
       document.xpath_float("number('1e3')").nan?.should be_true
+      document.xpath_float("number('#{"9" * 400}')").should eq(Float64::INFINITY)
+      document.xpath_float("number('-#{"9" * 400}')").should eq(-Float64::INFINITY)
+      document.xpath_float("number('0.#{"0" * 400}1')").should eq(0.0)
+      document.xpath_float("number('000123.4500')").should eq(123.45)
+      document.xpath_float("number('.5')").should eq(0.5)
+      document.xpath_float("number('-0.25')").should eq(-0.25)
+      document.xpath_float("number('0.1#{"0" * 900}1')").should eq(0.1)
+      document.xpath_bool("#{"1" * 1000} > 1").should be_true
       document.xpath_bool("boolean('')").should be_false
       document.xpath_bool("true() and not(false())").should be_true
     end
