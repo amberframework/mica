@@ -43,6 +43,9 @@ module Mica::Testing
     # Counts for a finished campaign. Lists hold replayable case ids
     # (`seed:iteration`) with a short reason.
     class Report
+      # See `max_operations_per_unit`.
+      RATIO_MIN_UNITS = 256
+
       getter cases = 0
       getter accepted = 0
       getter rejected = 0
@@ -51,6 +54,9 @@ module Mica::Testing
       getter list_of_budget_overruns = [] of String
       getter list_of_nondeterministic_cases = [] of String
       getter errors_by_class = Hash(String, Int32).new(0)
+      # The highest operations-per-unit ratio among cases of at least
+      # `RATIO_MIN_UNITS` units (smaller inputs are dominated by fixed
+      # per-parse costs, which the budget's base allowance covers).
       getter max_operations_per_unit = 0.0
 
       # :nodoc:
@@ -63,7 +69,7 @@ module Mica::Testing
         else
           @accepted += 1
         end
-        if trial.units > 0
+        if trial.units >= RATIO_MIN_UNITS
           ratio = trial.operations / trial.units
           @max_operations_per_unit = ratio if ratio > @max_operations_per_unit
         end
