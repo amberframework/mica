@@ -121,12 +121,17 @@ module Mica::XML
       true
     end
 
-    # Writes CDATA content, splitting each `]]>` across two sections.
+    # Writes CDATA content, splitting each `]]>` across two sections, and
+    # writing at least every `ESCAPE_CHUNK` bytes.
     def self.cdata(io : IO, bytes : Bytes) : Nil
       start = 0
       index = 0
       size = bytes.size
       while index + 2 < size
+        if index - start >= ESCAPE_CHUNK
+          io.write(bytes[start, index - start])
+          start = index
+        end
         if bytes[index] == ']'.ord && bytes[index + 1] == ']'.ord && bytes[index + 2] == '>'.ord
           io.write(bytes[start, index + 2 - start])
           io << "]]><![CDATA["

@@ -208,6 +208,9 @@ module Mica::XML::XPath
         advance
       end
       text = @source.byte_slice(start, @reader.pos - start)
+      # Copying, checking and converting the digits each pass over them:
+      # charged before they run.
+      charge_steps(4 * text.bytesize)
       raise XPathError.new("Malformed number #{XPath.quote(text)}") if text.count('.') > 1
       Token.new(TokenKind::Number, text, XPath.string_to_number(text))
     end

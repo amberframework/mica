@@ -35,3 +35,19 @@ describe "Codex review 20 findings" do
     plain.operations.should be >= 2 * text.bytesize
   end
 end
+
+# Regression specs for the twenty-first Codex code review of 2026-10-24.
+describe "Codex review 21 findings" do
+  it "1: writes CDATA in bounded chunks" do
+    io = WriteSizes.new
+    root_of(Mica::XML.parse("<r><![CDATA[#{"t" * 100_000}]]></r>")).to_xml(io, indent: 0)
+    io.sizes.max.should be <= 4096
+  end
+
+  it "2: charges converting a long number literal before it runs" do
+    digits = "1" * 100_000
+    meter = Mica::Core::WorkMeter.new(Mica::Core::WorkBudget.unlimited)
+    Mica::XML::XPath.compile(digits, meter)
+    meter.operations.should be >= 5 * digits.bytesize
+  end
+end
