@@ -154,13 +154,10 @@ module Mica::Core
       input_size_exceeded("Input exceeds the input size limit (#{max} bytes)", excess_index)
     end
 
-    # Raises the input size error. *excess_index* is the buffer index of the
-    # first byte past the limit; a format overrides this to position its
-    # error there (the default raises `input_limit_error` at the current
-    # position).
-    private def input_size_exceeded(message : String, excess_index : Int32) : NoReturn
-      input_limit_error(message)
-    end
+    # Raises the format's positioned input size error. *excess_index* is
+    # the buffer index of the first byte past the limit; the error points
+    # there.
+    private abstract def input_size_exceeded(message : String, excess_index : Int32) : NoReturn
 
     # Makes *count* bytes available from the current position. Returns
     # false when the source ends first.

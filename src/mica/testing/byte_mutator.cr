@@ -41,6 +41,9 @@ module Mica::Testing
     # The flattened list of hostile sequences.
     HOSTILE_SEQUENCES = HOSTILE.values.flatten
 
+    # Most mutations one case may receive.
+    MAX_MUTATIONS = 64
+
     # Returns the seed inputs.
     getter list_of_seeds : Array(Bytes)
 
@@ -49,6 +52,10 @@ module Mica::Testing
 
     def initialize(@list_of_seeds : Array(Bytes), @list_of_tokens : Array(Bytes) = [] of Bytes, @max_mutations : Int32 = 4)
       raise ArgumentError.new("ByteMutator needs at least one seed") if @list_of_seeds.empty?
+      # Each mutation copies the case once, so the count stays small.
+      unless 1 <= @max_mutations <= MAX_MUTATIONS
+        raise ArgumentError.new("max_mutations must be 1 to #{MAX_MUTATIONS}")
+      end
     end
 
     # Returns the bytes for case *iteration* under *seed*.

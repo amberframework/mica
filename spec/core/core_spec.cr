@@ -63,6 +63,10 @@ class ToyRecordReader
     raise Mica::LimitExceededError.new(message, here)
   end
 
+  private def input_size_exceeded(message : String, excess_index : Int32) : NoReturn
+    raise Mica::LimitExceededError.new(message, Mica::Core::Position.new(source_offset_at(@buffer, excess_index, @base_offset)))
+  end
+
   private def discarding_input(keep : Int32) : Nil
   end
 

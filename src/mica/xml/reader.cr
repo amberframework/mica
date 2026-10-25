@@ -624,10 +624,26 @@ module Mica::XML
     end
 
     # Points the error at the first byte past the limit: the position is
-    # advanced from the scanner's over the buffered bytes in between.
+    # advanced from the scanner's over the buffered bytes in between (that
+    # walk is charged first). A CR whose line end was still being completed
+    # when the refill came (its LF may be among the new bytes) is walked
+    # again from the CR, so CR LF counts as one line end.
     private def input_size_exceeded(message : String, excess_index : Int32) : NoReturn
       charge_scanned_before_error
-      raise LimitExceededError.new(message, position_after(error_position, @pos, excess_index))
+      charge(excess_index - @pos)
+      start = error_position
+      from = @pos
+      if pending_carriage_return?
+        start = Core::Position.new(start.byte_offset, start.line, start.column - 1)
+        from = @pos - 1
+      end
+      raise LimitExceededError.new(message, position_after(start, from, excess_index))
+    end
+
+    # True when the byte before the scanner is a CR in the document whose
+    # line break is not yet recorded.
+    private def pending_carriage_return? : Bool
+      @in_document_source && @pos > 0 && @buffer[@pos - 1] == 0x0D && @line_start != @base_offset + @pos
     end
 
     private def input_limit_error(message : String) : NoReturn
