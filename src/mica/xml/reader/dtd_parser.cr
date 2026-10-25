@@ -494,6 +494,8 @@ class Mica::XML::Reader
     skip_spaces
     expect_byte('>', "to close the notation declaration")
     name = @names[name_id]
+    # The lookup and the insertion each hash the name: charged first.
+    charge(2 * name.bytesize)
     @dtd.notations[name] = {public_id, system_id} unless @dtd.notations.has_key?(name)
   end
 

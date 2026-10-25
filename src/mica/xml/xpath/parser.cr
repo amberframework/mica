@@ -199,14 +199,14 @@ module Mica::XML::XPath
                      NumberExpr.new(token.number)
                    when .function_name?
                      advance
-                     parse_function_call(token.text)
+                     parse_function_call(token.text, token.offset)
                    else
                      fail("Unexpected #{XPath.quote(token.text)}")
                    end
       at(token.offset, expression)
     end
 
-    private def parse_function_call(name : String) : Expr
+    private def parse_function_call(name : String, offset : Int32) : Expr
       expect(TokenKind::LeftParen, "'('")
       arguments = [] of Expr
       unless current.kind.right_paren?
@@ -217,6 +217,8 @@ module Mica::XML::XPath
         end
       end
       expect(TokenKind::RightParen, "')'")
+      # The signature lookup hashes the name: charged first.
+      XPath.charge_compile(@meter, name.bytesize, @source, offset)
       Functions.check_signature(name, arguments.size, @source)
       FunctionCall.new(name, arguments)
     end
@@ -285,6 +287,8 @@ module Mica::XML::XPath
         if name == "namespace"
           fail("The namespace axis is not supported")
         end
+        # The axis lookup hashes the name: charged first.
+        XPath.charge_compile(@meter, name.bytesize, @source, offset)
         axis = AXES[name]? || fail("Unknown axis #{XPath.quote(name)}")
         expect(TokenKind::ColonColon, "'::'")
       end

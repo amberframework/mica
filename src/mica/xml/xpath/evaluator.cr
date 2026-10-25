@@ -180,6 +180,8 @@ module Mica::XML::XPath
       while index < steps.size
         step = steps[index]
         @offset = step.offset
+        # Each step costs at least one operation, also on an empty set.
+        charge(1)
         following = steps[index + 1]?
         if following && step.descendant_or_self_node? && following.axis.child? && following.position_free?
           # `//name[pred]` equals `descendant::name[pred]` when the
@@ -198,6 +200,7 @@ module Mica::XML::XPath
     private def evaluate_filter(filter : FilterExpr, node : Int32, position : Int32, size : Int32) : Result
       nodes = node_set(evaluate(filter.primary, node, position, size), "a predicate")
       filter.list_of_predicates.each do |predicate|
+        charge(1)
         nodes = apply_predicate(nodes, predicate)
       end
       nodes
@@ -213,6 +216,8 @@ module Mica::XML::XPath
     # contexts' axes (each node visited once); otherwise it runs per
     # context, as the predicates' positions depend on it.
     private def apply_step(contexts : Array(Int32), axis : Axis, test : NodeTest, predicates : Array(Expr), position_free : Bool) : Array(Int32)
+      # Every context is inspected at least once, whatever the axis yields.
+      charge(contexts.size)
       matcher = resolve(test)
       if position_free || contexts.size <= 1
         result = [] of Int32
@@ -240,6 +245,8 @@ module Mica::XML::XPath
     # proximity position.
     private def apply_predicate(nodes : Array(Int32), predicate : Expr) : Array(Int32)
       size = nodes.size
+      # One evaluation per node, also when the predicate is constant.
+      charge(size + 1)
       selected = [] of Int32
       nodes.each_with_index do |node, offset|
         value = evaluate(predicate, node, offset + 1, size)
@@ -930,7 +937,8 @@ module Mica::XML::XPath
         text.size.to_f64
       when "normalize-space"
         text = arguments.empty? ? string_value(node) : string_argument(arguments, 0, node, position, size)
-        charge(text.bytesize)
+        # One pass to scan and one to copy the output, which is never longer.
+        charge(2 * text.bytesize)
         XPath.normalize_space(text)
       when "translate"
         translate(arguments, node, position, size)
@@ -993,7 +1001,8 @@ module Mica::XML::XPath
 
     private def substring(arguments : Array(Expr), node : Int32, position : Int32, size : Int32) : String
       text = string_argument(arguments, 0, node, position, size)
-      charge(text.bytesize)
+      # One pass to scan and one to copy the output, which is never longer.
+      charge(2 * text.bytesize)
       start = XPath.round(to_number(evaluate(arguments[1], node, position, size)))
       finish = if arguments.size > 2
                  start + XPath.round(to_number(evaluate(arguments[2], node, position, size)))
@@ -1013,7 +1022,9 @@ module Mica::XML::XPath
       text = string_argument(arguments, 0, node, position, size)
       from = string_argument(arguments, 1, node, position, size)
       replacement = string_argument(arguments, 2, node, position, size)
-      charge(text.bytesize + from.bytesize + replacement.bytesize)
+      # The output can be up to four bytes per input byte when a one-byte
+      # character maps to a four-byte replacement.
+      charge(5 * text.bytesize + from.bytesize + replacement.bytesize)
       to = replacement.chars
       mapping = {} of Char => Char?
       from.each_char_with_index do |char, index|

@@ -13,9 +13,18 @@ describe "Codex review 27 findings" do
     uri = "urn:#{"u" * 1_000_000}"
     attributes = (1..2_000).to_h { |number| {"p:a#{number}", "1"} }
     attributes["xmlns:p"] = uri
-    started = Time.instant
-    Mica::XML.build { |xml| xml.element("r", attributes) { } }
-    (Time.instant - started).should be < 2.seconds
+    uri_ids = 0
+    prefix_ids = 0
+    Mica::XML.build do |xml|
+      xml.element("r", attributes) do
+        # The URI is interned once for its binding; each attribute looks up
+        # its prefix's small id instead of hashing the URI again.
+        uri_ids = xml.@uri_ids.size
+        prefix_ids = xml.@uri_ids_by_prefix["p"].size
+      end
+    end
+    uri_ids.should eq(1)
+    prefix_ids.should eq(1)
     expect_raises(Mica::XML::BuilderError, /duplicates/) do
       Mica::XML.build { |xml| xml.element("r", {"xmlns:p" => "urn:x", "xmlns:q" => "urn:x", "p:a" => "1", "q:a" => "2"}) { } }
     end

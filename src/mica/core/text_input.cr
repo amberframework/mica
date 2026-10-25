@@ -47,9 +47,12 @@ module Mica::Core
     # declaration names an encoding that is not UTF-8. Everything before the
     # current position must have been ASCII.
     private def switch_to_transcoder(encoding : Encoding) : Nil
+      io = @io
+      # Folding the bytes before the switch passes over them. A stream
+      # prepays its discards as it reads; in-memory input is charged here.
+      moving_input(@pos) unless io
       discarding_input(@pos)
       rest = @buffer[@pos, @limit - @pos]
-      io = @io
       source = io || IO::Memory.new(rest, writable: false)
       # Carrying the buffered bytes copies them here and in the transcoder:
       # charged first.

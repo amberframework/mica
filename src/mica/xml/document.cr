@@ -289,7 +289,7 @@ module Mica::XML
       # add_event does for the rest.
       reader.charge(1 + attribute_bytes(reader))
       element = add_element(reader, 0)
-      @expansion = Expansion.new(element, reader.event_binding_mark, last_attribute(element)) if @namespace_aware
+      @expansion = Expansion.new(element, reader.event_binding_mark, last_attribute(reader, element)) if @namespace_aware
       declare_inherited_namespaces(reader)
       unless reader.empty_element?
         parent = element
@@ -320,7 +320,9 @@ module Mica::XML
 
     @expansion : Expansion? = nil
 
-    private def last_attribute(element : Int32) : Int32
+    private def last_attribute(reader : Reader, element : Int32) : Int32
+      # One step per copied attribute: charged first.
+      reader.charge(reader.event_attributes.size)
       last = -1
       current = data(element).first_attribute
       while current >= 0
@@ -337,6 +339,8 @@ module Mica::XML
     # name, charged with the tag, and each declaration is charged.
     private def declare_inherited_namespaces(reader : Reader) : Nil
       expansion = @expansion || return
+      # The walk below visits every attribute: charged first.
+      reader.charge(reader.event_attributes.size)
       declare_inherited(reader, expansion, reader.event_name_id, reader.event_namespace_uri_id)
       reader.event_attributes.each do |slot|
         uri_id = slot.namespace_uri_id
@@ -423,6 +427,8 @@ module Mica::XML
     # Returns the work of copying the current start tag's attributes: one
     # record and the value bytes for each.
     private def attribute_bytes(reader : Reader) : Int64
+      # The tally itself passes over every attribute: charged first.
+      reader.charge(reader.event_attributes.size)
       total = 0_i64
       reader.event_attributes.each do |slot|
         total += 1 + slot.value_size

@@ -91,6 +91,8 @@ class Mica::XML::Reader
 
   # Returns the bytes of the current tag's attribute names, one step each.
   private def attribute_name_bytes : Int64
+    # The tally itself passes over every attribute: charged first.
+    charge(@attrs.size)
     total = @attrs.size.to_i64
     @attrs.each { |slot| total += @names[slot.name_id].bytesize }
     total
@@ -108,6 +110,9 @@ class Mica::XML::Reader
   # Pushes a binding and links it to the previous binding of the same
   # prefix, so lookup and pop are O(1).
   private def push_binding(prefix_id : Int32, uri_id : Int32) : Nil
+    # The table grows to every name id interned so far: charged first.
+    growth = prefix_id + 1 - @innermost_binding.size
+    charge(growth) if growth > 0
     while @innermost_binding.size <= prefix_id
       @innermost_binding << -1
     end
