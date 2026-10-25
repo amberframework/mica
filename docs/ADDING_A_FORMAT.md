@@ -128,9 +128,9 @@ Every operation runs under a `WorkMeter`:
    charged at the token's checkpoint, so a budget trip overshoots by at
    most the names of one narrow tag (17 names of up to `max_name_bytes`:
    the element and 16 attributes) or one 64 KiB chunk. Three more bounded
-   steps are charged right after they run rather than before: comparing
-   same-hash candidates in a name-table lookup (at most `MAX_RUN` + 1 of
-   them, and only on a full 32-bit hash match under a per-table random
+   steps are charged right after they run rather than before: the probes
+   of a name-table lookup (at most `MAX_RUN` + 1 slots, each with a byte
+   comparison only on a full 32-bit hash match under a per-table random
    seed), the geometric growth of a string builder, array or hash (its
    copies and rehashes total a constant multiple of the entries added,
    which are charged), and escaping at most 4 KiB before a metered write.

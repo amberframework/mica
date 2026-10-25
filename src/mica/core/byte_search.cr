@@ -16,9 +16,9 @@ module Mica::Core
 
     # Returns the byte offset of the first occurrence of *needle* in
     # *haystack*, or nil. The block is called with the number of
-    # comparisons made, at least every `STEP_CHUNK` comparisons (while
-    # building the failure table and while scanning), so a work meter can
-    # stop a long search partway.
+    # comparisons about to be made, in blocks of at most `STEP_CHUNK`
+    # (while building the failure table and while scanning), before they
+    # run, so a work meter can stop a long search before its work.
     #
     # ```
     # Mica::Core::ByteSearch.index("aaab".to_slice, "ab".to_slice) # => 2
@@ -28,29 +28,35 @@ module Mica::Core
       return if needle.size > haystack.size
       failure = failure_table(needle) { |steps| yield steps }
       matched = 0
-      steps = 0
+      # Comparisons are reported in blocks before they run: *prepaid* is
+      # what the last report still covers, *bound* what the scan can still
+      # need (at most 2 * haystack.size comparisons).
+      prepaid = 0
+      bound = 2_i64 * haystack.size
       haystack.each_with_index do |byte, offset|
         while matched > 0 && needle[matched] != byte
-          matched = failure[matched - 1]
-          steps += 1
-          if steps >= STEP_CHUNK
-            yield steps
-            steps = 0
+          if prepaid == 0
+            prepaid, bound = prepay(bound) { |steps| yield steps }
           end
+          prepaid -= 1
+          matched = failure[matched - 1]
         end
-        steps += 1
-        if steps >= STEP_CHUNK
-          yield steps
-          steps = 0
+        if prepaid == 0
+          prepaid, bound = prepay(bound) { |steps| yield steps }
         end
+        prepaid -= 1
         matched += 1 if needle[matched] == byte
-        if matched == needle.size
-          yield steps
-          return offset + 1 - needle.size
-        end
+        return offset + 1 - needle.size if matched == needle.size
       end
-      yield steps
       nil
+    end
+
+    # Reports the next block of at most `STEP_CHUNK` steps (at least one)
+    # out of *bound*, before they run. Returns the block and what remains.
+    private def self.prepay(bound : Int64, & : Int32 ->) : {Int32, Int64}
+      chunk = Math.max(Math.min(bound, STEP_CHUNK.to_i64), 1_i64).to_i32
+      yield chunk
+      {chunk, Math.max(bound - chunk, 0_i64)}
     end
 
     # :ditto:
@@ -74,13 +80,13 @@ module Mica::Core
       table = Array(Int32).new(needle.size, 0)
       length = 0
       index = 1
-      steps = 0
+      prepaid = 0
+      bound = 2_i64 * needle.size
       while index < needle.size
-        steps += 1
-        if steps >= STEP_CHUNK
-          yield steps
-          steps = 0
+        if prepaid == 0
+          prepaid, bound = prepay(bound) { |steps| yield steps }
         end
+        prepaid -= 1
         if needle[index] == needle[length]
           length += 1
           table[index] = length
@@ -92,7 +98,6 @@ module Mica::Core
           index += 1
         end
       end
-      yield steps
       table
     end
   end

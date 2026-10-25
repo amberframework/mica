@@ -75,3 +75,22 @@ describe "Codex review 37 findings" do
     Mica::XML.build(&.dtd("r", nil, nil, subset)).should contain(subset)
   end
 end
+
+# Regression spec for the thirty-ninth Codex code review of 2026-10-24.
+describe "Codex review 39 findings" do
+  it "1: reports KMP comparisons in blocks before they run, within the stated bound" do
+    haystack = ("a" * 100_000).to_slice
+    needle = ("a" * 5_000 + "b").to_slice
+    reports = [] of Int32
+    Mica::Core::ByteSearch.index(haystack, needle) { |count| reports << count }.should be_nil
+    reports.max.should be <= Mica::Core::ByteSearch::STEP_CHUNK
+    reports.sum.should be <= 2 * haystack.size + 3 * needle.size
+    # A meter that stops at its first report stops the scan before it runs.
+    expect_raises(Mica::WorkBudgetExceededError) do
+      meter = Mica::Core::WorkMeter.new(Mica::Core::WorkBudget.new(operations_per_unit: 0, base_operations: 0))
+      Mica::Core::ByteSearch.index(haystack, needle) do |count|
+        meter.enforce { Mica::Core::Position.new(0_i64) } if meter.charge(count)
+      end
+    end
+  end
+end
