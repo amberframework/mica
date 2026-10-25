@@ -98,7 +98,7 @@ class Mica::XML::Reader
       scan_checkpoint if scanned % SCAN_CHUNK == 0
     end
     # The copy and the validation pass after it are charged first.
-    charge(2 * (@pos - @mark - start))
+    charge(2_i64 * (@pos - @mark - start))
     value = String.new(@buffer[@mark + start, @pos - @mark - start])
     @pos += 1
     value
@@ -108,7 +108,7 @@ class Mica::XML::Reader
   # decoding when the document is ISO-8859-1 (XML 1.0 section 4.3.3).
   private def apply_declared_encoding(declared : String) : Nil
     # Matching the label and the byte-order check each pass over it.
-    charge(2 * declared.bytesize)
+    charge(2_i64 * declared.bytesize)
     encoding = Core::Encoding.from_label(declared)
     signature = @signature
     case encoding

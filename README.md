@@ -116,6 +116,9 @@ Every parse is secure by default:
   The specs prove it with operation counts at n and 4n for every pattern
   that is superlinear in other parsers, including the REXML 2024 CVE
   inputs (CVE-2024-35176, -39908, -41123, -41946, -43398 and -49761).
+  Mica's name table caps its hash probes outright; other hash-table steps
+  count as one operation in expectation, because Crystal keys its hashing
+  with a secure random seed chosen once per process.
 - Scanners and node storage read memory only through bounds-checked
   slices.
 
@@ -129,7 +132,9 @@ advance through the input) against a `Mica::Core::WorkBudget`:
 
 The units are the input bytes for a parse, and the document's nodes plus
 the expression's bytes for XPath. A timeout adds a wall-clock deadline,
-checked at least every 65,536 operations and at every read from a stream.
+checked at least every 65,536 operations, at every read from a stream, and
+when each XPath compilation, evaluation and edit starts (and, for compilation
+and evaluation, before it returns).
 
 | Operation | Default budget | Default deadline | Measured cost of valid input |
 |---|---|---|---|

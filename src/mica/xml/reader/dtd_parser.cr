@@ -295,7 +295,9 @@ class Mica::XML::Reader
 
   private def record_attribute_declaration(element_id : Int32, decl : DTD::AttributeDecl) : Nil
     return unless processing_declarations?
-    charge(1)
+    # The duplicate check, the insertion, the element set and the default
+    # list each take one hash operation.
+    charge(4)
     @dtd.add_attribute_declaration(element_id, decl)
   end
 
@@ -375,7 +377,7 @@ class Mica::XML::Reader
   # Collapses runs of spaces to one and trims both ends.
   private def collapse_spaces(raw : Bytes) : Bytes
     # One pass to scan the value and one to write its collapsed copy.
-    charge(2 * raw.size)
+    charge(2_i64 * raw.size)
     io = IO::Memory.new(raw.size)
     pending_space = false
     raw.each do |byte|
@@ -498,7 +500,7 @@ class Mica::XML::Reader
     expect_byte('>', "to close the notation declaration")
     name = @names[name_id]
     # The lookup and the insertion each hash the name: charged first.
-    charge(2 * name.bytesize)
+    charge(2_i64 * name.bytesize)
     @dtd.notations[name] = {public_id, system_id} unless @dtd.notations.has_key?(name)
   end
 

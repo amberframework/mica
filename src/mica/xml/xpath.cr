@@ -40,7 +40,12 @@ module Mica::XML
     class Expression
       getter source : String
 
+      # Wraps a syntax tree built by `XPath.compile`. A tree deeper than
+      # the compiler allows is rejected here as well.
       def initialize(@source : String, @root : Expr)
+        if @root.depth > Parser::MAX_DEPTH
+          raise XPathError.new("Expression nested too deeply (tree height #{@root.depth})")
+        end
       end
 
       # Evaluates the expression with *node* as the context node.

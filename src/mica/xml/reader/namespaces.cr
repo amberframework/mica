@@ -14,7 +14,7 @@ class Mica::XML::Reader
   private def process_namespaces(element_id : Int32) : Int32
     binding_mark = @binding_prefixes.size
     count = @attrs.size
-    charge(3 * (attribute_name_bytes + @names[element_id].bytesize)) if count > LINEAR_ATTRIBUTE_SCAN
+    charge(3_i64 * (attribute_name_bytes + @names[element_id].bytesize)) if count > LINEAR_ATTRIBUTE_SCAN
     charge_in_token(count)
     index = 0
     while index < count
@@ -103,7 +103,7 @@ class Mica::XML::Reader
   # the same work is charged again later, an overcharge kept for order).
   private def intern_namespace_uri(slot : AttributeSlot) : Int32
     value = attribute_value_bytes(slot)
-    charge(2 * value.size)
+    charge(2_i64 * value.size)
     @names.intern(value)
   end
 

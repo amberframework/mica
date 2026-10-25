@@ -50,13 +50,13 @@ module Mica::Core
       io = @io
       # Folding the bytes before the switch passes over them. A stream
       # prepays its discards as it reads; in-memory input is charged here.
-      moving_input(@pos) unless io
+      moving_input(@pos.to_i64) unless io
       discarding_input(@pos)
       rest = @buffer[@pos, @limit - @pos]
       source = io || IO::Memory.new(rest, writable: false)
       # Carrying the buffered bytes copies them here and in the transcoder:
       # charged first.
-      moving_input(2 * rest.size) if io
+      moving_input(2_i64 * rest.size) if io
       carried = io ? rest.dup : Bytes.empty
       @input_bytes -= rest.size
       @base_offset += @pos

@@ -164,7 +164,7 @@ module Mica::XML
       meter.add_units(bytes + 1)
       # Validating, hashing and comparing the input (names are checked as
       # Names, then as QNames, split and interned): charged first.
-      charge_edit(4 * bytes + 1)
+      charge_edit(4_i64 * bytes + 1)
       # The budget and the deadline are checked before anything changes,
       # also for an edit too small to reach a clock checkpoint. A finished
       # edit is never reported as failed (see `settle_name_work`).
@@ -362,7 +362,7 @@ module Mica::XML
       uri = @names[uri_id].to_slice
       # Building, hashing and comparing the declaration's name, and storing
       # the URI: charged first (the table's count is settled at the end).
-      reader.charge(2 + uri.size + 3 * (@names[prefix_id].bytesize + 6))
+      reader.charge(2_i64 + uri.size + 3 * (@names[prefix_id].bytesize + 6))
       declaration_id = prefix_id == NameTable::EMPTY_ID ? @xmlns_id : @names.intern("xmlns:#{@names[prefix_id]}")
       expansion.tail = add_attribute_node(Node::Type::NAMESPACE_DECL, expansion.root, declaration_id, @xmlns_namespace_id, uri, expansion.tail)
       mark_order_dirty
@@ -821,8 +821,12 @@ module Mica::XML
     # computed without changing anything (the steps `insert_in_order`
     # takes).
     private def index_work(index : AttributeIndex, attribute : Int32, name_id : Int32, kind : Node::Type, position : Int32) : Int64
-      work = 1_i64
+      # One record, the by-name and by-prefix or by-expanded-name maps and
+      # the candidate list lookup.
+      work = 3_i64
       return work if kind.namespace_decl?
+      # The candidate lookup below is charged before it runs.
+      charge_edit(1)
       candidates = index.by_local_name[split_local_id(name_id)]? || return work
       list = candidates.list
       head = candidates.head
@@ -869,6 +873,8 @@ module Mica::XML
     end
 
     private def unindex_attribute(index : AttributeIndex, attribute : Int32) : Nil
+      # Up to three map lookups and deletions.
+      charge_edit(3)
       record = data(attribute)
       index.by_name.delete(record.name_id) if index.by_name[record.name_id]? == attribute
       key = {record.namespace_uri_id, split_local_id(record.name_id)}
@@ -888,7 +894,8 @@ module Mica::XML
       index = attribute_index(element)
       # Every charge comes before the tree changes, so a budget trip leaves
       # the tree and its index unchanged.
-      charge_edit(index_work(index, -1, name_id, kind, index.next_order))
+      # The index work and the prefix-use count update.
+      charge_edit(index_work(index, -1, name_id, kind, index.next_order) + 1)
       attribute = add_attribute_node(kind, element, name_id, namespace_uri_id, value.to_slice, index.tail)
       index.order[attribute] = index.next_order
       index.next_order += 1
@@ -908,6 +915,8 @@ module Mica::XML
       # Every charge comes before the tree changes, so a budget trip leaves
       # the tree and its index unchanged.
       charge_edit(index_work(attribute_index, index, name_id, record.kind, attribute_index.order[index])) if attribute_index
+      # The two prefix-use count updates.
+      charge_edit(2)
       unindex_attribute(attribute_index, index) if attribute_index
       count_name_use(record.name_id, -1) if named
       write_rename(index, name_id, namespace_uri_id)
@@ -957,6 +966,7 @@ module Mica::XML
       counts
     end
 
+    # Its one map update is charged by the caller before the tree changes.
     private def count_name_use(name_id : Int32, delta : Int32) : Nil
       counts = @prefix_use_counts || return
       prefix_id = @names.prefix_id(name_id)
@@ -980,7 +990,7 @@ module Mica::XML
           if declaration = attribute_index(current).by_declared_prefix[prefix_id]?
             uri = value_bytes(declaration)
             # Interning hashes and compares the URI: both passes first.
-            charge_edit(2 * uri.size)
+            charge_edit(2_i64 * uri.size)
             # An XML 1.1 `xmlns:p=""` undeclares p.
             return -1 if uri.empty? && prefix_id != NameTable::EMPTY_ID
             return @names.intern(uri)

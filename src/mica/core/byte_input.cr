@@ -51,7 +51,7 @@ module Mica::Core
 
     # Called with the bytes compaction or growth is about to copy, before
     # copying, so the format can charge (and stop) the move.
-    private abstract def moving_input(count : Int32) : Nil
+    private abstract def moving_input(count : Int64) : Nil
 
     # Called before the bytes `@buffer[0, keep]` are discarded.
     private abstract def discarding_input(keep : Int32) : Nil
@@ -100,7 +100,7 @@ module Mica::Core
       if keep > 0
         discarding_input(keep)
         count = @limit - keep
-        moving_input(count)
+        moving_input(count.to_i64)
         @input_bytes_moved += count
         # Overlapping ranges inside one buffer: move (memmove) through
         # bounds-checked subslices.
@@ -117,7 +117,7 @@ module Mica::Core
           input_limit_error("Token exceeds the token size limit (#{input_token_limit} bytes)")
         end
         # Double, but never past the token limit plus its slack.
-        moving_input(@limit)
+        moving_input(@limit.to_i64)
         grown = Bytes.new(Math.min(@buffer.size.to_i64 * 2, capacity).to_i32)
         grown.copy_from(@buffer[0, @limit])
         @input_bytes_moved += @limit

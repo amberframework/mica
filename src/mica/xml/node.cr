@@ -666,7 +666,7 @@ module Mica::XML
       inherited = @document.resolve_prefix(@document.data(owner.index).parent, prefix_id)
       uri = @document.value_bytes(@index)
       # Interning hashes and compares the URI: both passes first.
-      @document.charge_edit(2 * uri.size)
+      @document.charge_edit(2_i64 * uri.size)
       return if inherited == names.intern(uri)
       if owner.declaration_in_use?(prefix_id)
         raise Error.new("Removing #{Core.quote(names[@document.data(@index).name_id])} would unbind names in its scope")

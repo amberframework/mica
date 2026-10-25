@@ -132,12 +132,14 @@ Every operation runs under a `WorkMeter`:
    same-hash candidates in a name-table lookup (at most `MAX_RUN` + 1 of
    them, and only on a full 32-bit hash match under a per-table random
    seed), the geometric growth of a string builder, array or hash (its
-   copies and rehashes total less than the entries added, which are
-   charged), and escaping at most 4 KiB before a metered write. A lookup
-   or insert in a Crystal `Hash` or `Set` counts as one operation:
-   `Crystal::Hasher` seeds string and integer hashing from a secure random
-   source once per process, Mica never exposes a hash value, so probe
-   runs stay short in expectation, as for the name table. Formatting an
+   copies and rehashes total a constant multiple of the entries added,
+   which are charged), and escaping at most 4 KiB before a metered write.
+   A lookup or insert in a Crystal `Hash` or `Set` counts as one
+   operation. This bound holds in expectation, not in the worst case:
+   `Crystal::Hasher` seeds string and integer hashing from a secure
+   random source once per process and Mica never exposes a hash value,
+   so input cannot be built to collide without the seed, but Crystal's
+   `Hash` does not cap its probe runs the way the name table does. Formatting an
    error message reads at most a fixed window of input (an excerpt of 120
    characters, at most 480 bytes) and is not charged. Work that follows a completed operation
    (settling an edit's name-table work) is recorded without raising; the

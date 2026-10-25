@@ -640,7 +640,7 @@ module Mica::XML
     # again from the CR, so CR LF counts as one line end.
     # Compaction and growth copy each byte a bounded number of times; the
     # copy is charged before it happens.
-    private def moving_input(count : Int32) : Nil
+    private def moving_input(count : Int64) : Nil
       charge(count)
     end
 

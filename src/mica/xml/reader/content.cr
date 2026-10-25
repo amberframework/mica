@@ -121,9 +121,8 @@ class Mica::XML::Reader
   # *name_id*.
   @[AlwaysInline]
   private def end_tag_matches?(name_id : Int32, offset : Int32, size : Int32) : Bool
-    # The comparison passes over the name once more (a name, so it joins
-    # the token's pending work).
-    charge_in_token(size)
+    # The comparison passes over the name once more: charged first.
+    charge(size)
     expected = @names[name_id].to_slice
     expected.size == size && Core::ByteScan.matches?(@buffer, offset, expected)
   end
@@ -387,7 +386,7 @@ class Mica::XML::Reader
     slot = @attrs[index]
     value = attribute_value_bytes(slot)
     # One pass to scan the value and one to write its collapsed copy.
-    charge(2 * value.size)
+    charge(2_i64 * value.size)
     start = @scratch_size
     pending_space = false
     value.each do |byte|
@@ -613,8 +612,9 @@ class Mica::XML::Reader
     if target.bytesize == 3 && target.compare("xml", case_insensitive: true) == 0
       syntax_error("The processing instruction target '#{Core.excerpt(target)}' is reserved")
     end
-    # The reserved-name and colon checks pass over the target again.
-    charge_in_token(target.bytesize)
+    # The reserved-name and colon checks pass over the target again:
+    # charged first.
+    charge(target.bytesize)
     if @options.namespace_aware? && target.includes?(':')
       syntax_error("Processing instruction target '#{Core.excerpt(target)}' must not contain a colon")
     end

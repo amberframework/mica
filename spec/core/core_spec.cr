@@ -70,7 +70,7 @@ class ToyRecordReader
   private def discarding_input(keep : Int32) : Nil
   end
 
-  private def moving_input(count : Int32) : Nil
+  private def moving_input(count : Int64) : Nil
     @meter.enforce { here } if @meter.charge(count)
   end
 

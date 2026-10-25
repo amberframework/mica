@@ -279,7 +279,7 @@ module Mica::XML::XPath
         return nodes if strictly_increasing?(nodes)
       end
       # Comparison sort: n log2 n comparisons.
-      charge(nodes.size * (64 - nodes.size.leading_zeros_count))
+      charge(nodes.size.to_i64 * (64 - nodes.size.leading_zeros_count))
       if @document.index_order?
         nodes.sort!
       else
@@ -735,7 +735,7 @@ module Mica::XML::XPath
     # Charges hashing *value* and comparing it with an equal entry (a set
     # insertion or lookup does both), and returns it.
     private def hashed(value : String) : String
-      charge(2 * value.bytesize)
+      charge(2_i64 * value.bytesize)
       value
     end
 
@@ -748,7 +748,7 @@ module Mica::XML::XPath
       nodes.each do |node|
         value = string_value(node)
         # Converting passes over the value a bounded number of times.
-        charge(2 * value.bytesize)
+        charge(2_i64 * value.bytesize)
         number = XPath.string_to_number(value)
         next if number.nan?
         low = number if low.nan? || number < low
@@ -762,7 +762,7 @@ module Mica::XML::XPath
       value = string_value(node)
       return value unless other.is_a?(Float64)
       # Converting passes over the value a bounded number of times.
-      charge(2 * value.bytesize)
+      charge(2_i64 * value.bytesize)
       XPath.string_to_number(value)
     end
 
@@ -881,11 +881,11 @@ module Mica::XML::XPath
       when String
         # Conversion passes over the digits twice (skip, then significant
         # digits): both charged first.
-        charge(2 * result.bytesize)
+        charge(2_i64 * result.bytesize)
         XPath.string_to_number(result)
       else
         text = to_string(result)
-        charge(2 * text.bytesize)
+        charge(2_i64 * text.bytesize)
         XPath.string_to_number(text)
       end
     end
@@ -959,7 +959,7 @@ module Mica::XML::XPath
       when "normalize-space"
         text = arguments.empty? ? string_value(node) : string_argument(arguments, 0, node, position, size)
         # One pass to scan and one to copy the output, which is never longer.
-        charge(2 * text.bytesize)
+        charge(2_i64 * text.bytesize)
         XPath.normalize_space(text)
       when "translate"
         translate(arguments, node, position, size)
@@ -982,7 +982,7 @@ module Mica::XML::XPath
       when "round"
         XPath.round(to_number(evaluate(arguments[0], node, position, size)))
       else
-        raise XPathError.new("Unknown XPath function #{call.name}()")
+        raise XPathError.new("Unknown XPath function #{XPath.quote(call.name)}")
       end
     end
 
@@ -1023,7 +1023,7 @@ module Mica::XML::XPath
     private def substring(arguments : Array(Expr), node : Int32, position : Int32, size : Int32) : String
       text = string_argument(arguments, 0, node, position, size)
       # One pass to scan and one to copy the output, which is never longer.
-      charge(2 * text.bytesize)
+      charge(2_i64 * text.bytesize)
       start = XPath.round(to_number(evaluate(arguments[1], node, position, size)))
       finish = if arguments.size > 2
                  start + XPath.round(to_number(evaluate(arguments[2], node, position, size)))
@@ -1044,8 +1044,10 @@ module Mica::XML::XPath
       from = string_argument(arguments, 1, node, position, size)
       replacement = string_argument(arguments, 2, node, position, size)
       # The output can be up to four bytes per input byte when a one-byte
-      # character maps to a four-byte replacement.
-      charge(5 * text.bytesize + from.bytesize + replacement.bytesize)
+      # character maps to a four-byte replacement; each text character
+      # also takes two map operations, and each `from` character a lookup
+      # and an insertion.
+      charge(7_i64 * text.bytesize + 3_i64 * from.bytesize + replacement.bytesize)
       to = replacement.chars
       mapping = {} of Char => Char?
       from.each_char_with_index do |char, index|
