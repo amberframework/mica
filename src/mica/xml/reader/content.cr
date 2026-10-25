@@ -184,13 +184,14 @@ class Mica::XML::Reader
     @node_type = Type::ELEMENT
     @name_id = name_id
     @event_depth = @open_elements.size
+    # An empty element counts toward the depth as well.
+    if @open_elements.size >= @options.max_element_depth
+      limit_error("Elements nested deeper than max_element_depth (#{@options.max_element_depth})")
+    end
     if @empty_element
       @pending_binding_mark = binding_mark
       @phase = Phase::Epilog if @open_elements.empty?
     else
-      if @open_elements.size >= @options.max_element_depth
-        limit_error("Elements nested deeper than max_element_depth (#{@options.max_element_depth})")
-      end
       @open_elements << OpenElement.new(name_id, @namespace_uri_id, binding_mark, @frames.size)
     end
   end

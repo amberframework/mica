@@ -644,8 +644,11 @@ module Mica::XML
     # :nodoc:
     #
     # Detaches node *index* from its parent (or element, for attributes).
-    def unlink(index : Int32) : Nil
-      charge_edit(1)
+    #
+    # With *prepaid*, the caller charged the unlink already (a child is
+    # never an attribute, so no index work follows).
+    def unlink(index : Int32, prepaid : Bool = false) : Nil
+      charge_edit(1) unless prepaid
       record = data(index)
       parent = record.parent
       return if parent < 0
@@ -682,10 +685,17 @@ module Mica::XML
     # Replaces the children of *index* with one text node holding *text*.
     def replace_children_with_text(index : Int32, text : String) : Nil
       charge_edit(1 + text.bytesize)
+      # Every child's removal is charged before the first one, so a budget
+      # trip leaves the children in place: a step and an unlink each.
+      child = data(index).first_child
+      while child >= 0
+        charge_edit(2)
+        child = data(child).next_sibling
+      end
       child = data(index).first_child
       while child >= 0
         following = data(child).next_sibling
-        unlink(child)
+        unlink(child, prepaid: true)
         child = following
       end
       append_new(Node::Type::TEXT_NODE, index, 0, 0, text.to_slice) unless text.empty?
@@ -993,9 +1003,9 @@ module Mica::XML
       return @xml_namespace_id if prefix_id == @xml_prefix_id
       current = index
       while current >= 0
-        # The step and the declaration-map lookup (attribute_index charges
-        # its own lookup).
-        charge_edit(2)
+        # The step, the index lookup and the declaration-map lookup
+        # (building a new index charges its own work).
+        charge_edit(3)
         if kind(current).element_node?
           if declaration = attribute_index(current).by_declared_prefix[prefix_id]?
             uri = value_bytes(declaration)

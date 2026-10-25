@@ -260,11 +260,8 @@ class Mica::XML::Reader
   # the source. Used by the DTD and literal scanners, which are not hot.
   private def next_char : Int32
     return -1 if @pos >= @limit && !fill
-    @literal_chars += 1
-    if @literal_chars == SCAN_CHUNK
-      scan_checkpoint
-      @literal_chars = 0
-    end
+    # Checked by bytes, so multibyte characters cannot stretch the interval.
+    scan_checkpoint if @pos - @mark - @token_precharged >= SCAN_CHUNK
     byte = @buffer[@pos]
     if byte < 0x80
       if byte < 0x20 || byte == 0x7F
@@ -304,9 +301,6 @@ class Mica::XML::Reader
     @pos += length
     code
   end
-
-  # Characters read by `next_char` since the last budget check.
-  @literal_chars = 0
 
   # Copies into scratch at least this long are charged at once.
   private SCRATCH_CHARGE_NOW = 256
