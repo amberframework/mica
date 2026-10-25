@@ -110,7 +110,7 @@ module Mica::Testing
         next unless trial
         @report.record(trial)
         unless trial.failures.empty?
-          @report.list_of_crashes << "#{id} #{trial.failures.first}"
+          @report.list_of_crashes << "#{id} #{Core.excerpt(trial.failures.first)}"
         end
         # Compared in Int128, so no allowance (unlimited or negative) can
         # overflow the check.
@@ -118,7 +118,9 @@ module Mica::Testing
           @report.list_of_budget_overruns << "#{id} #{trial.operations} ops > allowance #{trial.allowance}"
         end
         next unless @check_determinism
-        again = attempt(id, bytes, iteration) { |input, index| yield input, index }
+        # The replay is not a new case: a crash there is recorded, not
+        # counted again.
+        again = attempt(id, bytes, iteration, replay: true) { |input, index| yield input, index }
         if again && again.outcome != trial.outcome
           @report.list_of_nondeterministic_cases << "#{id} #{trial.outcome[0, 80]} vs #{again.outcome[0, 80]}"
         end
@@ -126,11 +128,12 @@ module Mica::Testing
       @report
     end
 
-    private def attempt(id : String, bytes : Bytes, iteration : Int32, & : Bytes, Int32 -> Trial) : Trial?
+    private def attempt(id : String, bytes : Bytes, iteration : Int32, replay : Bool = false, & : Bytes, Int32 -> Trial) : Trial?
       yield bytes, iteration
     rescue error : Exception
-      @report.count_case
-      @report.list_of_crashes << "#{id} #{error.class}: #{error.message.to_s[0, 160]}"
+      @report.count_case unless replay
+      label = replay ? "#{id} (replay)" : id
+      @report.list_of_crashes << "#{label} #{error.class}: #{Core.excerpt(error.message.to_s)}"
       nil
     end
   end

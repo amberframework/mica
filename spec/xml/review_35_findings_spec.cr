@@ -132,3 +132,29 @@ describe "Codex review 44 findings" do
     expect_raises(ArgumentError, /max_operations/) { Mica::Core::WorkBudget.new(max_operations: -1) }
   end
 end
+
+# Regression specs for the forty-sixth Codex code review of 2026-10-25.
+describe "Codex review 46 findings" do
+  mutator = Mica::Testing::ByteMutator.new(["<a/>".to_slice])
+
+  it "2: clips a trial's failure detail in the crash list" do
+    campaign = Mica::Testing::FuzzCampaign.new(mutator, seed: 4_i64, overrun_slack: 0_i64)
+    report = campaign.run(1) do |_, _|
+      Mica::Testing::FuzzCampaign::Trial.new("ok", nil, Mica::Core::WorkMeter.new, ["x" * 10_000])
+    end
+    report.list_of_crashes.first.size.should be < 200
+  end
+
+  it "3: does not count a crashing replay as another case" do
+    calls = 0
+    campaign = Mica::Testing::FuzzCampaign.new(mutator, seed: 5_i64, overrun_slack: 0_i64, check_determinism: true)
+    report = campaign.run(2) do |_, _|
+      calls += 1
+      raise IndexError.new("replay") if calls.even?
+      Mica::Testing::FuzzCampaign::Trial.new("ok", nil, Mica::Core::WorkMeter.new)
+    end
+    report.cases.should eq(2)
+    report.list_of_crashes.size.should eq(2)
+    report.list_of_crashes.first.should contain("(replay)")
+  end
+end

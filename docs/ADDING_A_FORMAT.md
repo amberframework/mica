@@ -140,13 +140,15 @@ Every operation runs under a `WorkMeter`:
    `Crystal::Hasher` seeds string and integer hashing from a secure
    random source once per process and Mica never exposes a hash value,
    so input cannot be built to collide without the seed, but Crystal's
-   `Hash` does not cap its probe runs the way the name table does. Formatting an
-   error message reads at most a fixed window of input (an excerpt of 120
-   characters, at most 480 bytes) and is not charged, and computing an
-   error's line and column may count the current line's characters once,
-   uncharged: the operation stops with that error, so the count runs at
-   most once per operation over input already received. Work that follows a completed operation
-   (settling an edit's name-table work) is recorded without raising; the
+   `Hash` does not cap its probe runs the way the name table does.
+   Formatting an error message reads at most a fixed window of input (at
+   most three excerpts of 120 characters each, every one read from at
+   most 480 bytes, so no message grows with the input) and is not
+   charged, and computing an error's line and column may count the
+   current line's characters once, uncharged: the operation stops with
+   that error, so the count runs at most once per operation over input
+   already received. Work that follows a completed operation (settling
+   an edit's name-table work) is recorded without raising; the
    next charge trips. Three kinds of work ride on a charge already made,
    because each is at most a small constant multiple of it: writing the
    output of a charged scan when it emits at most 4 bytes per charged
