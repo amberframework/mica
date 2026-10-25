@@ -13,20 +13,36 @@ require "./core"
 # value["user"]["name"].as_s             # => "Ada"
 # value["user"]["tags"].as_a.map(&.as_s) # => ["x", "y"]
 # ```
+#
+# Invalid UTF-8 is rejected with `Mica::EncodingError` unless the call
+# passes `invalid_utf8: :replace_like_browsers` (see `InvalidUTF8Handling`).
 module Mica::Form
   # Parses *source* into pairs and builds their nested value, both under
   # one work meter (*meter*, or a new one from `limits.work_budget`).
   #
-  # Raises `Mica::EncodingError` for invalid UTF-8,
+  # *invalid_utf8* says what happens to bytes that are not valid UTF-8
+  # (see `InvalidUTF8Handling`): `:reject` (the default) raises
+  # `Mica::EncodingError`, and `:replace_like_browsers` turns each invalid
+  # sequence into U+FFFD the way browsers do; the returned value's
+  # `Value#has_replaced_invalid_bytes?` then says whether that happened.
+  #
+  # ```
+  # value = Mica::Form.parse("name=Jos%E9", limits: Mica::Form::Limits::REQUEST_BODY, invalid_utf8: :replace_like_browsers)
+  # value["name"].as_s                # => "Jos\uFFFD"
+  # value.has_replaced_invalid_bytes? # => true
+  # ```
+  #
+  # Raises `Mica::EncodingError` for invalid UTF-8 under `:reject`,
   # `Mica::Form::KeySyntaxError` and `Mica::Form::KeyConflictError` for
   # keys that break the grammar or contradict each other, and
   # `Mica::LimitExceededError` (or its budget and deadline subclasses)
   # when a limit trips.
   def self.parse(source : String | Bytes | IO, *, limits : Limits, meter : Core::WorkMeter? = nil,
-                 options : NestedKeys::Options = NestedKeys::Options.new) : Value
+                 options : NestedKeys::Options = NestedKeys::Options.new,
+                 invalid_utf8 : InvalidUTF8Handling = InvalidUTF8Handling::Reject) : Value
     meter ||= Core::WorkMeter.new(limits.work_budget)
-    builder = NestedKeys.new(limits: limits, meter: meter, options: options)
-    Pairs.each(source, limits: limits, meter: meter) { |pair| builder.add(pair) }
+    builder = NestedKeys.new(limits: limits, meter: meter, options: options, invalid_utf8: invalid_utf8)
+    Pairs.each(source, limits: limits, meter: meter, invalid_utf8: invalid_utf8) { |pair| builder.add(pair) }
     builder.finish
   end
 
@@ -62,6 +78,7 @@ module Mica::Form
 end
 
 require "./form/limits"
+require "./form/invalid_utf8_handling"
 require "./form/pairs"
 require "./form/value"
 require "./form/nested_keys"

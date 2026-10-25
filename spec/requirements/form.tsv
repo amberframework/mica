@@ -9,10 +9,12 @@ WHATWG-URL-5.1-skip-empty	WHATWG URL 5.1 step 3.1	Empty sequences produce no pai
 WHATWG-URL-5.1-first-equals	WHATWG URL 5.1 steps 3.2-3.3	A sequence splits at its first 0x3D (=); without one the whole sequence is the name and the value is empty
 WHATWG-URL-5.1-plus	WHATWG URL 5.1 step 3.4	0x2B (+) in the name and value becomes 0x20 (space)
 WHATWG-URL-5.1-percent-decode	WHATWG URL 5.1 step 3.5 and 1.3 percent-decode	%XX with two hex digits decodes to its byte; any other % stays as it is
-WHATWG-URL-5.1-utf8	WHATWG URL 5.1 step 3.5 UTF-8 decode without BOM	Decoded bytes are UTF-8 and a leading BOM is kept; Mica rejects invalid UTF-8 with EncodingError instead of substituting U+FFFD
+WHATWG-URL-5.1-utf8	WHATWG URL 5.1 step 3.5 UTF-8 decode without BOM	Decoded bytes are UTF-8 and a leading BOM is kept; by default Mica rejects invalid UTF-8 with EncodingError instead of substituting U+FFFD
+WHATWG-URL-5.1-utf8-replace	WHATWG URL 5.1 step 3.5; WHATWG Encoding UTF-8 decoder; Unicode 15 section 3.9 maximal subparts	With invalid_utf8: :replace_like_browsers each maximal subpart of an invalid sequence becomes one U+FFFD, raw or percent-encoded, in names and values
 WHATWG-URL-5.1-order	WHATWG URL 5.1 step 4	Pairs keep input order and repeated names
 WHATWG-URL-5.2-serialize	WHATWG URL 5.2	The serializer percent-encodes with the urlencoded set, writes space as +, and joins pairs with = and &
-WPT-URL-urlencoded-parser	wpt url/urlencoded-parser.any.js @ b0099c74	Every web-platform-tests urlencoded parser vector passes, or is rejected by the strict UTF-8 policy at the predicted byte
+WPT-URL-urlencoded-parser	wpt url/urlencoded-parser.any.js @ b0099c74	Every web-platform-tests urlencoded parser vector passes, or is rejected by the default strict UTF-8 policy at the predicted byte
+WPT-URL-urlencoded-parser-browser-mode	wpt url/urlencoded-parser.any.js @ b0099c74	With invalid_utf8: :replace_like_browsers every web-platform-tests urlencoded parser vector passes, the U+FFFD ones included
 WPT-URL-urlsearchparams-stringifier	wpt url/urlsearchparams-stringifier.any.js @ 9353d550	The web-platform-tests stringifier expectations hold for the serializer
 FORM-KEY-PLAIN	Mica::Form::NestedKeys grammar	A key without [ (and without . under dot notation) is one hash key
 FORM-KEY-DOT	Mica::Form::NestedKeys grammar	Under dot notation a key without [ splits at dots into hash keys; with dot notation off it stays one key
@@ -38,6 +40,10 @@ MICA-FORM-LIMIT-ARRAY-SLOTS	Mica contract G4	Array slots in the whole result are
 MICA-FORM-BUDGET	Mica contract G4	The work budget stops a parse with WorkBudgetExceededError
 MICA-FORM-DEADLINE	Mica contract G5	An expired deadline stops a parse with DeadlineExceededError
 MICA-FORM-ENCODING-POSITION	Mica contract G6	Invalid UTF-8 raises EncodingError at the input byte where the invalid sequence starts, for every hostile byte class
+MICA-FORM-INVALID-UTF8-DEFAULT	Seth's ruling 2026-10-25 (ledger 20261025215529)	Pairs and NestedKeys reject invalid UTF-8 by default; the EncodingError message gives the byte and names invalid_utf8: :replace_like_browsers
+MICA-FORM-INVALID-UTF8-PREDICATE	Seth's ruling 2026-10-25 (ledger 20261025215529)	Pair, Pairs and Value answer has_replaced_invalid_bytes? when invalid UTF-8 was replaced with U+FFFD
+MICA-FORM-INVALID-UTF8-NESTED	Seth's ruling 2026-10-25 (ledger 20261025215529)	NestedKeys rejects invalid UTF-8 in pairs built in code by default and replaces it under invalid_utf8: :replace_like_browsers
+MICA-FORM-INVALID-UTF8-LIMITS	Mica contract G4	Limits count input bytes before replacement, so U+FFFD expansion never trips max_input_bytes
 MICA-FORM-STREAM-EQUIVALENCE	Mica contract G6	A String, Bytes and a trickling IO give identical pairs and identical errors
 MICA-LINEAR-FORM-PAIRS	Mica contract G3	Pair parsing is linear: many separators, long percent runs, many plus signs
 MICA-LINEAR-FORM-KEYS	Mica contract G3	Key mapping is linear: huge indices are O(1), deep keys are bounded, many keys and append chains stay linear

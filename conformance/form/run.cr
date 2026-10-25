@@ -5,9 +5,10 @@
 #   crystal-alpha run --release conformance/form/run.cr [-- OUTPUT.tsv]
 #
 # A vector whose expected output holds U+FFFD tests WHATWG's replacement
-# of invalid UTF-8. Mica rejects those inputs with Mica::EncodingError by
-# design (nothing is ever replaced), so they score as "rejected" and are
-# counted apart from failures.
+# of invalid UTF-8. Mica's default (invalid_utf8: :reject) refuses those
+# inputs with Mica::EncodingError, so they score as "rejected" and are
+# counted apart from failures. The browser column runs every vector again
+# with invalid_utf8: :replace_like_browsers, where all of them must pass.
 require "json"
 require "uri"
 require "../../src/mica"
@@ -37,7 +38,7 @@ end
 fixture = WptFixture.from_json(File.read(File.join(__DIR__, "wpt_urlencoded.json")))
 limits = Mica::Form::Limits::REQUEST_BODY
 rows = [] of String
-mica_pass = mica_rejected = mica_fail = stdlib_pass = stdlib_fail = 0
+mica_pass = mica_rejected = mica_fail = stdlib_pass = stdlib_fail = browser_pass = browser_fail = 0
 
 fixture.list_of_vectors.each_with_index do |vector, index|
   expected = vector.list_of_expected_pairs.map { |pair| {pair[0], pair[1]} }
@@ -47,6 +48,10 @@ fixture.list_of_vectors.each_with_index do |vector, index|
   rescue error : Mica::EncodingError
     vector.replacement? ? "rejected #{error.byte_offset}" : "fail #{error.message}"
   end
+  browser_got = Mica::Form::Pairs.parse(vector.input, limits: limits, invalid_utf8: :replace_like_browsers)
+    .map { |pair| {pair.field_name, pair.field_value} }
+  browser = browser_got == expected ? "pass" : "fail #{browser_got.inspect}"
+  browser == "pass" ? (browser_pass += 1) : (browser_fail += 1)
   stdlib_pairs = [] of {String, String}
   URI::Params.parse(vector.input) { |name, value| stdlib_pairs << {name, value} }
   stdlib = stdlib_pairs == expected ? "pass" : "fail #{stdlib_pairs.inspect}"
@@ -56,14 +61,15 @@ fixture.list_of_vectors.each_with_index do |vector, index|
   else                                 mica_fail += 1
   end
   stdlib == "pass" ? (stdlib_pass += 1) : (stdlib_fail += 1)
-  rows << "#{index}\t#{vector.input.inspect}\t#{mica}\t#{stdlib}"
+  rows << "#{index}\t#{vector.input.inspect}\t#{mica}\t#{browser}\t#{stdlib}"
 end
 
 total = fixture.list_of_vectors.size
 puts "wpt urlencoded vectors (#{fixture.source}, sha256 #{fixture.sha256}): #{total}"
 puts "Mica::Form::Pairs: #{mica_pass} pass, #{mica_rejected} rejected by the strict UTF-8 policy, #{mica_fail} fail"
+puts "Mica::Form::Pairs with invalid_utf8: :replace_like_browsers: #{browser_pass} pass, #{browser_fail} fail"
 puts "stdlib URI::Params: #{stdlib_pass} pass, #{stdlib_fail} fail"
 if path = ARGV[0]?
-  File.write(path, "case\tinput\tmica\tstdlib\n" + rows.join('\n') + '\n')
+  File.write(path, "case\tinput\tmica\tmica_replace_like_browsers\tstdlib\n" + rows.join('\n') + '\n')
 end
-exit(mica_fail == 0 ? 0 : 1)
+exit(mica_fail == 0 && browser_fail == 0 ? 0 : 1)

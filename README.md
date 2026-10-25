@@ -124,11 +124,13 @@ value["user"]["tags"].as_a.map(&.as_s) # => ["x"]
 value["items"].as_a.size               # => 3 (nil, nil, "c")
 ```
 
-- `Pairs` follows the WHATWG urlencoded parser and serializer, except
-  that decoded bytes must be valid UTF-8: where WHATWG substitutes U+FFFD,
+- `Pairs` follows the WHATWG urlencoded parser and serializer. By default
+  decoded bytes must be valid UTF-8: where WHATWG substitutes U+FFFD,
   Mica raises `Mica::EncodingError` at the byte where the invalid sequence
-  starts. Stdlib `URI::Params` passes invalid UTF-8 through into its
-  strings and also splits on `;`.
+  starts. Pass `invalid_utf8: :replace_like_browsers` to substitute U+FFFD
+  exactly as browsers do (see "Invalid UTF-8 in forms" below). Stdlib
+  `URI::Params` passes invalid UTF-8 through into its strings and also
+  splits on `;`.
 - `NestedKeys` implements the Rack bracket convention with an explicit
   grammar (documented on the class): `a[b][c]`, `a[]` (append), `a[0]`
   (index), Rack's `a[][x]` rule and dot keys `a.b.c`. Malformed keys raise
@@ -140,8 +142,67 @@ value["items"].as_a.size               # => 3 (nil, nil, "c")
   is rejected at once, with no allocation), `max_array_slots` (10,000 in
   the whole result) and a work budget with a 5 second deadline.
   `Limits.unbounded(reason: "...")` turns them off for trusted input.
-- Parsing is linear in the input (`spec/form/complexity_spec.cr` checks 15
-  adversarial shapes by operation count at n and 8n).
+- Parsing is linear in the input (`spec/form/complexity_spec.cr` checks 18
+  adversarial shapes by operation count at n and 8n, three of them with
+  `invalid_utf8: :replace_like_browsers`).
+
+### Invalid UTF-8 in forms
+
+Every form entry point (`Mica::Form.parse`, `Pairs.parse`, `Pairs.each`,
+`NestedKeys.build`, `NestedKeys.new`) takes `invalid_utf8:`, with one of
+two values (`Mica::Form::InvalidUTF8Handling`):
+
+| `invalid_utf8:` | What happens to invalid UTF-8 | Pick it when |
+|---|---|---|
+| `:reject` (the default) | Raises `Mica::EncodingError` at the byte where the invalid sequence starts | APIs, webhooks, signed or hashed data: no byte is ever swapped for U+FFFD, so the text your code sees decodes exactly what was signed, or the parse fails |
+| `:replace_like_browsers` | Each invalid sequence becomes U+FFFD, exactly as the WHATWG parser and browsers do (one U+FFFD per maximal subpart) | You must accept what a browser would accept from real-world forms, such as legacy pages that send Latin-1 or Windows-1252 bytes |
+
+Reject (the default) for a webhook whose signature you check. Verify the
+signature over the raw body bytes first, then parse:
+
+```crystal
+# The HMAC over body.to_slice was checked before this point.
+begin
+  event = Mica::Form.parse(body, limits: Mica::Form::Limits::REQUEST_BODY)
+rescue error : Mica::EncodingError
+  # error.message: "Invalid UTF-8 in form value at byte 12 (...); pass
+  # invalid_utf8: :replace_like_browsers to accept it the way browsers do
+  # (each invalid sequence becomes U+FFFD) (byte 12)"
+  # Refuse the request: the body is not the text that was signed.
+  raise error
+end
+```
+
+Replace for a form posted from a legacy page, and check whether anything
+was replaced:
+
+```crystal
+require "log"
+require "mica"
+
+value = Mica::Form.parse("city=M%FCnchen&zip=80331",
+  limits: Mica::Form::Limits::REQUEST_BODY,
+  invalid_utf8: :replace_like_browsers)
+value["city"].as_s                # => "M\uFFFDnchen"
+value.has_replaced_invalid_bytes? # => true (ask the root about the whole parse)
+value["zip"].has_replaced_invalid_bytes? # => false
+
+pairs = Mica::Form::Pairs.parse("q=caf%E9", limits: Mica::Form::Limits::QUERY_STRING,
+  invalid_utf8: :replace_like_browsers)
+Log.warn { "query string had invalid UTF-8 replaced" } if pairs.has_replaced_invalid_bytes?
+```
+
+`has_replaced_invalid_bytes?` exists on `Pair`, `Pairs` (any pair) and
+`Value` (any pair that reached that node, even when a later value for the
+same key won; the root covers the whole parse), and is always false under
+`:reject` when Mica parses raw input (a pair Mica replaced earlier keeps its
+mark). Limits count the bytes before replacement, so the
+up-to-threefold growth from U+FFFD never trips `max_input_bytes`.
+
+`Mica::EncodingError#byte_offset` is the input byte where the invalid
+sequence starts for `Pairs` and `Mica::Form.parse`. For a `Pair` built in
+code and passed to `NestedKeys`, it is the pair's `byte_offset`, and the
+message names the byte within the name or value.
 
 ## Security and limits
 

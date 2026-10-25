@@ -4,8 +4,9 @@ module Mica::Core
   # Decoding is strict: overlong forms, encoded surrogates (U+D800 to
   # U+DFFF), code points above U+10FFFF, the retired 5- and 6-byte forms
   # (lead bytes F8 to FD), FE and FF, stray continuation bytes and
-  # truncated sequences are all rejected. Nothing is ever replaced with
-  # U+FFFD.
+  # truncated sequences are all rejected. `decode` never replaces
+  # anything; formats that offer browser-compatible decoding call
+  # `replace_invalid_sequences_like_browsers` explicitly.
   module UTF8
     # Why a sequence failed to decode, from `decode`.
     enum Problem
@@ -162,6 +163,79 @@ module Mica::Core
         index += length
       end
       nil
+    end
+
+    # Returns the size in bytes of the maximal subpart at *offset* in
+    # *bytes* (reading no byte at or past *limit*): the longest prefix of a
+    # well-formed sequence found there, or 1 when the byte there cannot
+    # start one. For an invalid sequence this is the run one U+FFFD
+    # replaces under the Unicode "maximal subpart" practice (Unicode 15,
+    # section 3.9, U+FFFD substitution of maximal subparts), which the
+    # WHATWG Encoding Standard's UTF-8 decoder follows. For a valid
+    # sequence it is the sequence's length.
+    def self.maximal_subpart_size(bytes : Bytes, offset : Int32, limit : Int32) : Int32
+      lead = bytes[offset]
+      return 1 if lead < 0xC2 || lead > 0xF4
+      continuations = lead < 0xE0 ? 1 : (lead < 0xF0 ? 2 : 3)
+      lower, upper = second_byte_range(lead)
+      size = 1
+      while size <= continuations
+        index = offset + size
+        return size if index >= limit
+        byte = bytes[index]
+        return size if byte < lower || byte > upper
+        lower, upper = 0x80_u8, 0xBF_u8
+        size += 1
+      end
+      size
+    end
+
+    # The bytes allowed after *lead* (C2 to F4) in a well-formed sequence
+    # (Unicode 15, table 3-7).
+    private def self.second_byte_range(lead : UInt8) : {UInt8, UInt8}
+      case lead
+      when 0xE0 then {0xA0_u8, 0xBF_u8}
+      when 0xED then {0x80_u8, 0x9F_u8}
+      when 0xF0 then {0x90_u8, 0xBF_u8}
+      when 0xF4 then {0x80_u8, 0x8F_u8}
+      else           {0x80_u8, 0xBF_u8}
+      end
+    end
+
+    # The UTF-8 encoding of U+FFFD REPLACEMENT CHARACTER.
+    REPLACEMENT_CHARACTER_BYTES = Bytes[0xEF, 0xBF, 0xBD]
+
+    # Returns *bytes* as a `String`, with each maximal subpart of an
+    # invalid sequence (see `maximal_subpart_size`) replaced by U+FFFD:
+    # the result browsers give when they decode the same bytes. Valid
+    # sequences, a byte order mark and U+FFFD already in *bytes* are
+    # kept as they are. The result is at most three times as long as
+    # *bytes*.
+    #
+    # ```
+    # Mica::Core::UTF8.replace_invalid_sequences_like_browsers(Bytes[0x61, 0xE2, 0x82, 0x62]) # => "a\uFFFDb"
+    # Mica::Core::UTF8.replace_invalid_sequences_like_browsers(Bytes[0xC0, 0x80])             # => "\uFFFD\uFFFD"
+    # ```
+    def self.replace_invalid_sequences_like_browsers(bytes : Bytes) : String
+      String.build(bytes.size + 2) do |io|
+        index = 0
+        size = bytes.size
+        while index < size
+          if bytes[index] < 0x80
+            io.write_byte(bytes[index])
+            index += 1
+            next
+          end
+          _, length = decode(bytes, index, size)
+          if length > 0
+            io.write(bytes[index, length])
+            index += length
+          else
+            io.write(REPLACEMENT_CHARACTER_BYTES)
+            index += maximal_subpart_size(bytes, index, size)
+          end
+        end
+      end
     end
   end
 end

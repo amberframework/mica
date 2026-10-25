@@ -13,11 +13,32 @@ module Mica::Form
   # The `as_` accessors raise `TypeCastError` for the wrong kind, and the
   # `as_..?` forms return nil; `[]` raises `KeyError` or `IndexError` for
   # a missing entry, and `[]?` returns nil.
+  #
+  # Under `invalid_utf8: :replace_like_browsers`, `has_replaced_invalid_bytes?`
+  # says whether invalid UTF-8 was replaced with U+FFFD in any pair that
+  # reached this node; ask the root to learn whether the parse altered
+  # anything.
   struct Value
     # The node's content.
     getter raw : (String | Hash(String, Value) | Array(Value))?
 
-    def initialize(@raw : (String | Hash(String, Value) | Array(Value))?)
+    def initialize(@raw : (String | Hash(String, Value) | Array(Value))?, *, @has_replaced_invalid_bytes : Bool = false)
+    end
+
+    # Returns true when a pair whose invalid UTF-8 was replaced with U+FFFD
+    # (under `invalid_utf8: :replace_like_browsers`) reached this node: its
+    # string, or any string or key below it. On the root it answers
+    # whether the parse replaced anything at all. `==` compares content
+    # only and ignores this flag.
+    #
+    # ```
+    # value = Mica::Form.parse("q=caf%E9&page=2", limits: Mica::Form::Limits::QUERY_STRING, invalid_utf8: :replace_like_browsers)
+    # value.has_replaced_invalid_bytes?         # => true
+    # value["q"].has_replaced_invalid_bytes?    # => true
+    # value["page"].has_replaced_invalid_bytes? # => false
+    # ```
+    def has_replaced_invalid_bytes? : Bool
+      @has_replaced_invalid_bytes
     end
 
     # Returns the string, or nil for another kind.
@@ -93,6 +114,11 @@ module Mica::Form
 
     def ==(other : Value) : Bool
       @raw == other.raw
+    end
+
+    # Hashes the content only, to agree with `==`.
+    def hash(hasher)
+      @raw.hash(hasher)
     end
 
     def to_s(io : IO) : Nil

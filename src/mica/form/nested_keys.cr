@@ -41,6 +41,14 @@ module Mica::Form
   #   hidden-field idiom for checkboxes sends `on=0&on=1`);
   #   `DuplicateLeaves::Reject` raises `KeyConflictError` instead.
   #
+  # - Names and values must be valid UTF-8. Pairs from `Pairs.parse`
+  #   already are; for pairs built in code, `invalid_utf8:` (see
+  #   `InvalidUTF8Handling`) chooses between `:reject` (the default, which
+  #   raises `Mica::EncodingError`) and `:replace_like_browsers` (each
+  #   invalid sequence becomes U+FFFD). The result's
+  #   `Value#has_replaced_invalid_bytes?` is true when any pair that
+  #   reached that node was altered, here or by `Pairs.parse`.
+  #
   # Every error carries the byte offset of the offending pair.
   #
   # ```
@@ -83,6 +91,8 @@ module Mica::Form
     private record Segment, kind : SegmentKind, name : String = "", index : Int32 = 0
 
     private abstract class Node
+      # True when a pair whose invalid UTF-8 was replaced reached this node.
+      property? has_replaced_invalid_bytes = false
     end
 
     private class LeafNode < Node
@@ -105,14 +115,17 @@ module Mica::Form
     # work budget (for example with the `Pairs.parse` that produced the
     # pairs); without it the build starts a meter from
     # `limits.work_budget` and counts the bytes of every name and value as
-    # units of input.
-    def self.build(pairs : Enumerable(Pair), *, limits : Limits, meter : Core::WorkMeter? = nil, options : Options = Options.new) : Value
-      builder = new(limits: limits, meter: meter, options: options)
+    # units of input. *invalid_utf8* applies to names and values that are
+    # not valid UTF-8 (see `InvalidUTF8Handling`).
+    def self.build(pairs : Enumerable(Pair), *, limits : Limits, meter : Core::WorkMeter? = nil, options : Options = Options.new,
+                   invalid_utf8 : InvalidUTF8Handling = InvalidUTF8Handling::Reject) : Value
+      builder = new(limits: limits, meter: meter, options: options, invalid_utf8: invalid_utf8)
       pairs.each { |pair| builder.add(pair) }
       builder.finish
     end
 
-    def initialize(*, @limits : Limits, meter : Core::WorkMeter? = nil, @options : Options = Options.new)
+    def initialize(*, @limits : Limits, meter : Core::WorkMeter? = nil, @options : Options = Options.new,
+                   @invalid_utf8 : InvalidUTF8Handling = InvalidUTF8Handling::Reject)
       @counts_units = meter.nil?
       @meter = meter || Core::WorkMeter.new(@limits.work_budget)
       @root = HashNode.new
@@ -126,9 +139,13 @@ module Mica::Form
     # Adds one pair to the structure. The bytes of every name and value
     # added count toward `Limits#max_input_bytes` (decoded pairs from
     # `Pairs` are never longer than their input, so a shared parse trips
-    # the limit in `Pairs` first). Raises `KeySyntaxError`,
-    # `KeyConflictError` or `Mica::LimitExceededError` (with the pair's
-    # offset) when the pair cannot be added. A builder that raised may hold
+    # the limit in `Pairs` first). Limits count bytes before replacement:
+    # a pair from `Pairs.parse` with replacements counts its
+    # `Pair#byte_size_before_replacement`, and every other pair counts
+    # every byte it holds. Raises
+    # `Mica::EncodingError` for invalid UTF-8 under `invalid_utf8: :reject`,
+    # and `KeySyntaxError`, `KeyConflictError` or `Mica::LimitExceededError`
+    # (all with the pair's offset) when the pair cannot be added. A builder that raised may hold
     # part of that pair, so it refuses further use with `ArgumentError`.
     def add(pair : Pair) : Nil
       raise ArgumentError.new("NestedKeys#add after finish") if @finished
@@ -138,12 +155,7 @@ module Mica::Form
       if @pair_count > @limits.max_pairs
         raise LimitExceededError.new("Form has more than max_pairs (#{@limits.max_pairs}) pairs", position(pair))
       end
-      pair_bytes = pair.field_name.bytesize.to_i64 + pair.field_value.bytesize
-      @input_bytes += pair_bytes
-      if @input_bytes > @limits.max_input_bytes
-        raise LimitExceededError.new("Form pairs exceed max_input_bytes (#{@limits.max_input_bytes})", position(pair))
-      end
-      @meter.add_units(pair_bytes) if @counts_units
+      pair = with_counted_and_valid_bytes(pair)
       segments = parse_key(pair)
       insert(segments, pair)
       @failed = false
@@ -166,20 +178,21 @@ module Mica::Form
         end
       end
       @meter.enforce_deadline { Core::Position.new(0_i64) }
-      Value.new(result)
+      Value.new(result, has_replaced_invalid_bytes: @root.has_replaced_invalid_bytes?)
     end
 
     private def convert(node : Node, stack : Array({Node, Hash(String, Value) | Array(Value)})) : Value
+      replaced = node.has_replaced_invalid_bytes?
       if node.is_a?(LeafNode)
-        Value.new(node.text)
+        Value.new(node.text, has_replaced_invalid_bytes: replaced)
       elsif node.is_a?(HashNode)
         hash = {} of String => Value
         stack << {node, hash}
-        Value.new(hash)
+        Value.new(hash, has_replaced_invalid_bytes: replaced)
       elsif node.is_a?(ArrayNode)
         array = Array(Value).new(node.size, Value.new(nil))
         stack << {node, array}
-        Value.new(array)
+        Value.new(array, has_replaced_invalid_bytes: replaced)
       else
         raise ArgumentError.new("Unknown form node #{node.class}")
       end
@@ -243,8 +256,54 @@ module Mica::Form
       value.to_i32
     end
 
+    # The bytes *pair* counts toward `max_input_bytes`: the size of its name
+    # and value before replacement, so replacement never trips a limit the
+    # original bytes would not. Only Mica's decoding can set that size
+    # (see `Pair`); any other pair counts every byte it holds.
+    private def bytes_before_replacement(pair : Pair) : Int64
+      pair.byte_size_before_replacement || pair.field_name.bytesize.to_i64 + pair.field_value.bytesize
+    end
+
+    # Counts *pair* toward `max_input_bytes` and the work units, then
+    # returns it with valid UTF-8 (see `with_valid_utf8`).
+    private def with_counted_and_valid_bytes(pair : Pair) : Pair
+      pair_bytes = bytes_before_replacement(pair)
+      @input_bytes += pair_bytes
+      if @input_bytes > @limits.max_input_bytes
+        raise LimitExceededError.new("Form pairs exceed max_input_bytes (#{@limits.max_input_bytes})", position(pair))
+      end
+      @meter.add_units(pair_bytes) if @counts_units
+      with_valid_utf8(pair)
+    end
+
+    # Returns *pair* when its name and value are valid UTF-8. Otherwise
+    # raises `Mica::EncodingError` under `:reject`, or returns a copy with
+    # each invalid sequence replaced by U+FFFD and marked as replaced.
+    private def with_valid_utf8(pair : Pair) : Pair
+      name_bytes = pair.field_name.to_slice
+      value_bytes = pair.field_value.to_slice
+      charge(name_bytes.size.to_i64 + value_bytes.size, pair)
+      invalid_in_name = Core::UTF8.first_invalid_offset(name_bytes)
+      invalid_in_value = Core::UTF8.first_invalid_offset(value_bytes)
+      return pair unless invalid_in_name || invalid_in_value
+      if @invalid_utf8.reject?
+        part, offset = invalid_in_name ? {"name", invalid_in_name} : {"value", invalid_in_value || 0}
+        raise EncodingError.new(
+          "Invalid UTF-8 in form #{part} at byte #{offset} of the #{part}; #{INVALID_UTF8_REJECTION_HINT}",
+          position(pair))
+      end
+      charge(Pairs::REPLACEMENT_PASSES.to_i64 * (name_bytes.size + value_bytes.size), pair)
+      Pair.new(
+        Core::UTF8.replace_invalid_sequences_like_browsers(name_bytes),
+        Core::UTF8.replace_invalid_sequences_like_browsers(value_bytes),
+        pair.byte_offset,
+        byte_size_before_replacement: name_bytes.size.to_i64 + value_bytes.size,
+        seal: REPLACEMENT_SEAL)
+    end
+
     private def insert(segments : Array(Segment), pair : Pair) : Nil
       container : Node = @root
+      container.has_replaced_invalid_bytes = true if pair.has_replaced_invalid_bytes?
       last = segments.size - 1
       segments.each_with_index do |segment, position|
         following = position < last ? segments[position + 1] : nil
@@ -255,6 +314,7 @@ module Mica::Form
                       store(container, segment, pair)
                       container
                     end
+        container.has_replaced_invalid_bytes = true if pair.has_replaced_invalid_bytes?
       end
     end
 
@@ -291,7 +351,7 @@ module Mica::Form
           replace_leaf(existing, pair)
         else
           charge(NODE_OPERATIONS, pair)
-          container.children[segment.name] = LeafNode.new(pair.field_value)
+          container.children[segment.name] = new_leaf(pair)
         end
       elsif container.is_a?(ArrayNode)
         index = segment.kind.append? ? next_index(container, pair) : segment.index
@@ -299,7 +359,7 @@ module Mica::Form
           replace_leaf(existing, pair)
         else
           charge(NODE_OPERATIONS, pair)
-          place(container, index, LeafNode.new(pair.field_value), pair)
+          place(container, index, new_leaf(pair), pair)
         end
       end
     end
@@ -308,6 +368,13 @@ module Mica::Form
       conflict(pair, "assigns a value where #{kind_name(existing)} already is") unless existing.is_a?(LeafNode)
       conflict(pair, "repeats a key that already has a value") if @options.duplicate_leaves.reject?
       existing.text = pair.field_value
+      existing.has_replaced_invalid_bytes = true if pair.has_replaced_invalid_bytes?
+    end
+
+    private def new_leaf(pair : Pair) : LeafNode
+      leaf = LeafNode.new(pair.field_value)
+      leaf.has_replaced_invalid_bytes = pair.has_replaced_invalid_bytes?
+      leaf
     end
 
     # Applies the Rack rule for `[]` before a hash key: returns the last
