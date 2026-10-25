@@ -33,7 +33,8 @@ class Mica::XML::Reader
     loop do
       @mark = @pos
       @token_precharged = 0
-      @token_position = error_position if normalization_checked?
+      # The metered `position`: its counting is charged as it goes.
+      @token_position = position if normalization_checked?
       if @pos >= @limit && !fill
         if @frames.empty?
           finish_document
@@ -381,7 +382,8 @@ class Mica::XML::Reader
   private def normalize_tokenized_attribute(index : Int32) : Nil
     slot = @attrs[index]
     value = attribute_value_bytes(slot)
-    charge(value.size)
+    # One pass to scan the value and one to write its collapsed copy.
+    charge(2 * value.size)
     start = @scratch_size
     pending_space = false
     value.each do |byte|
@@ -528,7 +530,8 @@ class Mica::XML::Reader
   end
 
   # Returns true when the value is all white space; stops at the first
-  # other byte, so it reads each byte at most once.
+  # other byte, so it reads each byte at most once. A long value is scanned
+  # in chunks of `WHITESPACE_CHUNK` bytes, each charged before it is read.
   private def whitespace_value? : Bool
     if @value_in_scratch
       bytes = @scratch
@@ -538,10 +541,22 @@ class Mica::XML::Reader
       from = @mark + @value_start
     end
     stop = from + @value_size
-    index = Core::ByteScan.skip_while(bytes, from, stop) { |byte| CharClass.space?(byte) }
-    charge_in_token(index < stop ? index - from + 1 : index - from)
-    index == stop
+    if @value_size <= WHITESPACE_CHUNK
+      index = Core::ByteScan.skip_while(bytes, from, stop) { |byte| CharClass.space?(byte) }
+      charge_in_token(index < stop ? index - from + 1 : index - from)
+      return index == stop
+    end
+    index = from
+    while index < stop
+      chunk_stop = Math.min(index + WHITESPACE_CHUNK, stop)
+      charge(chunk_stop - index)
+      index = Core::ByteScan.skip_while(bytes, index, chunk_stop) { |byte| CharClass.space?(byte) }
+      return false if index < chunk_stop
+    end
+    true
   end
+
+  private WHITESPACE_CHUNK = 4096
 
   # Emits an ENTITY_REFERENCE event for an entity that was not expanded
   # (an external parsed entity, which is never fetched, or an undeclared

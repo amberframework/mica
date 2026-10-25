@@ -17,6 +17,8 @@ class Mica::XML::Reader
   private def verify_normalization : Nil
     case @node_type
     when .element?
+      # The walk below visits every attribute: charged first.
+      charge(@attrs.size)
       check_normalized_name(@name_id, 1)
       ordinal = 0
       @attrs.each do |slot|
@@ -55,6 +57,8 @@ class Mica::XML::Reader
   # buffer bytes from *index* to *stop*, with the document's line ends (in
   # XML 1.1 also NEL and LSEP, and CR NEL as one).
   private def position_after(start : Core::Position, index : Int32, stop : Int32) : Core::Position
+    # One pass over the bytes between: charged first.
+    charge(stop - index) if stop > index
     line = start.line
     column = start.column
     while index < stop

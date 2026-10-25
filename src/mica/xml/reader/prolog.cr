@@ -140,10 +140,17 @@ class Mica::XML::Reader
   # UTF-16LE/UTF-16BE (explicit byte order) must agree with the mark;
   # plain UTF-16 accepts either.
   private def declared_byte_order_conflicts?(declared : String, signature : Core::Encoding) : Bool
-    upper = declared.upcase
-    return signature.utf16_be? if upper.ends_with?("LE")
-    return signature.utf16_le? if upper.ends_with?("BE")
+    return signature.utf16_be? if label_ends_with?(declared, 'L'.ord)
+    return signature.utf16_le? if label_ends_with?(declared, 'B'.ord)
     false
+  end
+
+  # True when *declared* ends with *first* followed by `E`, ignoring ASCII
+  # case. Reads two bytes, without copying the label.
+  private def label_ends_with?(declared : String, first : Int32) : Bool
+    size = declared.bytesize
+    return false if size < 2
+    declared.byte_at(size - 2) | 0x20 == first | 0x20 && declared.byte_at(size - 1) | 0x20 == 'e'.ord
   end
 
   # Reads one token outside the root element: white space (skipped), a

@@ -99,8 +99,15 @@ module Mica::XML
       @strings.size
     end
 
+    # Returns the entries `copy` writes: five per name (the string
+    # reference, hash, local and prefix ids and QName state) and one per
+    # hash slot.
+    def copy_work : Int64
+      5_i64 * @strings.size + @slots.size
+    end
+
     # Returns an independent copy of the table (same ids, same seed, no
-    # rehash hook). Linear in the table.
+    # rehash hook). Linear in the table (see `copy_work`).
     def copy : NameTable
       table = dup
       table.detach_state

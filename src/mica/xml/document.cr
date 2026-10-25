@@ -165,6 +165,10 @@ module Mica::XML
       # Validating, hashing and comparing the input (names are checked as
       # Names, then as QNames, split and interned): charged first.
       charge_edit(4 * bytes + 1)
+      # The budget and the deadline are checked before anything changes,
+      # also for an edit too small to reach a clock checkpoint. A finished
+      # edit is never reported as failed (see `settle_name_work`).
+      meter.enforce("while editing the document") { Core::Position.new(0_i64) }
       unshare_names if @shared_names
       previous_hook = @names.before_rebuild
       @names.before_rebuild = edit_rebuild_hook
@@ -183,7 +187,7 @@ module Mica::XML
     # reader's table and meter. The copy is linear in the table and charged
     # here; the edit allowance already counts the table's name bytes.
     private def unshare_names : Nil
-      charge_edit(@names.name_bytes + @names.size)
+      charge_edit(@names.copy_work)
       @names = @names.copy
       @shared_names = false
     end
@@ -1061,10 +1065,19 @@ module Mica::XML
     # Returns the next node after *index* in a depth-first walk confined to
     # the subtree of *root*, or -1.
     def following_in_order(index : Int32, root : Int32) : Int32
+      following_in_order(index, root) { }
+    end
+
+    # :nodoc:
+    #
+    # Same, calling the block once per parent link climbed, so a metered
+    # caller can charge the climb.
+    def following_in_order(index : Int32, root : Int32, & : ->) : Int32
       first = data(index).first_child
       return first if first >= 0
       current = index
       while current != root && current >= 0
+        yield
         following = data(current).next_sibling
         return following if following >= 0
         current = data(current).parent
@@ -1077,8 +1090,17 @@ module Mica::XML
     # Returns one past the last arena index in the subtree of *index*. Only
     # valid while `index_order?`.
     def subtree_end(index : Int32) : Int32
+      subtree_end(index) { }
+    end
+
+    # :nodoc:
+    #
+    # Same, calling the block once per parent link climbed, so a metered
+    # caller can charge the climb.
+    def subtree_end(index : Int32, & : ->) : Int32
       current = index
       while current >= 0
+        yield
         following = data(current).next_sibling
         return following if following >= 0 && !kind(following).attribute_node? && !kind(following).namespace_decl?
         current = data(current).parent

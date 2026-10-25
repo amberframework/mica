@@ -9,6 +9,8 @@ class Mica::XML::Reader
     @pos += 9
     require_spaces("after '<!DOCTYPE'")
     root_id = scan_declared_name_id
+    # The QName check passes over the name: charged first.
+    charge(@names[root_id].bytesize)
     if @options.namespace_aware? && !@names.qname?(root_id)
       syntax_error("DOCTYPE name '#{Core.excerpt(@names[root_id])}' is not a valid QName")
     end
@@ -372,7 +374,8 @@ class Mica::XML::Reader
 
   # Collapses runs of spaces to one and trims both ends.
   private def collapse_spaces(raw : Bytes) : Bytes
-    charge(raw.size)
+    # One pass to scan the value and one to write its collapsed copy.
+    charge(2 * raw.size)
     io = IO::Memory.new(raw.size)
     pending_space = false
     raw.each do |byte|

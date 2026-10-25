@@ -135,7 +135,16 @@ Every operation runs under a `WorkMeter`:
    than the bytes appended, which are charged), and escaping at most
    4 KiB before a metered write. Work that follows a completed operation
    (settling an edit's name-table work) is recorded without raising; the
-   next charge trips.
+   next charge trips. Three kinds of work ride on a charge already made,
+   because each is at most a small constant multiple of it: writing the
+   output of a charged scan when it emits at most 4 bytes per charged
+   byte or charged reference (line-end normalization and reference
+   expansion into scratch, a DTD literal scanned into a builder, and a
+   transcoder's conversion of source units whose decoded bytes the format
+   charges as it reads them, at most one 64 KiB chunk ahead); clearing a
+   collection whose entries were each charged when they were added; and
+   an XPath syntax-tree constructor reading its own children, so each
+   node, charged as at least one token, is read at most twice more.
 5. Call `meter.enforce_deadline { position }` after each IO read (in the
    `input_received` hook, and for `TextInput` formats also in
    `source_read_returned`, which runs after each read a transcoder makes

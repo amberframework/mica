@@ -58,22 +58,32 @@ module Mica::XML::XPath
     end
 
     def run(expression : Expr, context : Int32) : Value
-      to_value(evaluate(expression, text_run_start(context), 1, 1))
+      checked { to_value(evaluate(expression, text_run_start(context), 1, 1)) }
     end
 
     # Evaluates and converts with `string()`, charging the conversion.
     def run_string(expression : Expr, context : Int32) : String
-      to_string(evaluate(expression, text_run_start(context), 1, 1))
+      checked { to_string(evaluate(expression, text_run_start(context), 1, 1)) }
     end
 
     # Evaluates and converts with `number()`, charging the conversion.
     def run_number(expression : Expr, context : Int32) : Float64
-      to_number(evaluate(expression, text_run_start(context), 1, 1))
+      checked { to_number(evaluate(expression, text_run_start(context), 1, 1)) }
     end
 
     # Evaluates and converts with `boolean()`.
     def run_boolean(expression : Expr, context : Int32) : Bool
-      to_boolean(evaluate(expression, text_run_start(context), 1, 1))
+      checked { to_boolean(evaluate(expression, text_run_start(context), 1, 1)) }
+    end
+
+    # Checks the budget and the deadline before the evaluation starts and
+    # again before its result is returned, so a short evaluation on a spent
+    # or expired meter never succeeds between clock checkpoints.
+    private def checked(&)
+      work_limit_reached
+      result = yield
+      work_limit_reached
+      result
     end
 
     # Charges *count* operations and raises when the budget or the deadline
@@ -184,6 +194,8 @@ module Mica::XML::XPath
         charge(1)
         following = steps[index + 1]?
         if following && step.descendant_or_self_node? && following.axis.child? && following.position_free?
+          # The pair is two steps: the second is charged here.
+          charge(1)
           # `//name[pred]` equals `descendant::name[pred]` when the
           # predicates ignore proximity position: one scan instead of a
           # child step per descendant.
@@ -385,7 +397,7 @@ module Mica::XML::XPath
           if @document.index_order?
             # A context inside an earlier context's subtree adds nothing.
             next if context < covered_until && !attribute_like?(context)
-            covered_until = Math.max(covered_until, @document.subtree_end(context)) unless attribute_like?(context)
+            covered_until = Math.max(covered_until, @document.subtree_end(context) { charge(1) }) unless attribute_like?(context)
             each_axis_node(context, axis) { |node| yield node }
           else
             next if visited.includes?(context)
@@ -566,7 +578,7 @@ module Mica::XML::XPath
 
     private def each_descendant(node : Int32, &) : Nil
       if @document.index_order?
-        stop = @document.subtree_end(node)
+        stop = @document.subtree_end(node) { charge(1) }
         current = node + 1
         while current < stop
           # Each chunk is charged before it is walked, so a long walk stops
@@ -579,11 +591,11 @@ module Mica::XML::XPath
           end
         end
       else
-        current = @document.following_in_order(node, node)
+        current = @document.following_in_order(node, node) { charge(1) }
         while current >= 0
           charge(1)
           yield current
-          current = @document.following_in_order(current, node)
+          current = @document.following_in_order(current, node) { charge(1) }
         end
       end
     end
@@ -593,7 +605,7 @@ module Mica::XML::XPath
       while current >= 0
         charge(1)
         yield current
-        current = @document.following_in_order(current, 0)
+        current = @document.following_in_order(current, 0) { charge(1) }
       end
     end
 
@@ -608,11 +620,11 @@ module Mica::XML::XPath
         parent = @document.data(parent).parent
       end
       result = [] of Int32
-      current = @document.following_in_order(0, 0)
+      current = @document.following_in_order(0, 0) { charge(1) }
       while current >= 0 && current != target
         charge(1)
         result << current unless ancestors.includes?(current)
-        current = @document.following_in_order(current, 0)
+        current = @document.following_in_order(current, 0) { charge(1) }
       end
       result
     end
@@ -809,7 +821,7 @@ module Mica::XML::XPath
 
     private def each_text_in_subtree(node : Int32, & : Bytes ->) : Nil
       if @document.index_order?
-        stop = @document.subtree_end(node)
+        stop = @document.subtree_end(node) { charge(1) }
         current = node + 1
         while current < stop
           kind = @document.kind(current)
@@ -823,7 +835,7 @@ module Mica::XML::XPath
           current += 1
         end
       else
-        current = @document.following_in_order(node, node)
+        current = @document.following_in_order(node, node) { charge(1) }
         while current >= 0
           kind = @document.kind(current)
           if kind.text_node? || kind.cdata_section_node?
@@ -833,7 +845,7 @@ module Mica::XML::XPath
           else
             charge(1)
           end
-          current = @document.following_in_order(current, node)
+          current = @document.following_in_order(current, node) { charge(1) }
         end
       end
     end

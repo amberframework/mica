@@ -149,6 +149,8 @@ class Mica::XML::Reader
   # Appends *entity*'s replacement text to scratch with attribute-value
   # normalization, expanding nested references.
   private def expand_attribute_entity(entity : DTD::Entity, text : Bytes) : Nil
+    # The recursion search walks the stack: charged first.
+    charge(@attribute_entity_stack.size + 1)
     if @attribute_entity_stack.includes?(entity)
       syntax_error("Recursive reference to entity '#{Core.excerpt(@names[entity.name_id])}'")
     end
@@ -156,7 +158,7 @@ class Mica::XML::Reader
       limit_error("Entity references nested deeper than max_entity_depth (#{@options.max_entity_depth})")
     end
     charge_expansion(text.size)
-    charge(text.size + @attribute_entity_stack.size)
+    charge(text.size)
     @attribute_entity_stack << entity
     index = 0
     size = text.size

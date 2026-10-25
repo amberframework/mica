@@ -409,7 +409,7 @@ module Mica::XML
             end
           end
         end
-        current = @document.following_in_order(current, @index)
+        current = @document.following_in_order(current, @index) { @document.charge_edit(1) }
       end
       false
     end
@@ -428,6 +428,8 @@ module Mica::XML
     private def following_outside_subtree(index : Int32) : Int32
       current = index
       while current != @index && current >= 0
+        # Each parent link climbed is charged to the edit meter.
+        @document.charge_edit(1)
         following = @document.data(current).next_sibling
         return following if following >= 0
         current = @document.data(current).parent

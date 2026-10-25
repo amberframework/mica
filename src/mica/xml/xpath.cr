@@ -95,7 +95,13 @@ module Mica::XML
     def self.compile(path : String, meter : Core::WorkMeter? = nil) : Expression
       work_meter = meter || Core::WorkMeter.new(DEFAULT_WORK_BUDGET)
       work_meter.add_units(path.bytesize)
-      Expression.new(path, Parser.new(path, work_meter).parse)
+      # The budget and the deadline are checked at entry and before the
+      # result is returned, also for an expression too short to reach a
+      # clock checkpoint.
+      enforce_compile(work_meter, path, 0)
+      root = Parser.new(path, work_meter).parse
+      enforce_compile(work_meter, path, path.bytesize)
+      Expression.new(path, root)
     end
 
     # :nodoc:
@@ -119,7 +125,17 @@ module Mica::XML
     def self.charge_compile(meter : Core::WorkMeter?, count : Int, source : String, offset : Int32) : Nil
       return unless meter
       return unless meter.charge(count)
-      meter.enforce("compiling XPath #{quote(source)}") { expression_position(source, offset) }
+      enforce_compile(meter, source, offset)
+    end
+
+    # :nodoc:
+    #
+    # Raises the positioned error when *meter*'s budget or deadline has run
+    # out while compiling *source* at byte *offset*.
+    def self.enforce_compile(meter : Core::WorkMeter, source : String, offset : Int32) : Nil
+      verdict = meter.verdict
+      return if verdict.within?
+      meter.raise_exceeded(verdict, expression_position(source, offset), "compiling XPath #{quote(source)}")
     end
 
     # :nodoc:
