@@ -66,6 +66,7 @@ module Mica::Core
       @source_prefix_bytes = prefix_bytes.to_i64
       @input_bytes = bytes.size.to_i64
       input_received(bytes.size)
+      check_input_size
     end
 
     # Reads from *io*, starting with the already-read source bytes in
@@ -80,6 +81,7 @@ module Mica::Core
       @source_prefix_bytes = prefix_bytes.to_i64
       @input_bytes = carried.size.to_i64
       input_received(carried.size)
+      check_input_size
     end
 
     # Makes at least one more byte available. Returns false at the end of

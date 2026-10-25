@@ -12,8 +12,8 @@ describe "Codex review 11 findings" do
     reader.read
     element = reader.expand
     element.children.each do |child|
-      child.name.should start_with("e")
-      child.prefix.should_not be_nil
+      child.name.should start_with("p")
+      child.prefix.should be_nil
       child.attributes.each(&.name)
     end
     before = reader.operations
@@ -21,13 +21,15 @@ describe "Codex review 11 findings" do
     (reader.operations - before).should be < 1_000
   end
 
-  it "2: finds an attribute by a local name that was never interned" do
-    document = Mica::XML.parse("<p:r p:a='1'/>", UNAWARE)
-    root = root_of(document)
+  it "2: finds attributes by local name, and by whole name without namespaces" do
+    root = root_of(Mica::XML.parse("<r xmlns:p='urn:p' p:a='1'/>"))
     root["a"]?.should eq("1")
-    root["p:a"]?.should eq("1")
     root.delete("a").should eq("1")
     root["p:a"]?.should be_nil
+    unaware = root_of(Mica::XML.parse("<p:r p:a='1'/>", UNAWARE))
+    unaware["a"]?.should be_nil
+    unaware["p:a"]?.should eq("1")
+    unaware.delete("p:a").should eq("1")
   end
 
   it "3: charges replaying a rewritten value to the parse meter" do
@@ -46,7 +48,7 @@ end
 # Regression specs for the twelfth Codex code review of 2026-10-24.
 describe "Codex review 12 findings" do
   it "1: reads an indexed attribute by local name without charging the edit meter" do
-    document = Mica::XML.parse("<p:r p:a='1'/>", UNAWARE)
+    document = Mica::XML.parse("<r xmlns:p='urn:p' p:a='1'/>")
     root = root_of(document)
     root.delete("missing").should be_nil
     document.edit_budget = Mica::Core::WorkBudget.new(operations_per_unit: 0, base_operations: 0, max_operations: 0)

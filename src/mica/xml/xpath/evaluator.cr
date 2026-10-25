@@ -429,17 +429,15 @@ module Mica::XML::XPath
         end
       when .following?
         # following(c) holds every node after c's subtree, so the union is
-        # following(c) for the context whose subtree ends first.
-        best = contexts.min_by do |context|
-          start = following_start(context)
-          start < 0 ? Int32::MAX : order_of(start)
-        end
-        each_axis_node(best, axis) { |node| yield node }
+        # following(c) for the context whose subtree ends first. Attributes
+        # of one element share their following start: it is found once.
+        best = earliest_following_context(contexts)
+        each_axis_node(best, axis) { |node| yield node } if best
       when .preceding?
         # preceding(x) is contained in preceding(y) whenever y comes after
         # x, so the union is preceding(last context).
-        best = contexts.max_by { |context| order_of(attribute_like?(context) ? @document.data(context).parent : context) }
-        each_axis_node(best, axis) { |node| yield node }
+        best = contexts.max_by? { |context| order_of(attribute_like?(context) ? @document.data(context).parent : context) }
+        each_axis_node(best, axis) { |node| yield node } if best
       end
     end
 
@@ -448,10 +446,35 @@ module Mica::XML::XPath
       @document.order_key(node)
     end
 
-    # Returns the first node of the following axis of *node*, or -1.
+    # Returns the context whose following axis starts first (nil for no
+    # contexts). Each owner element of attribute contexts is examined once.
+    private def earliest_following_context(contexts : Array(Int32)) : Int32?
+      owners = Set(Int32).new
+      best = nil
+      best_order = Int32::MAX
+      contexts.each do |context|
+        charge(1)
+        next if attribute_like?(context) && !owners.add?(@document.data(context).parent)
+        start = following_start(context)
+        order = start < 0 ? Int32::MAX : order_of(start)
+        if best.nil? || order < best_order
+          best = context
+          best_order = order
+        end
+      end
+      best
+    end
+
+    # Returns the first node of the following axis of *node*, or -1. Each
+    # step of the climb is charged.
     private def following_start(node : Int32) : Int32
       if attribute_like?(node)
-        return @document.following_in_order(@document.data(node).parent, 0)
+        # An attribute's following axis starts at its element's first
+        # child, or else where the element's own following axis starts.
+        owner = @document.data(node).parent
+        first = @document.data(owner).first_child
+        return first if first >= 0
+        node = owner
       end
       walker = node
       while walker >= 0

@@ -479,7 +479,7 @@ module Mica::XML
       end
       bytes = name.to_slice
       each_attribute_index do |attribute|
-        return attribute if names.local_bytes(@document.data(attribute).name_id) == bytes
+        return attribute if @document.local_name_bytes(@document.data(attribute).name_id) == bytes
       end
       nil
     end

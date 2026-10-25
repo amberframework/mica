@@ -264,15 +264,18 @@ module Mica::XML
 
     # Returns the local part of the current element or attribute name (the
     # same as `name` for other nodes).
+    #
+    # Without namespace processing a name is one unit: `local_name` is the
+    # whole name and `prefix` is nil.
     def local_name : String
-      return name unless named_by_qname?
+      return name unless named_by_qname? && @options.namespace_aware?
       @names[@names.local_id(current_name_id)]
     end
 
     # Returns the namespace prefix of the current element or attribute, or
     # nil when it has none.
     def prefix : String?
-      return unless named_by_qname?
+      return unless named_by_qname? && @options.namespace_aware?
       prefix_id = @names.prefix_id(current_name_id)
       prefix_id == NameTable::EMPTY_ID ? nil : @names[prefix_id]
     end
@@ -402,16 +405,25 @@ module Mica::XML
     def read_inner_xml : String
       return "" unless @node_type.element?
       element = expand
-      String.build do |io|
+      markup = String.build do |io|
         element.children.each(&.to_xml(io, indent: 0))
       end
+      charge_serialized(markup)
     end
 
     # Returns the markup of the current element and its children. Consumes
     # the subtree like `expand`.
     def read_outer_xml : String
       return "" unless @node_type.element?
-      expand.to_xml(indent: 0)
+      charge_serialized(expand.to_xml(indent: 0))
+    end
+
+    # Charges writing *markup*, which is linear in the subtree `expand`
+    # just charged (escaping at most multiplies its bytes by six), and
+    # returns it.
+    private def charge_serialized(markup : String) : String
+      charge(markup.bytesize)
+      markup
     end
 
     # Returns the line of the current read position (1-based).

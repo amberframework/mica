@@ -265,6 +265,7 @@ module Mica::XML
     # Builds the subtree of the element the reader is on, then leaves the
     # reader on that element's end.
     def build_subtree_from(reader : Reader) : Nil
+      start_operations = reader.operations
       @namespace_aware = reader.options.namespace_aware?
       copy_prolog(reader)
       depth = reader.event_depth
@@ -286,6 +287,7 @@ module Mica::XML
       end
       reader.finish_expand(name_id, namespace_uri_id, depth)
       @expansion = nil
+      @parse_operations = reader.operations - start_operations
     end
 
     # An expansion in progress (`build_subtree_from`): the subtree's root
@@ -740,6 +742,14 @@ module Mica::XML
 
     # :nodoc:
     #
+    # Returns the local part of name *name_id* as bytes, without interning
+    # (the whole name without namespace processing).
+    def local_name_bytes(name_id : Int32) : Bytes
+      @namespace_aware ? @names.local_bytes(name_id) : @names[name_id].to_slice
+    end
+
+    # :nodoc:
+    #
     # Builds *element*'s attribute index (an edit is about to search it).
     def index_attributes(element : Int32) : Nil
       attribute_index(element)
@@ -928,7 +938,11 @@ module Mica::XML
     # Returns `NameTable#local_id` of *name_id*. Splitting a name interns
     # its parts; in a table shared with a reader (`Reader#expand`) that
     # work is the document's, so `own_name_work` keeps it off the reader.
+    #
+    # Without namespace processing a name is one unit: its local part is
+    # the whole name and it has no prefix.
     def split_local_id(name_id : Int32) : Int32
+      return name_id unless @namespace_aware
       return @names.local_id(name_id) if !@shared_names || @names.split?(name_id)
       own_name_work { @names.local_id(name_id) }
     end
@@ -937,6 +951,7 @@ module Mica::XML
     #
     # Returns `NameTable#prefix_id` of *name_id*, like `split_local_id`.
     def split_prefix_id(name_id : Int32) : Int32
+      return NameTable::EMPTY_ID unless @namespace_aware
       return @names.prefix_id(name_id) if !@shared_names || @names.split?(name_id)
       own_name_work { @names.prefix_id(name_id) }
     end
