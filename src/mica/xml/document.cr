@@ -658,12 +658,14 @@ module Mica::XML
     # :nodoc:
     #
     # Returns the first attribute of *element* (in list order) whose local
-    # name is *local_id*, or nil.
-    def attribute_with_local_name(element : Int32, local_id : Int32) : Int32?
+    # name is *local_id*, or nil. Each stale candidate is stepped past once;
+    # an edit (*for_edit*) charges the steps to the edit meter, while a
+    # plain read stays unmetered.
+    def attribute_with_local_name(element : Int32, local_id : Int32, for_edit : Bool) : Int32?
       candidates = attribute_index(element).by_local_name[local_id]? || return
       list = candidates.list
       while candidates.head < list.size
-        charge_edit(1)
+        charge_edit(1) if for_edit
         first = list[candidates.head]
         record = data(first)
         return first if record.parent == element && record.kind.attribute_node? && split_local_id(record.name_id) == local_id

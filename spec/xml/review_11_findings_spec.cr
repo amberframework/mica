@@ -42,3 +42,15 @@ describe "Codex review 11 findings" do
     (replayed.operations - plain.operations).should be >= 2 * 1_024
   end
 end
+
+# Regression specs for the twelfth Codex code review of 2026-10-24.
+describe "Codex review 12 findings" do
+  it "1: reads an indexed attribute by local name without charging the edit meter" do
+    document = Mica::XML.parse("<p:r p:a='1'/>", UNAWARE)
+    root = root_of(document)
+    root.delete("missing").should be_nil
+    document.edit_budget = Mica::Core::WorkBudget.new(operations_per_unit: 0, base_operations: 0, max_operations: 0)
+    root["a"]?.should eq("1")
+    root["p:a"]?.should eq("1")
+  end
+end

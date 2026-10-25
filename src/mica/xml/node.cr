@@ -470,7 +470,7 @@ module Mica::XML
         return if id < 0
         exact = @document.attribute_named(@index, id)
         return exact if exact && @document.kind(exact).attribute_node?
-        return @document.attribute_with_local_name(@index, id)
+        return @document.attribute_with_local_name(@index, id, for_edit)
       end
       if id >= 0
         each_attribute_index do |attribute|
