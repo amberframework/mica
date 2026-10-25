@@ -367,7 +367,8 @@ module Mica::XML
       else
         prefix = names[prefix_id]
         raise Error.new("The prefix #{Core.quote(prefix)} cannot be declared") if prefix == "xml" || prefix == "xmlns"
-        raise Error.new("A namespace prefix cannot be bound to an empty URI") if uri.empty?
+        # Namespaces 1.1 lets an XML 1.1 document undeclare a prefix.
+        raise Error.new("A namespace prefix cannot be bound to an empty URI") if uri.empty? && !xml11_document?
         raise Error.new("A prefix cannot be bound to #{Core.quote(uri)}") if reserved.includes?(uri)
       end
       # Restating the binding already in scope renames nothing.

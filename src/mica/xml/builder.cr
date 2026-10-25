@@ -470,7 +470,8 @@ module Mica::XML
           return
         end
         raise BuilderError.new("The xmlns prefix cannot be declared") if prefix == "xmlns"
-        raise BuilderError.new("A namespace prefix cannot be bound to an empty URI") if uri.empty?
+        # Namespaces 1.1 lets an XML 1.1 document undeclare a prefix.
+        raise BuilderError.new("A namespace prefix cannot be bound to an empty URI") if uri.empty? && !@xml11
       end
       raise BuilderError.new("Namespace #{Core.quote(uri)} cannot be declared") if reserved.includes?(uri)
       @bindings << prefix
@@ -478,10 +479,12 @@ module Mica::XML
     end
 
     # Returns the URI bound to *prefix* (nil prefix: the default
-    # namespace), or nil when unbound.
+    # namespace), or nil when unbound (an XML 1.1 `xmlns:p=""` undeclares
+    # a prefix).
     private def bound_uri(prefix : String?) : String?
       return Reader::XML_NAMESPACE if prefix == "xml"
-      @uris_by_prefix[prefix]?.try(&.last?)
+      uri = @uris_by_prefix[prefix]?.try(&.last?)
+      prefix && uri && uri.empty? ? nil : uri
     end
 
     # Checks the finished start tag: every prefix is bound and no two

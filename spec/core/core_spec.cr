@@ -70,6 +70,10 @@ class ToyRecordReader
   private def discarding_input(keep : Int32) : Nil
   end
 
+  private def moving_input(count : Int32) : Nil
+    @meter.enforce { here } if @meter.charge(count)
+  end
+
   # New bytes raise the allowance; a read is where the reader may have
   # waited, so the deadline is checked here.
   private def input_received(count : Int32) : Nil

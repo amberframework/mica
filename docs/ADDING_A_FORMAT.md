@@ -53,6 +53,7 @@ The format implements five private hooks:
 | `input_token_limit : Int32` | largest token the buffer must hold |
 | `input_size_limit : Int64?` | cap on total input bytes, or nil |
 | `input_limit_error(message) : NoReturn` | raise the format's positioned `Mica::LimitExceededError` |
+| `moving_input(count)` | charge the bytes compaction or buffer growth is about to copy |
 | `input_size_exceeded(message, excess_index) : NoReturn` | raise the input-size `Mica::LimitExceededError` at buffer index *excess_index*, the first byte past `input_size_limit` |
 | `discarding_input(keep : Int32)` | called before `@buffer[0, keep]` is dropped (fold line or column state) |
 | `input_received(count : Int32)` | called as bytes arrive; call `meter.add_units(count)` here |

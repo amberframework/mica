@@ -925,6 +925,8 @@ module Mica::XML
           if declaration = attribute_index(current).by_declared_prefix[prefix_id]?
             uri = value_bytes(declaration)
             charge_edit(uri.size)
+            # An XML 1.1 `xmlns:p=""` undeclares p.
+            return -1 if uri.empty? && prefix_id != NameTable::EMPTY_ID
             return @names.intern(uri)
           end
         end

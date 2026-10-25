@@ -116,7 +116,7 @@ module Mica::XML
     #
     # Charges *count* operations of compiling *source* to *meter* and raises
     # when it runs out; *offset* is the byte where compilation is.
-    def self.charge_compile(meter : Core::WorkMeter?, count : Int32, source : String, offset : Int32) : Nil
+    def self.charge_compile(meter : Core::WorkMeter?, count : Int, source : String, offset : Int32) : Nil
       return unless meter
       return unless meter.charge(count)
       meter.enforce("compiling XPath #{quote(source)}") { expression_position(source, offset) }

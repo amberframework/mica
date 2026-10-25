@@ -628,6 +628,12 @@ module Mica::XML
     # walk is charged first). A CR whose line end was still being completed
     # when the refill came (its LF may be among the new bytes) is walked
     # again from the CR, so CR LF counts as one line end.
+    # Compaction and growth copy each byte a bounded number of times; the
+    # copy is charged before it happens.
+    private def moving_input(count : Int32) : Nil
+      charge(count)
+    end
+
     private def input_size_exceeded(message : String, excess_index : Int32) : NoReturn
       charge_scanned_before_error
       charge(excess_index - @pos)

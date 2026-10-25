@@ -96,6 +96,12 @@ module Mica::XML::XPath
       end
     end
 
+    # Charges copying (or otherwise passing over) *bytes* bytes before it
+    # happens.
+    private def charge_copy(bytes : Int64) : Nil
+      XPath.charge_compile(@meter, bytes, @source, @token_start)
+    end
+
     private def charge_steps(extra : Int32) : Nil
       XPath.charge_compile(@meter, @steps - @charged_steps + extra, @source, @token_start)
       @charged_steps = @steps
@@ -207,10 +213,10 @@ module Mica::XML::XPath
       while @reader.has_next? && (current.ascii_number? || current == '.')
         advance
       end
-      text = @source.byte_slice(start, @reader.pos - start)
       # Copying, checking and converting the digits each pass over them:
       # charged before they run.
-      charge_steps(4 * text.bytesize)
+      charge_copy(4_i64 * (@reader.pos - start))
+      text = @source.byte_slice(start, @reader.pos - start)
       raise XPathError.new("Malformed number #{XPath.quote(text)}") if text.count('.') > 1
       Token.new(TokenKind::Number, text, XPath.string_to_number(text))
     end
@@ -222,6 +228,7 @@ module Mica::XML::XPath
         advance
       end
       raise XPathError.new("Unterminated string literal in #{XPath.quote(@source)}") unless @reader.has_next?
+      charge_copy(@reader.pos - start)
       text = @source.byte_slice(start, @reader.pos - start)
       advance
       Token.new(TokenKind::Literal, text)
@@ -241,6 +248,7 @@ module Mica::XML::XPath
       while @reader.has_next? && ncname_char?(current)
         advance
       end
+      charge_copy(@reader.pos - start)
       @source.byte_slice(start, @reader.pos - start)
     end
 
@@ -248,7 +256,9 @@ module Mica::XML::XPath
       first = lex_ncname
       if @reader.has_next? && current == ':' && peek != ':'
         advance
-        "#{first}:#{lex_ncname}"
+        local = lex_ncname
+        charge_copy(first.bytesize.to_i64 + local.bytesize + 1)
+        "#{first}:#{local}"
       else
         first
       end

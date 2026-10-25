@@ -56,6 +56,7 @@ class Mica::XML::Reader
         end
         size = @pos - @pin
         check_token_size(size)
+        charge(size)
         @dtd.internal_subset = String.new(@buffer[@pin, size])
         @pin = -1
         @pos += 1
@@ -361,6 +362,7 @@ class Mica::XML::Reader
     saved_scratch = @scratch_size
     start, size, in_scratch = scan_attribute_value(quote.to_u8)
     raw = in_scratch ? @scratch[start, size] : @buffer[@mark + start, size]
+    charge(raw.size) if type.cdata?
     value = type.cdata? ? raw.dup : collapse_spaces(raw)
     @scratch_size = saved_scratch
     {kind, value}

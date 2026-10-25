@@ -97,6 +97,8 @@ class Mica::XML::Reader
       check_token_size(scanned)
       scan_checkpoint if scanned % SCAN_CHUNK == 0
     end
+    # The copy is charged before it happens.
+    charge(@pos - @mark - start)
     value = String.new(@buffer[@mark + start, @pos - @mark - start])
     @pos += 1
     value
