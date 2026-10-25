@@ -103,7 +103,7 @@ class Mica::XML::Reader
   private def leave_entity : Nil
     if open_element = @open_elements.last?
       if open_element.entity_level == @frames.size
-        syntax_error("Entity '#{entity_name}' ends inside element '#{@names[open_element.name_id]}'")
+        syntax_error("Entity '#{entity_name}' ends inside element '#{Core.excerpt(@names[open_element.name_id])}'")
       end
     end
     pop_entity
@@ -166,7 +166,7 @@ class Mica::XML::Reader
         @empty_element = true
         break
       elsif byte < 0
-        syntax_error("Unexpected end of input in start tag '#{@names[name_id]}'")
+        syntax_error("Unexpected end of input in start tag '#{Core.excerpt(@names[name_id])}'")
       end
       syntax_error("Expected white space between attributes") unless had_space
       parse_attribute(name_id)
@@ -201,12 +201,12 @@ class Mica::XML::Reader
     attr_id = scan_name_id
     skip_spaces
     # The message is built only on failure (this runs once per attribute).
-    syntax_error("Expected '=' after attribute name '#{@names[attr_id]}'") unless peek_byte == '='.ord
+    syntax_error("Expected '=' after attribute name '#{Core.excerpt(@names[attr_id])}'") unless peek_byte == '='.ord
     @pos += 1
     skip_spaces
     quote = peek_byte
     unless quote == '"'.ord || quote == '\''.ord
-      syntax_error("Expected a quoted value for attribute '#{@names[attr_id]}'")
+      syntax_error("Expected a quoted value for attribute '#{Core.excerpt(@names[attr_id])}'")
     end
     start, size, in_scratch = scan_attribute_value(quote.to_u8)
     check_duplicate_attribute(attr_id)
@@ -215,7 +215,7 @@ class Mica::XML::Reader
 
   private def check_duplicate_attribute(attr_id : Int32) : Nil
     if find_attribute_slot(attr_id)
-      syntax_error("Attribute '#{@names[attr_id]}' appears twice")
+      syntax_error("Attribute '#{Core.excerpt(@names[attr_id])}' appears twice")
     end
   end
 
@@ -409,7 +409,7 @@ class Mica::XML::Reader
       syntax_error("End tag '#{Core.excerpt(@buffer[@mark + start, size])}' does not match start tag '#{Core.excerpt(@names[open_id])}'")
     end
     if open_element.entity_level != @frames.size
-      syntax_error("End tag '#{@names[open_id]}' and its start tag are in different entities")
+      syntax_error("End tag '#{Core.excerpt(@names[open_id])}' and its start tag are in different entities")
     end
     @open_elements.pop
     @namespace_uri_id = open_element.namespace_uri_id

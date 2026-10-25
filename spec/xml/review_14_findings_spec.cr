@@ -36,3 +36,17 @@ describe "Codex review 14 findings" do
     (error.message || "").bytesize.should be < 600
   end
 end
+
+describe "Short excerpts in parse errors" do
+  it "quotes at most an excerpt of a long name or declaration value" do
+    name = "n" * 40_000
+    {
+      "<?xml version='1.#{"0" * 100_000}x'?><r/>",
+      "<?xml version='1.0' encoding='#{"e" * 100_000}!'?><r/>",
+      "<r><#{name}></r>",
+    }.each do |xml|
+      error = expect_raises(Mica::ParseError) { Mica::XML.parse(xml) }
+      (error.message || "").bytesize.should be < 800
+    end
+  end
+end

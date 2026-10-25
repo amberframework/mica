@@ -12,7 +12,7 @@ class Mica::XML::Reader
       slot = @attrs[index]
       attr_id = slot.name_id
       unless @names.qname?(attr_id)
-        syntax_error("Attribute name '#{@names[attr_id]}' is not a valid QName")
+        syntax_error("Attribute name '#{Core.excerpt(@names[attr_id])}' is not a valid QName")
       end
       if attr_id == @xmlns_id
         bind_default_namespace(slot)
@@ -25,11 +25,11 @@ class Mica::XML::Reader
     end
 
     unless @names.qname?(element_id)
-      syntax_error("Element name '#{@names[element_id]}' is not a valid QName")
+      syntax_error("Element name '#{Core.excerpt(@names[element_id])}' is not a valid QName")
     end
     element_prefix = @names.prefix_id(element_id)
     if element_prefix == @xmlns_id
-      syntax_error("Element name '#{@names[element_id]}' must not use the xmlns prefix")
+      syntax_error("Element name '#{Core.excerpt(@names[element_id])}' must not use the xmlns prefix")
     end
     @namespace_uri_id = resolve_prefix(element_prefix, element_id)
 
@@ -53,7 +53,7 @@ class Mica::XML::Reader
   private def bind_default_namespace(slot : AttributeSlot) : Nil
     uri_id = @names.intern(attribute_value_bytes(slot))
     if uri_id == @xml_namespace_id || uri_id == @xmlns_namespace_id
-      syntax_error("The default namespace cannot be '#{@names[uri_id]}'")
+      syntax_error("The default namespace cannot be '#{Core.excerpt(@names[uri_id])}'")
     end
     push_binding(NameTable::EMPTY_ID, uri_id)
   end
@@ -71,10 +71,10 @@ class Mica::XML::Reader
       syntax_error("The xmlns prefix must not be declared")
     end
     if uri_id == NameTable::EMPTY_ID && !@xml11
-      syntax_error("Namespace prefix '#{@names[prefix_id]}' cannot be bound to an empty URI")
+      syntax_error("Namespace prefix '#{Core.excerpt(@names[prefix_id])}' cannot be bound to an empty URI")
     end
     if uri_id == @xml_namespace_id || uri_id == @xmlns_namespace_id
-      syntax_error("Prefix '#{@names[prefix_id]}' cannot be bound to the reserved namespace '#{@names[uri_id]}'")
+      syntax_error("Prefix '#{Core.excerpt(@names[prefix_id])}' cannot be bound to the reserved namespace '#{Core.excerpt(@names[uri_id])}'")
     end
     # In XML 1.1 documents (Namespaces 1.1), `xmlns:p=""` undeclares p.
     push_binding(prefix_id, uri_id)
@@ -102,7 +102,7 @@ class Mica::XML::Reader
     binding = prefix_id < @innermost_binding.size ? @innermost_binding[prefix_id] : -1
     uri_id = binding >= 0 ? @binding_uris[binding] : NameTable::EMPTY_ID
     return uri_id if uri_id != NameTable::EMPTY_ID || prefix_id == NameTable::EMPTY_ID
-    syntax_error("Namespace prefix '#{@names[prefix_id]}' of '#{@names[name_id]}' is not bound")
+    syntax_error("Namespace prefix '#{Core.excerpt(@names[prefix_id])}' of '#{Core.excerpt(@names[name_id])}' is not bound")
   end
 
   # Two prefixed attributes must not share a namespace URI and local name.
@@ -113,7 +113,7 @@ class Mica::XML::Reader
       uri_id = slot.namespace_uri_id
       next if uri_id == NameTable::EMPTY_ID || uri_id == @xmlns_namespace_id
       unless seen.add?({uri_id, @names.local_id(slot.name_id)})
-        syntax_error("Attribute '#{@names[slot.name_id]}' duplicates the expanded name of another attribute")
+        syntax_error("Attribute '#{Core.excerpt(@names[slot.name_id])}' duplicates the expanded name of another attribute")
       end
     end
   end

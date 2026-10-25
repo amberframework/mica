@@ -28,10 +28,10 @@ class Mica::XML::Reader
         @pending_skipped_entity_id = name_id
         return REFERENCE_SKIPPED
       end
-      syntax_error("Entity '#{@names[name_id]}' is not declared")
+      syntax_error("Entity '#{Core.excerpt(@names[name_id])}' is not declared")
     end
     if entity.unparsed?
-      syntax_error("Unparsed entity '#{@names[name_id]}' cannot be referenced in content")
+      syntax_error("Unparsed entity '#{Core.excerpt(@names[name_id])}' cannot be referenced in content")
     end
     replacement = entity.replacement
     unless replacement
@@ -134,14 +134,14 @@ class Mica::XML::Reader
     entity = @dtd.general_entities[name_id]?
     unless entity
       return if undeclared_entity_allowed?
-      syntax_error("Entity '#{@names[name_id]}' is not declared")
+      syntax_error("Entity '#{Core.excerpt(@names[name_id])}' is not declared")
     end
     if entity.unparsed?
-      syntax_error("Unparsed entity '#{@names[name_id]}' cannot be referenced in an attribute value")
+      syntax_error("Unparsed entity '#{Core.excerpt(@names[name_id])}' cannot be referenced in an attribute value")
     end
     replacement = entity.replacement
     unless replacement
-      syntax_error("External entity '#{@names[name_id]}' cannot be referenced in an attribute value")
+      syntax_error("External entity '#{Core.excerpt(@names[name_id])}' cannot be referenced in an attribute value")
     end
     expand_attribute_entity(entity, replacement)
   end
@@ -150,7 +150,7 @@ class Mica::XML::Reader
   # normalization, expanding nested references.
   private def expand_attribute_entity(entity : DTD::Entity, text : Bytes) : Nil
     if @attribute_entity_stack.includes?(entity)
-      syntax_error("Recursive reference to entity '#{@names[entity.name_id]}'")
+      syntax_error("Recursive reference to entity '#{Core.excerpt(@names[entity.name_id])}'")
     end
     if @attribute_entity_stack.size >= @options.max_entity_depth
       limit_error("Entity references nested deeper than max_entity_depth (#{@options.max_entity_depth})")
@@ -164,7 +164,7 @@ class Mica::XML::Reader
       byte = text[index]
       case byte
       when '<'.ord
-        syntax_error("Entity '#{@names[entity.name_id]}' puts '<' into an attribute value")
+        syntax_error("Entity '#{Core.excerpt(@names[entity.name_id])}' puts '<' into an attribute value")
       when '&'.ord
         index = expand_reference_in_text(text, index)
         next

@@ -23,7 +23,7 @@ class Mica::XML::Reader
     expect_literal("version", "in the XML declaration")
     @xml_version = parse_declaration_value("version")
     unless version_number?(@xml_version)
-      syntax_error("Unsupported XML version '#{@xml_version}'")
+      syntax_error("Unsupported XML version '#{Core.excerpt(@xml_version)}'")
     end
     had_space = skip_spaces
     declared_encoding = nil
@@ -31,7 +31,7 @@ class Mica::XML::Reader
       syntax_error("Expected white space before 'encoding'") unless had_space
       @pos += 8
       declared = parse_declaration_value("encoding")
-      syntax_error("Invalid encoding name '#{declared}'") unless encoding_name?(declared)
+      syntax_error("Invalid encoding name '#{Core.excerpt(declared)}'") unless encoding_name?(declared)
       declared_encoding = declared
       had_space = skip_spaces
     end
@@ -107,27 +107,27 @@ class Mica::XML::Reader
     signature = @signature
     case encoding
     when .nil?
-      encoding_error("Unsupported encoding '#{declared}'; Mica::XML decodes UTF-8, UTF-16, ISO-8859-1 and US-ASCII")
+      encoding_error("Unsupported encoding '#{Core.excerpt(declared)}'; Mica::XML decodes UTF-8, UTF-16, ISO-8859-1 and US-ASCII")
     when .utf8?
-      encoding_error("Document declares #{declared} but is encoded in UTF-16") if signature.utf16?
+      encoding_error("Document declares #{Core.excerpt(declared)} but is encoded in UTF-16") if signature.utf16?
       @encoding = "UTF-8"
     when .utf16?
-      encoding_error("Document declares #{declared} but has no UTF-16 byte order mark") unless signature.utf16?
+      encoding_error("Document declares #{Core.excerpt(declared)} but has no UTF-16 byte order mark") unless signature.utf16?
       if declared_byte_order_conflicts?(declared, signature)
-        encoding_error("Document declares #{declared} but its byte order mark says otherwise")
+        encoding_error("Document declares #{Core.excerpt(declared)} but its byte order mark says otherwise")
       end
       @encoding = "UTF-16"
     when .usascii?
-      encoding_error("Document declares #{declared} but is encoded in UTF-16") if signature.utf16?
+      encoding_error("Document declares #{Core.excerpt(declared)} but is encoded in UTF-16") if signature.utf16?
       @ascii_only = true
       @encoding = "US-ASCII"
     when .iso8859_1?
-      encoding_error("Document declares #{declared} but is encoded in UTF-16") if signature.utf16?
-      encoding_error("Document declares #{declared} but begins with a UTF-8 byte order mark") if signature.utf8? && @source_prefix_bytes > 0
+      encoding_error("Document declares #{Core.excerpt(declared)} but is encoded in UTF-16") if signature.utf16?
+      encoding_error("Document declares #{Core.excerpt(declared)} but begins with a UTF-8 byte order mark") if signature.utf8? && @source_prefix_bytes > 0
       @encoding = "ISO-8859-1"
       switch_to_transcoder(Core::Encoding::ISO8859_1)
     else
-      encoding_error("Unsupported encoding '#{declared}'; Mica::XML decodes UTF-8, UTF-16, ISO-8859-1 and US-ASCII")
+      encoding_error("Unsupported encoding '#{Core.excerpt(declared)}'; Mica::XML decodes UTF-8, UTF-16, ISO-8859-1 and US-ASCII")
     end
   end
 
@@ -183,7 +183,7 @@ class Mica::XML::Reader
   private def finish_document : Nil
     if @phase.content?
       if open_element = @open_elements.last?
-        syntax_error("Unexpected end of document: element '#{@names[open_element.name_id]}' is not closed")
+        syntax_error("Unexpected end of document: element '#{Core.excerpt(@names[open_element.name_id])}' is not closed")
       end
     end
     syntax_error("Document has no root element") unless @root_seen

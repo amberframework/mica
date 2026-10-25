@@ -83,7 +83,7 @@ class Mica::XML::Reader
     @token_precharged = 0
     @token_operations = 0_i64
     if @current_entity == entity || @frames.any? { |frame| frame.entity == entity }
-      syntax_error("Recursive reference to entity '#{@names[entity.name_id]}'")
+      syntax_error("Recursive reference to entity '#{Core.excerpt(@names[entity.name_id])}'")
     end
     charge_expansion(replacement.size)
     # The outer token ends at the reference (its bytes were just charged),

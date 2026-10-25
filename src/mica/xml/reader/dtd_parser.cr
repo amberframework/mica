@@ -10,7 +10,7 @@ class Mica::XML::Reader
     require_spaces("after '<!DOCTYPE'")
     root_id = scan_declared_name_id
     if @options.namespace_aware? && !@names.qname?(root_id)
-      syntax_error("DOCTYPE name '#{@names[root_id]}' is not a valid QName")
+      syntax_error("DOCTYPE name '#{Core.excerpt(@names[root_id])}' is not a valid QName")
     end
     @dtd.root_name = @names[root_id]
     had_space = skip_spaces
@@ -105,7 +105,7 @@ class Mica::XML::Reader
     @parameter_entity_referenced = true
     entity = @dtd.parameter_entities[name_id]?
     unless entity
-      syntax_error("Parameter entity '%#{@names[name_id]};' is not declared") if @standalone
+      syntax_error("Parameter entity '%#{Core.excerpt(@names[name_id])};' is not declared") if @standalone
       @dtd.skipped_parameter_entity = true
       return
     end
@@ -128,7 +128,7 @@ class Mica::XML::Reader
     end
     name_id = scan_declared_name_id
     if @options.namespace_aware? && !@names.ncname?(name_id)
-      syntax_error("Entity name '#{@names[name_id]}' must not contain a colon")
+      syntax_error("Entity name '#{Core.excerpt(@names[name_id])}' must not contain a colon")
     end
     require_spaces("after the entity name")
     quote = peek_byte
@@ -478,7 +478,7 @@ class Mica::XML::Reader
     require_spaces("after '<!NOTATION'")
     name_id = scan_declared_name_id
     if @options.namespace_aware? && !@names.ncname?(name_id)
-      syntax_error("Notation name '#{@names[name_id]}' must not contain a colon")
+      syntax_error("Notation name '#{Core.excerpt(@names[name_id])}' must not contain a colon")
     end
     require_spaces("after the notation name")
     public_id, system_id = parse_external_id(require_system: false)
