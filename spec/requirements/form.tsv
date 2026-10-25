@@ -1,0 +1,45 @@
+# Requirements for Mica::Form: the WHATWG URL Standard's
+# application/x-www-form-urlencoded parser (section 5.1) and serializer
+# (section 5.2), the web-platform-tests vectors for them, Mica's bracket and
+# dot key grammar for Mica::Form::NestedKeys (no standard defines it; the
+# grammar is documented on the class), and Mica's form hardening.
+# Format: id<TAB>section<TAB>summary.
+WHATWG-URL-5.1-split	WHATWG URL 5.1 step 1	Input is split on 0x26 (&) into sequences
+WHATWG-URL-5.1-skip-empty	WHATWG URL 5.1 step 3.1	Empty sequences produce no pair
+WHATWG-URL-5.1-first-equals	WHATWG URL 5.1 steps 3.2-3.3	A sequence splits at its first 0x3D (=); without one the whole sequence is the name and the value is empty
+WHATWG-URL-5.1-plus	WHATWG URL 5.1 step 3.4	0x2B (+) in the name and value becomes 0x20 (space)
+WHATWG-URL-5.1-percent-decode	WHATWG URL 5.1 step 3.5 and 1.3 percent-decode	%XX with two hex digits decodes to its byte; any other % stays as it is
+WHATWG-URL-5.1-utf8	WHATWG URL 5.1 step 3.5 UTF-8 decode without BOM	Decoded bytes are UTF-8 and a leading BOM is kept; Mica rejects invalid UTF-8 with EncodingError instead of substituting U+FFFD
+WHATWG-URL-5.1-order	WHATWG URL 5.1 step 4	Pairs keep input order and repeated names
+WHATWG-URL-5.2-serialize	WHATWG URL 5.2	The serializer percent-encodes with the urlencoded set, writes space as +, and joins pairs with = and &
+WPT-URL-urlencoded-parser	wpt url/urlencoded-parser.any.js @ b0099c74	Every web-platform-tests urlencoded parser vector passes, or is rejected by the strict UTF-8 policy at the predicted byte
+WPT-URL-urlsearchparams-stringifier	wpt url/urlsearchparams-stringifier.any.js @ 9353d550	The web-platform-tests stringifier expectations hold for the serializer
+FORM-KEY-PLAIN	Mica::Form::NestedKeys grammar	A key without [ (and without . under dot notation) is one hash key
+FORM-KEY-DOT	Mica::Form::NestedKeys grammar	Under dot notation a key without [ splits at dots into hash keys; with dot notation off it stays one key
+FORM-KEY-DOT-EMPTY	Mica::Form::NestedKeys grammar	An empty part between dots raises KeySyntaxError
+FORM-KEY-HEAD	Mica::Form::NestedKeys grammar	The head is the bytes before the first [ and must not be empty
+FORM-KEY-SEGMENTS	Mica::Form::NestedKeys grammar	After the head only complete [..] segments may follow; anything else raises KeySyntaxError
+FORM-KEY-INDEX	Mica::Form::NestedKeys grammar	A canonical decimal segment is an array index; any other segment is a hash key
+FORM-KEY-APPEND-LAST	Mica::Form::NestedKeys grammar	[] as the last segment appends the value
+FORM-KEY-APPEND-HASH	Mica::Form::NestedKeys grammar	[] before a hash key continues the last hash unless it already holds the rest of the key (Rack rule)
+FORM-KEY-APPEND-ARRAY	Mica::Form::NestedKeys grammar	[] before an index or another [] starts a new array
+FORM-KEY-SPARSE	Mica::Form::NestedKeys grammar	Sparse indices are stored sparsely and the result is dense with nil slots
+FORM-KEY-CONFLICT	Mica::Form::NestedKeys grammar	A key needing a different kind of value than the one already at its path raises KeyConflictError
+FORM-KEY-DUPLICATE	Mica::Form::NestedKeys grammar	A repeated string path keeps the last value, or raises KeyConflictError under DuplicateLeaves::Reject
+FORM-KEY-ORDER	Mica::Form::NestedKeys grammar	Hash keys keep first-seen order
+FORM-KEY-AMBER-FIXTURES	Amber V2 schema parser specs	Amber's nested parameter fixtures give the same structure (strings, before type coercion)
+FORM-KEY-ERROR-POSITION	Mica contract G6	Key errors carry the byte offset of the offending pair in the original input
+MICA-FORM-REQUIRED-LIMITS	Mica contract 0.1	Every form entry point takes a required limits argument; unbounded limits need a non-blank reason
+MICA-FORM-LIMIT-INPUT	Mica contract G4	Input longer than max_input_bytes raises LimitExceededError at byte max_input_bytes, from bytes and from streams
+MICA-FORM-LIMIT-PAIRS	Mica contract G4	More than max_pairs pairs raises LimitExceededError at the first extra pair
+MICA-FORM-LIMIT-KEY-DEPTH	Mica contract G4	A key with more than max_key_depth segments raises LimitExceededError
+MICA-FORM-LIMIT-ARRAY-INDEX	Mica contract G4	An array index or append above max_array_index raises LimitExceededError without allocating
+MICA-FORM-LIMIT-ARRAY-SLOTS	Mica contract G4	Array slots in the whole result are capped by max_array_slots
+MICA-FORM-BUDGET	Mica contract G4	The work budget stops a parse with WorkBudgetExceededError
+MICA-FORM-DEADLINE	Mica contract G5	An expired deadline stops a parse with DeadlineExceededError
+MICA-FORM-ENCODING-POSITION	Mica contract G6	Invalid UTF-8 raises EncodingError at the input byte where the invalid sequence starts, for every hostile byte class
+MICA-FORM-STREAM-EQUIVALENCE	Mica contract G6	A String, Bytes and a trickling IO give identical pairs and identical errors
+MICA-LINEAR-FORM-PAIRS	Mica contract G3	Pair parsing is linear: many separators, long percent runs, many plus signs
+MICA-LINEAR-FORM-KEYS	Mica contract G3	Key mapping is linear: huge indices are O(1), deep keys are bounded, many keys and append chains stay linear
+MICA-FORM-FUZZ	Mica contract G6, G10	Seeded hostile fuzzing finds no crash, overrun, nondeterminism or stream disagreement
+MICA-FORM-DIFFERENTIAL	Mica contract G10	Pairs agree with stdlib URI::Params wherever both accept valid UTF-8 input
