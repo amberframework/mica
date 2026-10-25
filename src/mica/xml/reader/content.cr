@@ -201,9 +201,10 @@ class Mica::XML::Reader
     if @attrs.size >= @options.max_attributes
       limit_error("Element has more than max_attributes (#{@options.max_attributes}) attributes")
     end
-    name_start = @pos
+    # Relative to the mark, which a buffer refill keeps in step.
+    name_offset = @pos - @mark
     attr_id = scan_name_id
-    check_duplicate_attribute(attr_id, name_start)
+    check_duplicate_attribute(attr_id, name_offset)
     skip_spaces
     # The message is built only on failure (this runs once per attribute).
     syntax_error("Expected '=' after attribute name '#{Core.excerpt(@names[attr_id])}'") unless peek_byte == '='.ord
@@ -217,11 +218,12 @@ class Mica::XML::Reader
     @attrs << AttributeSlot.new(attr_id, start, size, in_scratch, NameTable::EMPTY_ID, true)
   end
 
-  # Raises at the repeated name's first byte, *name_start* (a name has no
-  # line break, so the position stays on the current line).
-  private def check_duplicate_attribute(attr_id : Int32, name_start : Int32) : Nil
+  # Raises at the repeated name's first byte, *name_offset* bytes after
+  # the mark (a name has no line break, so the position stays on the
+  # current line).
+  private def check_duplicate_attribute(attr_id : Int32, name_offset : Int32) : Nil
     return unless find_attribute_slot(attr_id)
-    syntax_error_at(name_start, "Attribute '#{Core.excerpt(@names[attr_id])}' appears twice")
+    syntax_error_at(@mark + name_offset, "Attribute '#{Core.excerpt(@names[attr_id])}' appears twice")
   end
 
   # Elements with more attributes than this are indexed by a hash so that

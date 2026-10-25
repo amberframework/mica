@@ -131,9 +131,15 @@ Every operation runs under a `WorkMeter`:
    steps are charged right after they run rather than before: comparing
    same-hash candidates in a name-table lookup (at most `MAX_RUN` + 1 of
    them, and only on a full 32-bit hash match under a per-table random
-   seed), the geometric growth of a string builder (its copies total less
-   than the bytes appended, which are charged), and escaping at most
-   4 KiB before a metered write. Work that follows a completed operation
+   seed), the geometric growth of a string builder, array or hash (its
+   copies and rehashes total less than the entries added, which are
+   charged), and escaping at most 4 KiB before a metered write. A lookup
+   or insert in a Crystal `Hash` or `Set` counts as one operation:
+   `Crystal::Hasher` seeds string and integer hashing from a secure random
+   source once per process, Mica never exposes a hash value, so probe
+   runs stay short in expectation, as for the name table. Formatting an
+   error message reads at most a fixed window of input (an excerpt of 120
+   characters, at most 480 bytes) and is not charged. Work that follows a completed operation
    (settling an edit's name-table work) is recorded without raising; the
    next charge trips. Three kinds of work ride on a charge already made,
    because each is at most a small constant multiple of it: writing the

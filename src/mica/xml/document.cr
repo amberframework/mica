@@ -833,6 +833,10 @@ module Mica::XML
       end
       last = list.last?
       return work if last.nil? || index.order[last] < position
+      # The search below is charged before it runs; insert_in_order's own
+      # count of it is part of the returned work.
+      search = 65 - live.leading_zeros_count
+      charge_edit(search)
       work += Math.log2(live + 1).ceil.to_i + 1
       at = (head...list.size).bsearch { |slot| index.order[list[slot]] >= position } || list.size
       return work if list[at]? == attribute

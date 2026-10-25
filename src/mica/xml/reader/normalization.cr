@@ -138,6 +138,8 @@ class Mica::XML::Reader
   private def attribute_name_offset(ordinal : Int32) : Int32?
     index = @mark + 1 + @names[@name_id].bytesize
     stop = Math.min(@pos, @limit)
+    # The replay passes over the tag's bytes: charged first.
+    charge(stop - index) if stop > index
     count = 0
     while index < stop
       byte = @buffer[index]

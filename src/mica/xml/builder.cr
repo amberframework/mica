@@ -380,6 +380,11 @@ module Mica::XML
     end
 
     # Writes a DOCTYPE declaration with an optional raw internal *subset*.
+    #
+    # The subset is parsed first under the default work budget. Raises
+    # `BuilderError` when it is malformed, and `Mica::LimitExceededError`
+    # (including `Mica::WorkBudgetExceededError`) when checking it exceeds a
+    # limit.
     def dtd(name : String, pubid : String?, sysid : String?, subset : String? = nil) : Nil
       check_internal_subset(name, subset) if subset
       start_dtd(name, pubid, sysid)
@@ -565,6 +570,9 @@ module Mica::XML
     # output.
     private def check_internal_subset(name : String, subset : String) : Nil
       Mica::XML.parse("<!DOCTYPE #{name} [#{subset}]><#{name}/>", ParserOptions.new(namespace_aware: false))
+    rescue error : LimitExceededError
+      # A budget, deadline or size limit keeps its own type and position.
+      raise error
     rescue error : ParseError
       raise BuilderError.new("Invalid internal DTD subset: #{error.message}")
     end
