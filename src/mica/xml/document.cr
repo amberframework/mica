@@ -189,11 +189,15 @@ module Mica::XML
     # Charges the name-table work an edit did (lookups and interning) to
     # the edit meter, marking the interning work paid so a reader sharing
     # the table never charges it to its parse.
+    #
+    # It runs after the edit, so it records the work without raising: an
+    # edit that completed is never reported as failed, and the next edit's
+    # charge at entry trips if the budget ran out.
     private def settle_name_work(unpaid_before : Int64, lookups_before : Int64) : Nil
       work = @names.unpaid_operations - unpaid_before
       @names.mark_paid(work) if work > 0
       work += @names.lookup_operations - lookups_before
-      charge_edit(work) if work > 0
+      edit_meter.charge(work) if work > 0
     end
 
     private def edit_rebuild_hook : Proc(Int64, Nil)
@@ -924,7 +928,8 @@ module Mica::XML
         if kind(current).element_node?
           if declaration = attribute_index(current).by_declared_prefix[prefix_id]?
             uri = value_bytes(declaration)
-            charge_edit(uri.size)
+            # Interning hashes and compares the URI: both passes first.
+            charge_edit(2 * uri.size)
             # An XML 1.1 `xmlns:p=""` undeclares p.
             return -1 if uri.empty? && prefix_id != NameTable::EMPTY_ID
             return @names.intern(uri)

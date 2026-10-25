@@ -682,9 +682,9 @@ module Mica::XML::XPath
       when "!="
         # Some pair differs unless both sides hold one and the same value.
         first = string_value(right[0])
-        right_distinct = right.any? { |node| string_value(node) != first }
+        right_distinct = right.any? { |node| differs?(string_value(node), first) }
         return true if right_distinct
-        left.any? { |node| string_value(node) != first }
+        left.any? { |node| differs?(string_value(node), first) }
       else
         left_low, left_high = number_range(left)
         right_low, right_high = number_range(right)
@@ -696,6 +696,12 @@ module Mica::XML::XPath
         else           left_high >= right_low
         end
       end
+    end
+
+    # Charges comparing *value* with *other*, then compares them.
+    private def differs?(value : String, other : String) : Bool
+      charge(Math.min(value.bytesize, other.bytesize) + 1)
+      value != other
     end
 
     # Charges hashing *value* and returns it.
@@ -725,7 +731,10 @@ module Mica::XML::XPath
     # Converts node *node* to the type of *other* for comparison.
     private def node_atom(node : Int32, other : Result) : Result
       value = string_value(node)
-      other.is_a?(Float64) ? XPath.string_to_number(value) : value
+      return value unless other.is_a?(Float64)
+      # Converting passes over the value a bounded number of times.
+      charge(2 * value.bytesize)
+      XPath.string_to_number(value)
     end
 
     private def compare_atoms(operator : String, left : Result, right : Result) : Bool

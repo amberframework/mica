@@ -1,13 +1,21 @@
 class Mica::XML::Reader
   # Applies Namespaces in XML 1.0 (and, in XML 1.1 documents, Namespaces
   # 1.1, which lets `xmlns:p=""` undeclare a prefix) to the current start
-  # tag, after DTD
-  # defaults were added: binds the tag's declarations, then resolves the
-  # element and attribute prefixes, then checks expanded attribute names for
-  # duplicates. Returns the binding stack size before this tag's bindings.
+  # tag, after DTD defaults were added: binds the tag's declarations, then
+  # resolves the element and attribute prefixes, then checks expanded
+  # attribute names for duplicates. Returns the binding stack size before
+  # this tag's bindings.
+  #
+  # Checking and splitting the names passes over them once more. For a
+  # wide tag that pass is charged first, as the tag's bytes (which hold
+  # every name), so a budget trip stops it; a narrow tag's names join the
+  # token's pending work.
   private def process_namespaces(element_id : Int32) : Int32
     binding_mark = @binding_prefixes.size
     count = @attrs.size
+    if count > LINEAR_ATTRIBUTE_SCAN
+      charge(@pos - @mark)
+    end
     charge_in_token(count)
     index = 0
     while index < count

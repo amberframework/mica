@@ -123,9 +123,12 @@ Every operation runs under a `WorkMeter`:
    each further pass over input-derived bytes (a copy, a hash, a
    conversion, a buffer move) before it runs. A small fixed amount may be
    gathered first and charged within the same token (the XML reader
-   gathers copies under 256 bytes and its in-token bookkeeping), and name
-   interning is charged at the token's checkpoint, so a budget trip
-   overshoots by at most one name (`max_name_bytes`) or one 64 KiB chunk.
+   gathers copies under 256 bytes, its in-token bookkeeping and the name
+   work of a start tag with at most 16 attributes), and name interning is
+   charged at the token's checkpoint, so a budget trip overshoots by at
+   most the names of one narrow tag (17 names of up to `max_name_bytes`:
+   the element and 16 attributes) or one 64 KiB chunk. Work that follows a completed operation (settling an edit's
+   name-table work) is recorded without raising; the next charge trips.
 5. Call `meter.enforce_deadline { position }` after each IO read (in the
    `input_received` hook, and for `TextInput` formats also in
    `source_read_returned`, which runs after each read a transcoder makes
