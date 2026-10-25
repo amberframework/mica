@@ -33,14 +33,16 @@ module Mica::Core
       # need (at most 2 * haystack.size comparisons).
       prepaid = 0
       bound = 2_i64 * haystack.size
-      haystack.each_with_index do |byte, offset|
-        # One comparison per iteration, each reported before it runs.
+      offset = 0
+      while offset < haystack.size
+        # One comparison per iteration, each reported before it runs (and
+        # before the haystack byte is read).
         loop do
           if prepaid == 0
             prepaid, bound = prepay(bound) { |steps| yield steps }
           end
           prepaid -= 1
-          if needle[matched] == byte
+          if needle[matched] == haystack[offset]
             matched += 1
             break
           end
@@ -48,6 +50,7 @@ module Mica::Core
           matched = failure[matched - 1]
         end
         return offset + 1 - needle.size if matched == needle.size
+        offset += 1
       end
       nil
     end

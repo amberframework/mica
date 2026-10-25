@@ -407,11 +407,13 @@ module Mica::XML
       element = expand
       String.build do |io|
         writer = MeteredWriter.new(self, io)
-        # Each child is visited through its links and charged before it is
-        # serialized; no array of all children is built.
+        # Each link to a child is charged before it is followed (the first
+        # here, each next one after the child before it); no array of all
+        # children is built.
+        charge(1)
         element.each_child_node do |child|
-          charge(1)
           child.to_xml(writer, indent: 0)
+          charge(1)
         end
       end
     end

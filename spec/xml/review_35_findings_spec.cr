@@ -99,3 +99,14 @@ describe "Codex review 39 findings" do
     Mica::XML.parse(IO::Memory.new("<r>#{"x" * 100}</r>"), options).root.try(&.name).should eq("r")
   end
 end
+
+# Regression spec for the forty-second Codex code review of 2026-10-25.
+describe "Codex review 42 findings" do
+  it "1: charges copying a positional step's selected nodes" do
+    document = Mica::XML.parse("<r>#{"<p>#{"<e/>" * 20}</p>" * 500}</r>")
+    meter = Mica::Core::WorkMeter.new(Mica::Core::WorkBudget.unlimited)
+    document.xpath_nodes("//p/e[position() > 0]", meter: meter).size.should eq(10_000)
+    # Measured 81,597 before the copy was charged and 91,597 after.
+    meter.operations.should be >= 90_000
+  end
+end

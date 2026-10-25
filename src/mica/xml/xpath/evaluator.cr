@@ -249,6 +249,8 @@ module Mica::XML::XPath
         each_axis_node(context, axis) { |candidate| candidates << candidate if matches?(candidate, axis, matcher) }
         selected = candidates
         predicates.each { |predicate| selected = apply_predicate(selected, predicate) }
+        # Copying the selected nodes into the result: charged first.
+        charge(selected.size)
         result.concat(selected)
       end
       sort_unique(result)
