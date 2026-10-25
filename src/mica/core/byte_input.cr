@@ -139,21 +139,27 @@ module Mica::Core
       remaining < space ? Math.max(remaining + 1, 1_i64).to_i32 : space
     end
 
-    # Checks the bytes a source starts with. The error points at the first
-    # byte past the limit.
+    # Checks the bytes a source starts with.
     private def check_initial_input_size : Nil
-      max = input_size_limit || return
-      return unless @input_bytes > max
-      @pos = (max - @source_prefix_bytes).clamp(0_i64, @limit.to_i64).to_i32
       check_input_size
     end
 
+    # Raises once more than the input size limit has arrived. The bytes past
+    # the limit are the last ones received, so the first of them is at
+    # buffer index `@limit - (@input_bytes - max)`.
     private def check_input_size : Nil
-      if max = input_size_limit
-        if @input_bytes > max
-          input_limit_error("Input exceeds the input size limit (#{max} bytes)")
-        end
-      end
+      max = input_size_limit || return
+      return unless @input_bytes > max
+      excess_index = (@limit - (@input_bytes - max)).clamp(@pos.to_i64, @limit.to_i64).to_i32
+      input_size_exceeded("Input exceeds the input size limit (#{max} bytes)", excess_index)
+    end
+
+    # Raises the input size error. *excess_index* is the buffer index of the
+    # first byte past the limit; a format overrides this to position its
+    # error there (the default raises `input_limit_error` at the current
+    # position).
+    private def input_size_exceeded(message : String, excess_index : Int32) : NoReturn
+      input_limit_error(message)
     end
 
     # Makes *count* bytes available from the current position. Returns

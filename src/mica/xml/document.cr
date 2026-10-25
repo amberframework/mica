@@ -89,7 +89,7 @@ module Mica::XML
 
     # True when the document was parsed with Namespaces in XML enforced
     # (`ParserOptions#namespace_aware`). Edits follow the same rules.
-    property? namespace_aware : Bool = true
+    getter? namespace_aware : Bool = true
 
     # The default budget for edits: the same rate as parsing, without a
     # deadline (edits are calls the application makes one at a time).

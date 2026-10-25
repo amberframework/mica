@@ -407,7 +407,12 @@ module Mica::XML
       element = expand
       String.build do |io|
         writer = MeteredWriter.new(self, io)
-        element.children.each(&.to_xml(writer, indent: 0))
+        # Each child is visited through its links and charged before it is
+        # serialized; no array of all children is built.
+        element.each_child_node do |child|
+          charge(1)
+          child.to_xml(writer, indent: 0)
+        end
       end
     end
 
@@ -616,6 +621,13 @@ module Mica::XML
 
     private def input_size_limit : Int64?
       @options.max_input_bytes
+    end
+
+    # Points the error at the first byte past the limit: the position is
+    # advanced from the scanner's over the buffered bytes in between.
+    private def input_size_exceeded(message : String, excess_index : Int32) : NoReturn
+      charge_scanned_before_error
+      raise LimitExceededError.new(message, position_after(error_position, @pos, excess_index))
     end
 
     private def input_limit_error(message : String) : NoReturn

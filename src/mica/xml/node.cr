@@ -510,6 +510,17 @@ module Mica::XML
       Attributes.new(self)
     end
 
+    # :nodoc:
+    #
+    # Yields each child, following the sibling links.
+    def each_child_node(& : Node ->) : Nil
+      child = record.first_child
+      while child >= 0
+        yield Node.new(@document, child)
+        child = @document.data(child).next_sibling
+      end
+    end
+
     # Returns the child nodes.
     def children : NodeSet
       nodes = [] of Node
