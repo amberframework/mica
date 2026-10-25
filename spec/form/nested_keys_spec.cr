@@ -167,6 +167,22 @@ describe Mica::Form::NestedKeys do
       error.byte_offset.should eq(9)
     end
 
+    it "trips max_array_slots, not an overflow, for an index of Int32::MAX" do
+      limits = Mica::Form::Limits.new(max_array_index: Int32::MAX)
+      error = expect_raises(Mica::LimitExceededError, "max_array_slots (10000)") { nested("a[2147483647]=x", limits) }
+      error.byte_offset.should eq(0)
+    end
+
+    it_satisfies "MICA-FORM-LIMIT-INPUT", "counts the bytes of pairs made in code against max_input_bytes" do
+      limits = Mica::Form::Limits.new(max_input_bytes: 8_i64)
+      Mica::Form::NestedKeys.build([Mica::Form::Pair.new("a", "1234567")], limits: limits)["a"].as_s.should eq("1234567")
+      list_of_pairs = [Mica::Form::Pair.new("a", "1234"), Mica::Form::Pair.new("b", "1234", 6_i64)]
+      error = expect_raises(Mica::LimitExceededError, "max_input_bytes (8)") do
+        Mica::Form::NestedKeys.build(list_of_pairs, limits: limits)
+      end
+      error.byte_offset.should eq(6)
+    end
+
     it "counts max_pairs when built from pairs made in code" do
       list_of_pairs = (1..3).map { |index| Mica::Form::Pair.new("k#{index}", "v") }
       limits = Mica::Form::Limits.new(max_pairs: 2)

@@ -68,11 +68,18 @@ module Mica::Form
     # digits and `*-._` stay, a space becomes `+`, and every other byte of
     # its UTF-8 encoding becomes `%XX` (uppercase hex).
     #
+    # Raises `Mica::EncodingError` (at the offending byte of *text*) when
+    # *text* is not valid UTF-8: the serializer takes scalar-value strings
+    # (WHATWG URL, section 5.2), and Mica's parser would reject the output.
+    #
     # ```
     # Mica::Form::Pairs.encode("a b&c", io = IO::Memory.new)
     # io.to_s # => "a+b%26c"
     # ```
     def self.encode(text : String, io : IO) : Nil
+      if invalid = Core::UTF8.first_invalid_offset(text.to_slice)
+        raise EncodingError.new("Invalid UTF-8 in a form string to serialize", Core::Position.new(invalid.to_i64))
+      end
       text.each_byte do |byte|
         if byte == 0x20
           io << '+'

@@ -218,6 +218,12 @@ describe Mica::Form::Pairs do
       round_trip.map { |pair| {pair.field_name, pair.field_value} }.should eq([{"a b", "c&d=e"}, {"*-._~", "é\n"}])
     end
 
+    it "rejects a string that is not valid UTF-8 at its first invalid byte" do
+      pairs = Mica::Form::Pairs.new([Mica::Form::Pair.new("a", String.new(Bytes[0x62, 0xFF]))])
+      error = expect_raises(Mica::EncodingError, "Invalid UTF-8") { pairs.to_s }
+      error.byte_offset.should eq(1)
+    end
+
     it_satisfies "WPT-URL-urlsearchparams-stringifier", "meets the web-platform-tests stringifier expectations" do
       serialize = ->(list : Array({String, String})) { Mica::Form::Pairs.new(list.map { |name, value| Mica::Form::Pair.new(name, value) }).to_s }
       reparse = ->(input : String) { Mica::Form::Pairs.parse(input, limits: LIMITS).to_s }

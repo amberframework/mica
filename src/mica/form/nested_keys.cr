@@ -118,11 +118,15 @@ module Mica::Form
       @root = HashNode.new
       @pair_count = 0
       @array_slots = 0_i64
+      @input_bytes = 0_i64
       @finished = false
       @failed = false
     end
 
-    # Adds one pair to the structure. Raises `KeySyntaxError`,
+    # Adds one pair to the structure. The bytes of every name and value
+    # added count toward `Limits#max_input_bytes` (decoded pairs from
+    # `Pairs` are never longer than their input, so a shared parse trips
+    # the limit in `Pairs` first). Raises `KeySyntaxError`,
     # `KeyConflictError` or `Mica::LimitExceededError` (with the pair's
     # offset) when the pair cannot be added. A builder that raised may hold
     # part of that pair, so it refuses further use with `ArgumentError`.
@@ -134,7 +138,12 @@ module Mica::Form
       if @pair_count > @limits.max_pairs
         raise LimitExceededError.new("Form has more than max_pairs (#{@limits.max_pairs}) pairs", position(pair))
       end
-      @meter.add_units(pair.field_name.bytesize.to_i64 + pair.field_value.bytesize) if @counts_units
+      pair_bytes = pair.field_name.bytesize.to_i64 + pair.field_value.bytesize
+      @input_bytes += pair_bytes
+      if @input_bytes > @limits.max_input_bytes
+        raise LimitExceededError.new("Form pairs exceed max_input_bytes (#{@limits.max_input_bytes})", position(pair))
+      end
+      @meter.add_units(pair_bytes) if @counts_units
       segments = parse_key(pair)
       insert(segments, pair)
       @failed = false
@@ -346,7 +355,9 @@ module Mica::Form
     # slots it adds against `max_array_slots` and the work budget.
     private def place(array : ArrayNode, index : Int32, child : Node, pair : Pair) : Nil
       if index >= array.size
-        added = index + 1 - array.size
+        # Int64 arithmetic: an index of Int32::MAX must trip the slot limit,
+        # not overflow.
+        added = index.to_i64 + 1 - array.size
         @array_slots += added
         if @array_slots > @limits.max_array_slots
           raise LimitExceededError.new("Form arrays exceed max_array_slots (#{@limits.max_array_slots})", position(pair))
