@@ -88,7 +88,7 @@ module Mica::XML
       @io << %(<?xml version=") << version << '"'
       if encoding
         unless encoding.compare("UTF-8", case_insensitive: true) == 0
-          raise BuilderError.new("Mica::XML::Builder writes UTF-8 only, not #{encoding}")
+          raise BuilderError.new("Mica::XML::Builder writes UTF-8 only, not #{Core.quote(encoding)}")
         end
         @io << %( encoding=") << encoding << '"'
       end

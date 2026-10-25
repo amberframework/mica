@@ -26,7 +26,7 @@ module Mica::XML
 
     # Returns the attribute named *name*. Raises `KeyError` when missing.
     def [](name : String) : Node
-      self[name]? || raise KeyError.new("Missing attribute: #{name}")
+      self[name]? || raise KeyError.new("Missing attribute: #{Core.quote(name)}")
     end
 
     # Returns the attribute whose qualified or local name is *name*, or nil.

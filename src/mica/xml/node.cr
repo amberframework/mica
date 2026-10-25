@@ -303,7 +303,7 @@ module Mica::XML
 
     # Returns the value of attribute *name*. Raises `KeyError` when missing.
     def [](name : String) : String
-      self[name]? || raise KeyError.new("Missing attribute: #{name}")
+      self[name]? || raise KeyError.new("Missing attribute: #{Core.quote(name)}")
     end
 
     # Returns the value of attribute *name* (matched by qualified name, then

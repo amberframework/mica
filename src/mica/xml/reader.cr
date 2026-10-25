@@ -293,7 +293,10 @@ module Mica::XML
     # PI data, or the current attribute's normalized value. Returns an empty
     # string for other node types.
     def value : String
-      String.new(value_bytes)
+      bytes = value_bytes
+      # The copy is charged, so repeated reads draw on the budget.
+      charge(bytes.size + 1)
+      String.new(bytes)
     end
 
     # Returns the depth of the current node (the root element is at 0).
@@ -349,14 +352,16 @@ module Mica::XML
     # Returns the value of the attribute named *name* on the current element.
     # Raises `KeyError` when it is missing.
     def [](name : String) : String
-      self[name]? || raise KeyError.new("Missing attribute: #{name}")
+      self[name]? || raise KeyError.new("Missing attribute: #{Core.quote(name)}")
     end
 
     # Returns the value of the attribute named *name*, or nil.
     def []?(name : String) : String?
       index = attribute_index(name)
       return if index < 0
-      String.new(attribute_value_bytes(@attrs[index]))
+      bytes = attribute_value_bytes(@attrs[index])
+      charge(bytes.size + 1)
+      String.new(bytes)
     end
 
     # Skips the current node's subtree and moves to the node after it.
@@ -478,6 +483,25 @@ module Mica::XML
     end
 
     # :nodoc:
+    #
+    # The binding stack size before the current start tag's declarations:
+    # bindings below it were declared by the tag's ancestors.
+    def event_binding_mark : Int32
+      return @binding_prefixes.size unless @node_type.element?
+      @empty_element ? @pending_binding_mark : @open_elements.last.binding_mark
+    end
+
+    # :nodoc:
+    #
+    # Returns the URI id that *prefix_id* is bound to here when that binding
+    # lies below *mark* (an ancestor of the start tag that set *mark*
+    # declared it), or -1.
+    def inherited_binding_uri(prefix_id : Int32, mark : Int32) : Int32
+      binding = prefix_id < @innermost_binding.size ? @innermost_binding[prefix_id] : -1
+      binding >= 0 && binding < mark ? @binding_uris[binding] : -1
+    end
+
+    # :nodoc:
     def event_attributes : Array(AttributeSlot)
       @attrs
     end
@@ -528,7 +552,11 @@ module Mica::XML
 
     private def attribute_index(name : String) : Int32
       return -1 unless @node_type.element?
+      # The caller's name is hashed and compared: charged before and after.
+      charge(name.bytesize + 1)
+      lookups = @names.lookup_operations
       id = @names.lookup(name.to_slice)
+      charge(@names.lookup_operations - lookups)
       return -1 if id < 0
       find_attribute_slot(id) || -1
     end

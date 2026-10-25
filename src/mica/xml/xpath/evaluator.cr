@@ -154,7 +154,7 @@ module Mica::XML::XPath
         charge(value.size)
         nodes = value.map do |node|
           unless node.document.same?(@document)
-            raise XPathError.new("Variable $#{name} holds nodes from another document")
+            raise XPathError.new("Variable $#{XPath.excerpt(name)} holds nodes from another document")
           end
           node.index
         end
@@ -597,8 +597,10 @@ module Mica::XML::XPath
       @offset = expression.offset
       case operator
       when "|"
-        union = node_set(left, "'|'") + node_set(right, "'|'")
-        charge(union.size)
+        left_nodes = node_set(left, "'|'")
+        right_nodes = node_set(right, "'|'")
+        charge(left_nodes.size + right_nodes.size)
+        union = left_nodes + right_nodes
         sort_unique(union)
       when "=", "!=", "<", "<=", ">", ">="
         compare(operator, left, right)
@@ -856,7 +858,10 @@ module Mica::XML::XPath
       when "substring-before"
         text = string_argument(arguments, 0, node, position, size)
         found = search(text, string_argument(arguments, 1, node, position, size))
-        found ? text.byte_slice(0, found) : ""
+        return "" unless found
+        # The prefix copy is charged before it happens.
+        charge(found)
+        text.byte_slice(0, found)
       when "substring-after"
         text = string_argument(arguments, 0, node, position, size)
         needle = string_argument(arguments, 1, node, position, size)

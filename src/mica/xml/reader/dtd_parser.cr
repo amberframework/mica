@@ -298,7 +298,9 @@ class Mica::XML::Reader
       return DTD::AttributeType::ENUMERATION
     end
     start, size = scan_name_span
-    keyword = String.new(@buffer[@mark + start, size])
+    bytes = @buffer[@mark + start, size]
+    # Only a keyword-sized name is copied; a longer one is unknown.
+    keyword = size <= "NMTOKENS".bytesize ? String.new(bytes) : ""
     case keyword
     when "CDATA"    then DTD::AttributeType::CDATA
     when "ID"       then DTD::AttributeType::ID
@@ -313,7 +315,7 @@ class Mica::XML::Reader
       parse_enumeration(notation: true)
       DTD::AttributeType::NOTATION
     else
-      syntax_error("Unknown attribute type '#{keyword}'")
+      syntax_error("Unknown attribute type '#{Core.excerpt(bytes)}'")
     end
   end
 

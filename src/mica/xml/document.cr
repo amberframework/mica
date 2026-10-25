@@ -274,6 +274,8 @@ module Mica::XML
       # add_event does for the rest.
       reader.charge(1 + attribute_bytes(reader))
       element = add_element(reader, 0)
+      @expansion = Expansion.new(element, reader.event_binding_mark, last_attribute(element)) if @namespace_aware
+      declare_inherited_namespaces(reader)
       unless reader.empty_element?
         parent = element
         while reader.read
@@ -283,6 +285,60 @@ module Mica::XML
         finish_text_merge(reader)
       end
       reader.finish_expand(name_id, namespace_uri_id, depth)
+      @expansion = nil
+    end
+
+    # An expansion in progress (`build_subtree_from`): the subtree's root
+    # element, the reader's binding mark at it, the root's last attribute
+    # and the prefixes already declared on the root for the subtree.
+    private class Expansion
+      getter root : Int32
+      getter binding_mark : Int32
+      property tail : Int32
+      getter declared = Set(Int32).new
+
+      def initialize(@root : Int32, @binding_mark : Int32, @tail : Int32)
+      end
+    end
+
+    @expansion : Expansion? = nil
+
+    private def last_attribute(element : Int32) : Int32
+      last = -1
+      current = data(element).first_attribute
+      while current >= 0
+        last = current
+        current = data(current).next_sibling
+      end
+      last
+    end
+
+    # Declares on the subtree's root each namespace binding that the current
+    # start tag uses but that an ancestor outside the subtree declared, so
+    # the expanded document stands alone (its markup and XPath prefixes
+    # resolve). Each prefix is declared once; the check is constant work per
+    # name, charged with the tag, and each declaration is charged.
+    private def declare_inherited_namespaces(reader : Reader) : Nil
+      expansion = @expansion || return
+      declare_inherited(reader, expansion, reader.event_name_id, reader.event_namespace_uri_id)
+      reader.event_attributes.each do |slot|
+        uri_id = slot.namespace_uri_id
+        next if uri_id == NameTable::EMPTY_ID || uri_id == @xmlns_namespace_id
+        declare_inherited(reader, expansion, slot.name_id, uri_id)
+      end
+    end
+
+    private def declare_inherited(reader : Reader, expansion : Expansion, name_id : Int32, uri_id : Int32) : Nil
+      return if uri_id == NameTable::EMPTY_ID || uri_id == @xml_namespace_id
+      prefix_id = @names.prefix_id(name_id)
+      return if expansion.declared.includes?(prefix_id)
+      return if reader.inherited_binding_uri(prefix_id, expansion.binding_mark) != uri_id
+      expansion.declared << prefix_id
+      uri = @names[uri_id].to_slice
+      reader.charge(2 + uri.size + @names[prefix_id].bytesize)
+      declaration_id = prefix_id == NameTable::EMPTY_ID ? @xmlns_id : @names.intern("xmlns:#{@names[prefix_id]}")
+      expansion.tail = add_attribute_node(Node::Type::NAMESPACE_DECL, expansion.root, declaration_id, @xmlns_namespace_id, uri, expansion.tail)
+      mark_order_dirty
     end
 
     private def copy_prolog(reader : Reader) : Nil
@@ -306,6 +362,7 @@ module Mica::XML
       when .element?
         reader.charge(1 + attribute_bytes(reader))
         element = add_element(reader, parent)
+        declare_inherited_namespaces(reader)
         return element unless reader.empty_element?
       when .end_element?
         return data(parent).parent

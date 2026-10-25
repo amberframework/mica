@@ -28,7 +28,7 @@ module Mica::Testing
       def initialize(@list_of_requirements : Array(Requirement))
         @by_id = {} of String => Requirement
         @list_of_requirements.each do |requirement|
-          raise ArgumentError.new("Duplicate requirement id #{requirement.id}") if @by_id.has_key?(requirement.id)
+          raise ArgumentError.new("Duplicate requirement id #{Core.quote(requirement.id)}") if @by_id.has_key?(requirement.id)
           @by_id[requirement.id] = requirement
         end
       end
@@ -39,7 +39,7 @@ module Mica::Testing
         text.each_line do |line|
           next if line.blank? || line.starts_with?('#')
           fields = line.split('\t', 3)
-          raise ArgumentError.new("Malformed requirement line: #{line.inspect}") unless fields.size == 3
+          raise ArgumentError.new("Malformed requirement line: #{Core.quote(line)}") unless fields.size == 3
           list_of_requirements << Requirement.new(fields[0].strip, fields[1].strip, fields[2].strip)
         end
         new(list_of_requirements)

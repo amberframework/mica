@@ -103,7 +103,7 @@ class Mica::XML::Reader
   private def leave_entity : Nil
     if open_element = @open_elements.last?
       if open_element.entity_level == @frames.size
-        syntax_error("Entity '#{entity_name}' ends inside element '#{Core.excerpt(@names[open_element.name_id])}'")
+        syntax_error("Entity '#{Core.excerpt(entity_name)}' ends inside element '#{Core.excerpt(@names[open_element.name_id])}'")
       end
     end
     pop_entity
@@ -591,10 +591,10 @@ class Mica::XML::Reader
     target_id = scan_name_id
     target = @names[target_id]
     if target.bytesize == 3 && target.compare("xml", case_insensitive: true) == 0
-      syntax_error("The processing instruction target '#{target}' is reserved")
+      syntax_error("The processing instruction target '#{Core.excerpt(target)}' is reserved")
     end
     if @options.namespace_aware? && target.includes?(':')
-      syntax_error("Processing instruction target '#{target}' must not contain a colon")
+      syntax_error("Processing instruction target '#{Core.excerpt(target)}' must not contain a colon")
     end
     target_id
   end
