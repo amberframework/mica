@@ -278,9 +278,12 @@ module Mica::XML::XPath
         advance
         if current == '*'
           advance
+          charge_copy(first.bytesize.to_i64 + 2)
           return Token.new(TokenKind::NameTest, "#{first}:*")
         end
-        name = "#{first}:#{lex_ncname}"
+        local = lex_ncname
+        charge_copy(first.bytesize.to_i64 + local.bytesize + 1)
+        name = "#{first}:#{local}"
       end
       position = @reader.pos
       skip_spaces

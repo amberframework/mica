@@ -46,3 +46,30 @@ describe "Codex review 22 findings" do
     xml.should contain("xmlns:p=\"\"")
   end
 end
+
+# Regression specs for the twenty-third Codex code review of 2026-10-24.
+describe "Codex review 23 findings" do
+  it "1: charges QName joins and splits in XPath before they happen" do
+    long = "a" * 100_000
+    {"//p:#{long}", "//p:*"}.each do |source|
+      meter = Mica::Core::WorkMeter.new(Mica::Core::WorkBudget.unlimited)
+      Mica::XML::XPath.compile(source, meter)
+      meter.operations.should be >= source.bytesize * 2
+    end
+  end
+
+  it "2: charges copies into scratch" do
+    value = "v" * 100_000
+    plain = Mica::Core::WorkMeter.new(Mica::Core::WorkBudget.unlimited)
+    Mica::XML.parse("<r a='#{value}x'/>", meter: plain)
+    rewritten = Mica::Core::WorkMeter.new(Mica::Core::WorkBudget.unlimited)
+    Mica::XML.parse("<r a='#{value}\n'/>", meter: rewritten)
+    (rewritten.operations - plain.operations).should be >= value.bytesize - 10
+  end
+
+  it "3: compares a content-spec keyword without copying a long name" do
+    expect_raises(Mica::ParseError, /EMPTY, ANY/) do
+      Mica::XML.parse("<!DOCTYPE r [<!ELEMENT r #{"n" * 40_000}>]><r/>")
+    end
+  end
+end

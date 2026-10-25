@@ -395,8 +395,8 @@ class Mica::XML::Reader
       parse_content_model
     else
       start, size = scan_name_span
-      keyword = String.new(@buffer[@mark + start, size])
-      unless keyword == "EMPTY" || keyword == "ANY"
+      keyword = @buffer[@mark + start, size]
+      unless keyword == "EMPTY".to_slice || keyword == "ANY".to_slice
         syntax_error("Expected EMPTY, ANY or a content model")
       end
     end

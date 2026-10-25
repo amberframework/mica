@@ -299,8 +299,8 @@ module Mica::XML::XPath
       prefix = test.prefix
       if prefix && local && !@namespace_aware
         # Without namespace processing `p:a` is one name, matched whole.
+        charge(prefix.bytesize.to_i64 + local.bytesize + 1)
         local = "#{prefix}:#{local}"
-        charge(local.bytesize)
         prefix = nil
       end
       if prefix

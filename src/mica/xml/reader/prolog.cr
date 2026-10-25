@@ -107,6 +107,8 @@ class Mica::XML::Reader
   # Checks the declared encoding against the byte order mark and switches
   # decoding when the document is ISO-8859-1 (XML 1.0 section 4.3.3).
   private def apply_declared_encoding(declared : String) : Nil
+    # Matching the label and the byte-order check each pass over it.
+    charge(2 * declared.bytesize)
     encoding = Core::Encoding.from_label(declared)
     signature = @signature
     case encoding

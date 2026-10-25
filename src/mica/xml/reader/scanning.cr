@@ -308,6 +308,9 @@ class Mica::XML::Reader
   # Characters read by `next_char` since the last budget check.
   @literal_chars = 0
 
+  # Copies into scratch at least this long are charged at once.
+  private SCRATCH_CHARGE_NOW = 256
+
   # Grows the scratch buffer to hold *extra* more bytes.
   @[AlwaysInline]
   private def reserve_scratch(extra : Int32) : Nil
@@ -320,6 +323,9 @@ class Mica::XML::Reader
     while capacity < needed
       capacity *= 2
     end
+    # Growth copies what scratch holds (geometrically, so each byte a
+    # bounded number of times): charged first.
+    charge(@scratch_size)
     grown = Bytes.new(capacity)
     grown.copy_from(@scratch[0, @scratch_size])
     @scratch = grown
@@ -329,6 +335,13 @@ class Mica::XML::Reader
   @[AlwaysInline]
   private def append_input_to_scratch(start : Int32, size : Int32) : Nil
     return if size <= 0
+    # The copy is charged before it happens; a short one joins the token's
+    # pending work (charged within the token, like other in-token work).
+    if size >= SCRATCH_CHARGE_NOW
+      charge(size)
+    else
+      charge_in_token(size)
+    end
     reserve_scratch(size)
     @scratch[@scratch_size, size].copy_from(@buffer[@mark + start, size])
     @scratch_size += size

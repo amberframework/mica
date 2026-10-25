@@ -358,7 +358,8 @@ module Mica::XML
     end
 
     # Adds a namespace declaration. It must not change how any existing name
-    # in this element's subtree resolves, and must follow Namespaces 1.0.
+    # in this element's subtree resolves, and must follow Namespaces 1.0 (in
+    # XML 1.1 documents Namespaces 1.1, which allows undeclaring a prefix).
     private def add_namespace_declaration(name_id : Int32, uri : String) : Nil
       prefix_id = @document.declared_prefix_id(name_id)
       reserved = {Reader::XML_NAMESPACE, Reader::XMLNS_NAMESPACE}

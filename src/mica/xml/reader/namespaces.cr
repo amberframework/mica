@@ -1,5 +1,7 @@
 class Mica::XML::Reader
-  # Applies Namespaces in XML 1.0 to the current start tag, after DTD
+  # Applies Namespaces in XML 1.0 (and, in XML 1.1 documents, Namespaces
+  # 1.1, which lets `xmlns:p=""` undeclare a prefix) to the current start
+  # tag, after DTD
   # defaults were added: binds the tag's declarations, then resolves the
   # element and attribute prefixes, then checks expanded attribute names for
   # duplicates. Returns the binding stack size before this tag's bindings.

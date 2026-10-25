@@ -299,6 +299,8 @@ module Mica::XML::XPath
         advance
         text = token.text
         return NodeTest.new(TestKind::AnyName) if text == "*"
+        # Splitting the name copies its bytes: charged first.
+        XPath.charge_compile(@meter, 2_i64 * text.bytesize, @source, token.offset)
         if text.ends_with?(":*")
           return NodeTest.new(TestKind::NamespaceAny, text[0, text.size - 2])
         end
