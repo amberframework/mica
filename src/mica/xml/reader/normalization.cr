@@ -72,7 +72,7 @@ class Mica::XML::Reader
       column += 1 unless @buffer[index] & 0xC0 == 0x80
       index += 1
     end
-    Core::Position.new(source_offset_at(@buffer, stop, @base_offset), line, column)
+    Core::Position.new(source_offset_at(@buffer, stop, @base_offset) { |count| charge(count) }, line, column)
   end
 
   # Returns the bytes of the line end at *index* (before *stop*), or 0.

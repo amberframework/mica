@@ -173,6 +173,15 @@ class Mica::XML::Reader
     raise ParseError.new(message, error_position)
   end
 
+  # Raises a syntax error at buffer byte *index* of the current token,
+  # which must lie on the current line. The bytes scanned so far are
+  # charged first.
+  private def syntax_error_at(index : Int32, message : String) : NoReturn
+    charge_scanned_before_error
+    @pos = index
+    raise ParseError.new(message, error_position)
+  end
+
   private def limit_error(message : String) : NoReturn
     charge_scanned_before_error
     raise LimitExceededError.new(message, error_position)

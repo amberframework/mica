@@ -26,6 +26,8 @@ module Mica::XML::XPath
       @names = @document.names
       @namespace_aware = @document.namespace_aware?
       @namespaces = namespaces || {} of String => String
+      # A spent or expired meter stops before any work.
+      work_limit_reached
       collect_root_namespaces unless namespaces
     end
 
@@ -281,7 +283,7 @@ module Mica::XML::XPath
       if @document.index_order?
         nodes.sort!
       else
-        charge(@document.node_count) unless @document.order_keys_ready?
+        charge(ORDER_KEY_PASSES * @document.node_count) unless @document.order_keys_ready?
         nodes.sort_by! { |node| @document.order_key(node) }
       end
       drop_adjacent_duplicates(nodes)
@@ -467,8 +469,12 @@ module Mica::XML::XPath
       end
     end
 
+    # Building the order keys fills one per arena slot, visits each node and
+    # attribute, and climbs each parent link at most once.
+    private ORDER_KEY_PASSES = 3_i64
+
     private def order_of(node : Int32) : Int32
-      charge(@document.node_count) unless @document.order_keys_ready?
+      charge(ORDER_KEY_PASSES * @document.node_count) unless @document.order_keys_ready?
       @document.order_key(node)
     end
 
@@ -569,7 +575,10 @@ module Mica::XML::XPath
       when .following?
         each_following(node) { |following| yield following }
       when .preceding?
-        each_preceding(node).reverse_each { |preceding| yield preceding }
+        preceding = each_preceding(node)
+        # The second pass over the collected nodes: charged first.
+        charge(preceding.size)
+        preceding.reverse_each { |earlier| yield earlier }
       end
     end
 

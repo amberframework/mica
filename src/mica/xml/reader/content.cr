@@ -201,7 +201,9 @@ class Mica::XML::Reader
     if @attrs.size >= @options.max_attributes
       limit_error("Element has more than max_attributes (#{@options.max_attributes}) attributes")
     end
+    name_start = @pos
     attr_id = scan_name_id
+    check_duplicate_attribute(attr_id, name_start)
     skip_spaces
     # The message is built only on failure (this runs once per attribute).
     syntax_error("Expected '=' after attribute name '#{Core.excerpt(@names[attr_id])}'") unless peek_byte == '='.ord
@@ -212,14 +214,14 @@ class Mica::XML::Reader
       syntax_error("Expected a quoted value for attribute '#{Core.excerpt(@names[attr_id])}'")
     end
     start, size, in_scratch = scan_attribute_value(quote.to_u8)
-    check_duplicate_attribute(attr_id)
     @attrs << AttributeSlot.new(attr_id, start, size, in_scratch, NameTable::EMPTY_ID, true)
   end
 
-  private def check_duplicate_attribute(attr_id : Int32) : Nil
-    if find_attribute_slot(attr_id)
-      syntax_error("Attribute '#{Core.excerpt(@names[attr_id])}' appears twice")
-    end
+  # Raises at the repeated name's first byte, *name_start* (a name has no
+  # line break, so the position stays on the current line).
+  private def check_duplicate_attribute(attr_id : Int32, name_start : Int32) : Nil
+    return unless find_attribute_slot(attr_id)
+    syntax_error_at(name_start, "Attribute '#{Core.excerpt(@names[attr_id])}' appears twice")
   end
 
   # Elements with more attributes than this are indexed by a hash so that
@@ -403,15 +405,14 @@ class Mica::XML::Reader
   private def parse_end_tag : Nil
     @pos += 2
     start, size = scan_name_span
-    skip_spaces
-    expect_byte('>', "to close the end tag")
     open_element = @open_elements.last? || syntax_error("End tag without a matching start tag")
     open_id = open_element.name_id
     unless end_tag_matches?(open_id, @mark + start, size)
-      # The scanned tag is charged before the message quotes part of it.
-      charge_scanned_before_error
-      syntax_error("End tag '#{Core.excerpt(@buffer[@mark + start, size])}' does not match start tag '#{Core.excerpt(@names[open_id])}'")
+      # Reported at the name's first byte, on the current line.
+      syntax_error_at(@mark + start, "End tag '#{Core.excerpt(@buffer[@mark + start, size])}' does not match start tag '#{Core.excerpt(@names[open_id])}'")
     end
+    skip_spaces
+    expect_byte('>', "to close the end tag")
     if open_element.entity_level != @frames.size
       syntax_error("End tag '#{Core.excerpt(@names[open_id])}' and its start tag are in different entities")
     end

@@ -235,9 +235,10 @@ describe Mica::XML::Reader do
 
   describe "errors" do
     it_satisfies "MICA-ERROR-POSITION", "reports line and column of the first error" do
+      # The mismatched end tag is reported at its name.
       error = expect_raises(Mica::ParseError) { reader_events("<a>\n  <b>\n</a>") }
       error.line_number.should eq(3)
-      error.column_number.should eq(5)
+      error.column_number.should eq(3)
     end
 
     it_satisfies "MICA-ERROR-POSITION", "counts columns in characters" do

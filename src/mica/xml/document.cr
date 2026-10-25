@@ -798,8 +798,11 @@ module Mica::XML
       end
     end
 
-    private def index_attribute(index : AttributeIndex, attribute : Int32) : Nil
-      charge_edit(1)
+    # Adds *attribute* to *index*. With *prepaid*, the caller charged
+    # `index_work` before changing the tree, so nothing here can raise and
+    # leave the tree and its index out of step.
+    private def index_attribute(index : AttributeIndex, attribute : Int32, prepaid : Bool = false) : Nil
+      charge_edit(1) unless prepaid
       record = data(attribute)
       index.by_name[record.name_id] ||= attribute
       if record.kind.namespace_decl?
@@ -810,7 +813,30 @@ module Mica::XML
       if record.namespace_uri_id != NameTable::EMPTY_ID
         index.by_expanded_name[{record.namespace_uri_id, local_id}] ||= attribute
       end
-      insert_in_order(index, index.by_local_name.put_if_absent(local_id) { LocalCandidates.new }, attribute)
+      insert_in_order(index, index.by_local_name.put_if_absent(local_id) { LocalCandidates.new }, attribute, prepaid)
+    end
+
+    # The work `index_attribute` will charge for *attribute* (-1 for one
+    # not yet added) named *name_id* of *kind* at list position *position*,
+    # computed without changing anything (the steps `insert_in_order`
+    # takes).
+    private def index_work(index : AttributeIndex, attribute : Int32, name_id : Int32, kind : Node::Type, position : Int32) : Int64
+      work = 1_i64
+      return work if kind.namespace_decl?
+      candidates = index.by_local_name[split_local_id(name_id)]? || return work
+      list = candidates.list
+      head = candidates.head
+      live = list.size
+      if head > 0 && head * 2 >= list.size
+        work += list.size
+        live = list.size - head
+      end
+      last = list.last?
+      return work if last.nil? || index.order[last] < position
+      work += Math.log2(live + 1).ceil.to_i + 1
+      at = (head...list.size).bsearch { |slot| index.order[list[slot]] >= position } || list.size
+      return work if list[at]? == attribute
+      work + list.size - at
     end
 
     # Inserts *attribute* into *candidates* by list position. Appends land
@@ -818,10 +844,10 @@ module Mica::XML
     # moves the later candidates, all charged. Stepped-past entries are
     # dropped first when they are at least half the list, so the list
     # stays proportional to its live entries.
-    private def insert_in_order(index : AttributeIndex, candidates : LocalCandidates, attribute : Int32) : Nil
+    private def insert_in_order(index : AttributeIndex, candidates : LocalCandidates, attribute : Int32, prepaid : Bool) : Nil
       list = candidates.list
       if candidates.head > 0 && candidates.head * 2 >= list.size
-        charge_edit(list.size)
+        charge_edit(list.size) unless prepaid
         list.delete_at(0, candidates.head)
         candidates.head = 0
       end
@@ -831,10 +857,10 @@ module Mica::XML
         list << attribute
         return
       end
-      charge_edit(Math.log2(list.size + 1).ceil.to_i + 1)
+      charge_edit(Math.log2(list.size + 1).ceil.to_i + 1) unless prepaid
       at = (candidates.head...list.size).bsearch { |slot| index.order[list[slot]] >= position } || list.size
       return if list[at]? == attribute
-      charge_edit(list.size - at)
+      charge_edit(list.size - at) unless prepaid
       list.insert(at, attribute)
     end
 
@@ -856,10 +882,13 @@ module Mica::XML
     def append_attribute(element : Int32, name_id : Int32, namespace_uri_id : Int32, value : String, kind : Node::Type) : Int32
       charge_edit(1 + value.bytesize)
       index = attribute_index(element)
+      # Every charge comes before the tree changes, so a budget trip leaves
+      # the tree and its index unchanged.
+      charge_edit(index_work(index, -1, name_id, kind, index.next_order))
       attribute = add_attribute_node(kind, element, name_id, namespace_uri_id, value.to_slice, index.tail)
       index.order[attribute] = index.next_order
       index.next_order += 1
-      index_attribute(index, attribute)
+      index_attribute(index, attribute, prepaid: true)
       index.tail = attribute
       count_name_use(name_id, 1) if kind.attribute_node?
       mark_order_dirty
@@ -872,11 +901,14 @@ module Mica::XML
       record = data(index)
       named = record.kind.element_node? || record.kind.attribute_node?
       attribute_index = attribute_owner_index(record)
+      # Every charge comes before the tree changes, so a budget trip leaves
+      # the tree and its index unchanged.
+      charge_edit(index_work(attribute_index, index, name_id, record.kind, attribute_index.order[index])) if attribute_index
       unindex_attribute(attribute_index, index) if attribute_index
       count_name_use(record.name_id, -1) if named
       write_rename(index, name_id, namespace_uri_id)
       count_name_use(name_id, 1) if named
-      index_attribute(attribute_index, index) if attribute_index
+      index_attribute(attribute_index, index, prepaid: true) if attribute_index
     end
 
     # The index of the element owning attribute *record*, when one was built.
