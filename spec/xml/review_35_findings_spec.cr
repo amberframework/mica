@@ -40,3 +40,18 @@ describe "Codex review 35 findings" do
     error.byte_offset.should be < 250_000
   end
 end
+
+# Regression spec for the thirty-sixth Codex code review of 2026-10-24.
+describe "Codex review 36 findings" do
+  it "1: checks the budget by bytes while skipping XML 1.1 line ends" do
+    spaces = " " * 200_000
+    budget = Mica::Core::WorkBudget.new(operations_per_unit: 0, base_operations: 100_000)
+    options = Mica::XML::ParserOptions.new(work_budget: budget)
+    error = expect_raises(Mica::WorkBudgetExceededError) do
+      Mica::XML.parse("<?xml version='1.1'?><r#{spaces}/>", options)
+    end
+    # Checked every 64 KiB, the 100,000-operation budget trips by the
+    # second check; counting characters would first check after 192 KiB.
+    error.byte_offset.should be < 160_000
+  end
+end

@@ -19,16 +19,12 @@ class Mica::XML::Reader
   @[AlwaysInline]
   private def skip_spaces : Bool
     skipped = false
-    run = 0
     loop do
       if @pos >= @limit
         break unless fill
       end
-      run += 1
-      if run == SCAN_CHUNK
-        scan_checkpoint
-        run = 0
-      end
+      # Checked by bytes: a line end can take up to three.
+      scan_checkpoint if @pos - @mark - @token_precharged >= SCAN_CHUNK
       byte = @buffer[@pos]
       case byte
       when 0x20, 0x09
