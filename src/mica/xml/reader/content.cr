@@ -404,7 +404,9 @@ class Mica::XML::Reader
     open_element = @open_elements.last? || syntax_error("End tag without a matching start tag")
     open_id = open_element.name_id
     unless end_tag_matches?(open_id, @mark + start, size)
-      syntax_error("End tag '#{String.new(@buffer[@mark + start, size])}' does not match start tag '#{@names[open_id]}'")
+      # The scanned tag is charged before the message quotes part of it.
+      charge_scanned_before_error
+      syntax_error("End tag '#{Core.excerpt(@buffer[@mark + start, size])}' does not match start tag '#{Core.excerpt(@names[open_id])}'")
     end
     if open_element.entity_level != @frames.size
       syntax_error("End tag '#{@names[open_id]}' and its start tag are in different entities")

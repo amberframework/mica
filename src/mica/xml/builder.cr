@@ -82,7 +82,7 @@ module Mica::XML
     def start_document(version : String? = nil, encoding : String? = nil) : Nil
       raise BuilderError.new("start_document must come first") if @document_started || @top_level_written
       version ||= "1.0"
-      raise BuilderError.new("Invalid XML version #{version.inspect}") unless version_number?(version)
+      raise BuilderError.new("Invalid XML version #{Core.quote(version)}") unless version_number?(version)
       @xml11 = version == "1.1"
       @document_started = true
       @io << %(<?xml version=") << version << '"'
@@ -129,7 +129,7 @@ module Mica::XML
     end
 
     private def open_element(qualified_name : String) : Nil
-      raise BuilderError.new("Invalid qualified name #{qualified_name.inspect}") unless Escape.qname?(qualified_name)
+      raise BuilderError.new("Invalid qualified name #{Core.quote(qualified_name)}") unless Escape.qname?(qualified_name)
       ensure_content_state("start an element")
       close_start_tag
       if parent = @frames.last?
@@ -456,9 +456,9 @@ module Mica::XML
     # Records an attribute name on the open start tag, rejecting invalid
     # QNames and duplicates.
     private def record_attribute_name(name : String) : Nil
-      raise BuilderError.new("Invalid qualified name #{name.inspect}") unless Escape.qname?(name)
+      raise BuilderError.new("Invalid qualified name #{Core.quote(name)}") unless Escape.qname?(name)
       frame = @frames.last? || raise BuilderError.new("No start tag is open")
-      raise BuilderError.new("Attribute #{name.inspect} written twice") unless frame.attribute_name_set.add?(name)
+      raise BuilderError.new("Attribute #{Core.quote(name)} written twice") unless frame.attribute_name_set.add?(name)
       frame.attribute_names << name
     end
 
@@ -472,7 +472,7 @@ module Mica::XML
         raise BuilderError.new("The xmlns prefix cannot be declared") if prefix == "xmlns"
         raise BuilderError.new("A namespace prefix cannot be bound to an empty URI") if uri.empty?
       end
-      raise BuilderError.new("Namespace #{uri.inspect} cannot be declared") if reserved.includes?(uri)
+      raise BuilderError.new("Namespace #{Core.quote(uri)} cannot be declared") if reserved.includes?(uri)
       @bindings << prefix
       (@uris_by_prefix[prefix] ||= [] of String) << uri
     end
@@ -496,7 +496,7 @@ module Mica::XML
         check_prefix_bound(name)
         uri = bound_uri(name[0, colon]) || ""
         unless expanded.add?({uri, name[colon + 1..]})
-          raise BuilderError.new("Attribute #{name.inspect} duplicates another attribute's expanded name")
+          raise BuilderError.new("Attribute #{Core.quote(name)} duplicates another attribute's expanded name")
         end
       end
     end
@@ -505,7 +505,7 @@ module Mica::XML
       colon = name.index(':')
       return unless colon
       prefix = name[0, colon]
-      raise BuilderError.new("Namespace prefix #{prefix.inspect} of #{name.inspect} is not declared") unless bound_uri(prefix)
+      raise BuilderError.new("Namespace prefix #{Core.quote(prefix)} of #{Core.quote(name)} is not declared") unless bound_uri(prefix)
     end
 
     # Writes CDATA text, splitting a `]]>` that spans several calls.
@@ -535,7 +535,7 @@ module Mica::XML
       if pubid
         raise BuilderError.new("A public identifier needs a system identifier") unless sysid
         unless pubid.each_char.all? { |char| char != '"' && CharClass.pubid_char?(char.ord) }
-          raise BuilderError.new("Invalid public identifier #{pubid.inspect}")
+          raise BuilderError.new("Invalid public identifier #{Core.quote(pubid)}")
         end
       end
       return unless sysid

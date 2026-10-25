@@ -6,6 +6,7 @@ end
 
 require "./core/position"
 require "./core/error"
+require "./core/excerpt"
 require "./core/work_budget"
 require "./core/utf8"
 require "./core/encoding"

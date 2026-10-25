@@ -146,8 +146,10 @@ module Mica::XML::XPath
     end
 
     private def variable(name : String) : Result
+      # The name is hashed for the lookup.
+      charge(name.bytesize + 1)
       value = @variables.try(&.[name]?)
-      raise XPathError.new("Undefined XPath variable $#{name}") if value.nil?
+      raise XPathError.new("Undefined XPath variable $#{XPath.excerpt(name)}") if value.nil?
       if value.is_a?(NodeSet)
         charge(value.size)
         nodes = value.map do |node|
@@ -295,7 +297,7 @@ module Mica::XML::XPath
       uri = nil
       if prefix = test.prefix
         charge(prefix.bytesize + 1)
-        uri = @namespaces[prefix]? || raise XPathError.new("Undefined namespace prefix '#{prefix}'")
+        uri = @namespaces[prefix]? || raise XPathError.new("Undefined namespace prefix '#{XPath.excerpt(prefix)}'")
         prepaid += 2 * uri.bytesize + 2
       end
       # The local name, or a processing-instruction target, becomes a name
@@ -953,8 +955,9 @@ module Mica::XML::XPath
     private def translate(arguments : Array(Expr), node : Int32, position : Int32, size : Int32) : String
       text = string_argument(arguments, 0, node, position, size)
       from = string_argument(arguments, 1, node, position, size)
-      to = string_argument(arguments, 2, node, position, size).chars
-      charge(text.bytesize + from.bytesize + to.size)
+      replacement = string_argument(arguments, 2, node, position, size)
+      charge(text.bytesize + from.bytesize + replacement.bytesize)
+      to = replacement.chars
       mapping = {} of Char => Char?
       from.each_char_with_index do |char, index|
         mapping[char] = to[index]? unless mapping.has_key?(char)

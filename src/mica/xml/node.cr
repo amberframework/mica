@@ -163,10 +163,10 @@ module Mica::XML
           rename_processing_instruction(new_name, name_id)
           return new_name
         end
-        raise Error.new("Invalid qualified name: #{new_name.inspect}") unless names.qname?(name_id)
+        raise Error.new("Invalid qualified name: #{Core.quote(new_name)}") unless names.qname?(name_id)
         prefix_id = @document.split_prefix_id(name_id)
         if prefix_id == names.intern("xmlns") || new_name == "xmlns"
-          raise Error.new("Use []= to declare namespaces, not a rename to #{new_name.inspect}")
+          raise Error.new("Use []= to declare namespaces, not a rename to #{Core.quote(new_name)}")
         end
         namespace_uri_id = resolve_new_name(new_name, prefix_id)
         check_attribute_rename(new_name, name_id, namespace_uri_id) if attribute?
@@ -180,7 +180,7 @@ module Mica::XML
       return NameTable::EMPTY_ID if attribute? && prefix_id == NameTable::EMPTY_ID
       scope = element? ? @index : record.parent
       namespace_uri_id = @document.resolve_prefix(scope, prefix_id)
-      raise Error.new("Namespace prefix of #{new_name.inspect} is not bound") if namespace_uri_id < 0
+      raise Error.new("Namespace prefix of #{Core.quote(new_name)} is not bound") if namespace_uri_id < 0
       namespace_uri_id
     end
 
@@ -189,7 +189,7 @@ module Mica::XML
       owner = parent
       return unless owner
       sibling = @document.attribute_named(owner.index, name_id)
-      raise Error.new("Attribute #{new_name.inspect} already exists") if sibling && sibling != @index
+      raise Error.new("Attribute #{Core.quote(new_name)} already exists") if sibling && sibling != @index
       return if namespace_uri_id == NameTable::EMPTY_ID
       owner.check_expanded_name_for_rename(namespace_uri_id, @document.split_local_id(name_id), @index)
     end
@@ -201,7 +201,7 @@ module Mica::XML
 
     private def rename_processing_instruction(target : String, name_id : Int32) : Nil
       if target.compare("xml", case_insensitive: true) == 0
-        raise Error.new("The processing instruction target #{target.inspect} is reserved")
+        raise Error.new("The processing instruction target #{Core.quote(target)} is reserved")
       end
       if @document.namespace_aware? && target.includes?(':')
         raise Error.new("A processing instruction target cannot contain a colon")
@@ -322,14 +322,14 @@ module Mica::XML
         Escape.check_text(text, xml11_document?)
         if attribute = find_exact_attribute(name)
           if @document.kind(attribute).namespace_decl? && !same_value?(attribute, text)
-            raise Error.new("Changing the namespace declaration #{name.inspect} is not supported: it would rename nodes in its scope")
+            raise Error.new("Changing the namespace declaration #{Core.quote(name)} is not supported: it would rename nodes in its scope")
           end
           @document.set_value(attribute, text)
           return text
         end
         Escape.check_name(name)
         name_id = names.intern(name)
-        raise Error.new("Invalid qualified name: #{name.inspect}") unless names.qname?(name_id)
+        raise Error.new("Invalid qualified name: #{Core.quote(name)}") unless names.qname?(name_id)
         xmlns_id = names.intern("xmlns")
         if name_id == xmlns_id || @document.split_prefix_id(name_id) == xmlns_id
           add_namespace_declaration(name_id, text)
@@ -339,7 +339,7 @@ module Mica::XML
         prefix_id = @document.split_prefix_id(name_id)
         unless prefix_id == NameTable::EMPTY_ID
           namespace_uri_id = @document.resolve_prefix(@index, prefix_id)
-          raise Error.new("Namespace prefix of #{name.inspect} is not bound") if namespace_uri_id < 0
+          raise Error.new("Namespace prefix of #{Core.quote(name)} is not bound") if namespace_uri_id < 0
           check_unique_expanded_name(namespace_uri_id, @document.split_local_id(name_id), -1)
         end
         @document.append_attribute(@index, name_id, namespace_uri_id, text, Type::ATTRIBUTE_NODE)
@@ -353,15 +353,15 @@ module Mica::XML
       prefix_id = @document.declared_prefix_id(name_id)
       reserved = {Reader::XML_NAMESPACE, Reader::XMLNS_NAMESPACE}
       if prefix_id == NameTable::EMPTY_ID
-        raise Error.new("The default namespace cannot be #{uri.inspect}") if reserved.includes?(uri)
+        raise Error.new("The default namespace cannot be #{Core.quote(uri)}") if reserved.includes?(uri)
       else
         prefix = names[prefix_id]
-        raise Error.new("The prefix #{prefix.inspect} cannot be declared") if prefix == "xml" || prefix == "xmlns"
+        raise Error.new("The prefix #{Core.quote(prefix)} cannot be declared") if prefix == "xml" || prefix == "xmlns"
         raise Error.new("A namespace prefix cannot be bound to an empty URI") if uri.empty?
-        raise Error.new("A prefix cannot be bound to #{uri.inspect}") if reserved.includes?(uri)
+        raise Error.new("A prefix cannot be bound to #{Core.quote(uri)}") if reserved.includes?(uri)
       end
       if subtree_uses_prefix?(prefix_id)
-        raise Error.new("Declaring #{names[name_id].inspect} would rename existing nodes in its scope")
+        raise Error.new("Declaring #{Core.quote(names[name_id])} would rename existing nodes in its scope")
       end
       @document.append_attribute(@index, name_id, @document.xmlns_namespace_id, uri, Type::NAMESPACE_DECL)
     end
@@ -637,7 +637,7 @@ module Mica::XML
       @document.charge_edit(uri.size)
       return if inherited == names.intern(uri)
       if owner.declaration_in_use?(prefix_id)
-        raise Error.new("Removing #{names[@document.data(@index).name_id].inspect} would unbind names in its scope")
+        raise Error.new("Removing #{Core.quote(names[@document.data(@index).name_id])} would unbind names in its scope")
       end
     end
 
@@ -698,7 +698,7 @@ module Mica::XML
     def xpath_nodes(path : String, namespaces : Hash(String, String)? = nil, variables : Hash(String, XPath::Value)? = nil,
                     *, budget : Core::WorkBudget = XPath::DEFAULT_WORK_BUDGET, meter : Core::WorkMeter? = nil) : NodeSet
       result = xpath(path, namespaces, variables, budget: budget, meter: meter)
-      result.as?(NodeSet) || raise XPathError.new("XPath #{path.inspect} returned #{result.class}, not a node set")
+      result.as?(NodeSet) || raise XPathError.new("XPath #{Core.quote(path)} returned #{result.class}, not a node set")
     end
 
     # Evaluates *path* and returns the first node, or nil.

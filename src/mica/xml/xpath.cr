@@ -98,29 +98,18 @@ module Mica::XML
       Expression.new(path, Parser.new(path, work_meter).parse)
     end
 
-    # Characters of an expression or token quoted in an error message.
-    EXCERPT_CHARS = 120
-
     # :nodoc:
     #
-    # Returns *text* cut to its first `EXCERPT_CHARS` characters (with
-    # "..." when cut), so an error message stays short however long the
-    # expression is. Steps over at most `EXCERPT_CHARS` characters.
+    # Returns `Core.excerpt` of *text*.
     def self.excerpt(text : String) : String
-      reader = Char::Reader.new(text)
-      count = 0
-      while reader.has_next? && count < EXCERPT_CHARS
-        reader.next_char
-        count += 1
-      end
-      reader.has_next? ? "#{text.byte_slice(0, reader.pos)}..." : text
+      Core.excerpt(text)
     end
 
     # :nodoc:
     #
-    # Returns `excerpt` of *text*, quoted.
+    # Returns `Core.quote` of *text*.
     def self.quote(text : String) : String
-      excerpt(text).inspect
+      Core.quote(text)
     end
 
     # :nodoc:

@@ -86,7 +86,7 @@ module Mica::XML
 
     # Raises `Mica::Error` unless *name* matches the XML `Name` production.
     def self.check_name(name : String) : Nil
-      raise Error.new("Invalid XML name: #{name.inspect}") unless name?(name)
+      raise Error.new("Invalid XML name: #{Core.quote(name)}") unless name?(name)
     end
 
     # Returns true when *name* is a Namespaces QName: a Name with at most
