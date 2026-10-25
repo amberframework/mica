@@ -22,6 +22,8 @@ class Mica::XML::Reader
       append_scratch_byte(byte)
       return REFERENCE_INLINED
     end
+    # The declaration lookup: charged first.
+    charge(1)
     entity = @dtd.general_entities[name_id]?
     unless entity
       if undeclared_entity_allowed?
@@ -131,6 +133,8 @@ class Mica::XML::Reader
       append_scratch_byte(byte)
       return
     end
+    # The declaration lookup: charged first.
+    charge(1)
     entity = @dtd.general_entities[name_id]?
     unless entity
       return if undeclared_entity_allowed?

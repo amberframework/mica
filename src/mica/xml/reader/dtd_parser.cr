@@ -275,6 +275,9 @@ class Mica::XML::Reader
     require_spaces("after '<!ATTLIST'")
     element_id = scan_declared_name_id
     loop do
+      # A declaration can hold many short definitions: settle the work
+      # (bytes scanned and name-table work) before each one.
+      scan_checkpoint
       had_space = skip_spaces
       byte = peek_byte
       if byte == '>'.ord
@@ -332,6 +335,8 @@ class Mica::XML::Reader
   private def parse_enumeration(notation : Bool) : Nil
     expect_byte('(', "to open the enumeration")
     loop do
+      # Settles the work before each member.
+      scan_checkpoint
       skip_spaces
       start = @pos - @mark
       if notation
@@ -426,6 +431,8 @@ class Mica::XML::Reader
   private def parse_mixed_content : Nil
     names = 0
     loop do
+      # Settles the work before each member.
+      scan_checkpoint
       skip_spaces
       case peek_byte
       when '|'.ord
@@ -454,6 +461,8 @@ class Mica::XML::Reader
     end
     separator = 0
     loop do
+      # Settles the work before each member.
+      scan_checkpoint
       skip_spaces
       if peek_byte == '('.ord
         @pos += 1

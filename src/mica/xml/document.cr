@@ -782,8 +782,12 @@ module Mica::XML
       attribute_index(element)
     end
 
+    # Retrieving a built index is one map lookup, covered by each caller's
+    # per-call charge (plain reads stay unmetered); building one charges
+    # its insertion and every attribute it indexes.
     private def attribute_index(element : Int32) : AttributeIndex
       @attribute_indexes[element] ||= begin
+        charge_edit(1)
         index = AttributeIndex.new
         current = data(element).first_attribute
         while current >= 0
@@ -989,7 +993,9 @@ module Mica::XML
       return @xml_namespace_id if prefix_id == @xml_prefix_id
       current = index
       while current >= 0
-        charge_edit(1)
+        # The step and the declaration-map lookup (attribute_index charges
+        # its own lookup).
+        charge_edit(2)
         if kind(current).element_node?
           if declaration = attribute_index(current).by_declared_prefix[prefix_id]?
             uri = value_bytes(declaration)

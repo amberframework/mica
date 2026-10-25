@@ -77,6 +77,22 @@ module Mica::XML
       @work_budget : Core::WorkBudget = DEFAULT_WORK_BUDGET,
       @check_normalization : Bool = false,
     )
+      check_limit("max_entity_expansions", @max_entity_expansions)
+      check_limit("max_entity_expansion_bytes", @max_entity_expansion_bytes)
+      check_limit("max_entity_depth", @max_entity_depth)
+      check_limit("max_default_attributes", @max_default_attributes)
+      check_limit("max_default_attribute_bytes", @max_default_attribute_bytes)
+      check_limit("max_element_depth", @max_element_depth)
+      check_limit("max_name_bytes", @max_name_bytes)
+      check_limit("max_attributes", @max_attributes)
+      check_limit("max_token_bytes", @max_token_bytes)
+      max_input = @max_input_bytes
+      check_limit("max_input_bytes", max_input) if max_input
+    end
+
+    # Raises `ArgumentError` for a negative limit.
+    private def check_limit(name : String, value : Int) : Nil
+      raise ArgumentError.new("#{name} must not be negative") if value < 0
     end
 
     # Returns the default options.

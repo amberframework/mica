@@ -261,6 +261,10 @@ class Mica::XML::Reader
     in_scratch = false
     scratch_start = @scratch_size
     loop do
+      # Stop bytes handled one at a time (quotes, `]`, `?`, line ends) can
+      # follow each other for a whole token: check the work every
+      # SCAN_CHUNK bytes whichever branch advanced.
+      scan_checkpoint if @pos - @mark - @token_precharged >= SCAN_CHUNK
       # Hot loop: a window of at most SCAN_CHUNK bytes.
       pos = @pos
       limit = @limit
@@ -433,6 +437,10 @@ class Mica::XML::Reader
     segment = start
     in_scratch = false
     loop do
+      # Stop bytes handled one at a time (quotes, `]`, `?`, line ends) can
+      # follow each other for a whole token: check the work every
+      # SCAN_CHUNK bytes whichever branch advanced.
+      scan_checkpoint if @pos - @mark - @token_precharged >= SCAN_CHUNK
       # Hot loop: a window of at most SCAN_CHUNK bytes.
       pos = @pos
       limit = @limit
@@ -631,6 +639,10 @@ class Mica::XML::Reader
     scratch_start = @scratch_size
     end_offset = 0
     loop do
+      # Stop bytes handled one at a time (quotes, `]`, `?`, line ends) can
+      # follow each other for a whole token: check the work every
+      # SCAN_CHUNK bytes whichever branch advanced.
+      scan_checkpoint if @pos - @mark - @token_precharged >= SCAN_CHUNK
       # Hot loop: a window of at most SCAN_CHUNK bytes.
       pos = @pos
       limit = @limit
