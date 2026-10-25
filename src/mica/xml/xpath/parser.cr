@@ -35,7 +35,7 @@ module Mica::XML::XPath
     def parse : Expr
       expression = parse_or
       unless current.kind.end?
-        fail("Unexpected #{current.text.inspect}")
+        fail("Unexpected #{XPath.quote(current.text)}")
       end
       fail("Expression nested too deeply (tree height #{expression.depth})") if expression.depth > MAX_DEPTH
       expression
@@ -68,7 +68,7 @@ module Mica::XML::XPath
     end
 
     private def fail(message : String) : NoReturn
-      raise XPathError.new("#{message} in XPath #{@source.inspect}")
+      raise XPathError.new("#{message} in XPath #{XPath.quote(@source)}")
     end
 
     private def nested(&)
@@ -201,7 +201,7 @@ module Mica::XML::XPath
                      advance
                      parse_function_call(token.text)
                    else
-                     fail("Unexpected #{token.text.inspect}")
+                     fail("Unexpected #{XPath.quote(token.text)}")
                    end
       at(token.offset, expression)
     end
@@ -285,7 +285,7 @@ module Mica::XML::XPath
         if name == "namespace"
           fail("The namespace axis is not supported")
         end
-        axis = AXES[name]? || fail("Unknown axis #{name.inspect}")
+        axis = AXES[name]? || fail("Unknown axis #{XPath.quote(name)}")
         expect(TokenKind::ColonColon, "'::'")
       end
       test = parse_node_test
@@ -323,7 +323,7 @@ module Mica::XML::XPath
         expect(TokenKind::RightParen, "')'")
         test
       else
-        fail("Expected a node test, found #{token.text.inspect}")
+        fail("Expected a node test, found #{XPath.quote(token.text)}")
       end
     end
 

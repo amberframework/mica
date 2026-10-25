@@ -92,7 +92,7 @@ module Mica::XML::XPath
     # there, naming the byte offset.
     private def check_encoding : Nil
       if byte = @reader.error
-        raise XPathError.new("Invalid UTF-8 byte 0x#{byte.to_s(16, upcase: true, precision: 2)} at byte #{@reader.pos} in #{@source.inspect}")
+        raise XPathError.new("Invalid UTF-8 byte 0x#{byte.to_s(16, upcase: true, precision: 2)} at byte #{@reader.pos} in #{XPath.quote(@source)}")
       end
     end
 
@@ -147,7 +147,7 @@ module Mica::XML::XPath
           advance
           return Token.new(TokenKind::ColonColon, "::")
         end
-        raise XPathError.new("Unexpected ':' in #{@source.inspect}")
+        raise XPathError.new("Unexpected ':' in #{XPath.quote(@source)}")
       when '.'
         if peek == '.'
           advance
@@ -174,7 +174,7 @@ module Mica::XML::XPath
         Token.new(TokenKind::Operator, char.to_s)
       when '!'
         advance
-        raise XPathError.new("Expected '=' after '!' in #{@source.inspect}") unless current == '='
+        raise XPathError.new("Expected '=' after '!' in #{XPath.quote(@source)}") unless current == '='
         advance
         Token.new(TokenKind::Operator, "!=")
       when '<', '>'
@@ -197,7 +197,7 @@ module Mica::XML::XPath
         elsif ncname_start?(char)
           lex_name
         else
-          raise XPathError.new("Unexpected character #{char.inspect} in #{@source.inspect}")
+          raise XPathError.new("Unexpected character #{char.inspect} in #{XPath.quote(@source)}")
         end
       end
     end
@@ -208,7 +208,7 @@ module Mica::XML::XPath
         advance
       end
       text = @source.byte_slice(start, @reader.pos - start)
-      raise XPathError.new("Malformed number #{text.inspect}") if text.count('.') > 1
+      raise XPathError.new("Malformed number #{XPath.quote(text)}") if text.count('.') > 1
       Token.new(TokenKind::Number, text, XPath.string_to_number(text))
     end
 
@@ -218,7 +218,7 @@ module Mica::XML::XPath
       while @reader.has_next? && current != quote
         advance
       end
-      raise XPathError.new("Unterminated string literal in #{@source.inspect}") unless @reader.has_next?
+      raise XPathError.new("Unterminated string literal in #{XPath.quote(@source)}") unless @reader.has_next?
       text = @source.byte_slice(start, @reader.pos - start)
       advance
       Token.new(TokenKind::Literal, text)
@@ -234,7 +234,7 @@ module Mica::XML::XPath
 
     private def lex_ncname : String
       start = @reader.pos
-      raise XPathError.new("Expected a name in #{@source.inspect}") unless @reader.has_next? && ncname_start?(current)
+      raise XPathError.new("Expected a name in #{XPath.quote(@source)}") unless @reader.has_next? && ncname_start?(current)
       while @reader.has_next? && ncname_char?(current)
         advance
       end
@@ -255,7 +255,7 @@ module Mica::XML::XPath
       if operator_context?
         name = lex_ncname
         unless OPERATOR_NAMES.includes?(name)
-          raise XPathError.new("Expected an operator, found #{name.inspect} in #{@source.inspect}")
+          raise XPathError.new("Expected an operator, found #{XPath.quote(name)} in #{XPath.quote(@source)}")
         end
         return Token.new(TokenKind::Operator, name)
       end

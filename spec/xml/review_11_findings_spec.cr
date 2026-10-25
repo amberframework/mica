@@ -54,3 +54,17 @@ describe "Codex review 12 findings" do
     root["p:a"]?.should eq("1")
   end
 end
+
+# Regression specs for the thirteenth Codex code review of 2026-10-24.
+describe "Codex review 13 findings" do
+  it "1: quotes at most a short excerpt of a long expression in XPath errors" do
+    long = "a" * 1_000_000
+    {":#{long}", "'é#{long}", "//e[#{long}", "#{long}!"}.each do |source|
+      error = expect_raises(Mica::XML::XPathError) { Mica::XML::XPath.compile(source) }
+      (error.message || "").bytesize.should be < 600
+    end
+    invalid = String.new(Bytes[0xFF_u8] + long.to_slice)
+    error = expect_raises(Mica::XML::XPathError, /0xFF at byte 0/) { Mica::XML::XPath.compile(invalid) }
+    (error.message || "").bytesize.should be < 600
+  end
+end

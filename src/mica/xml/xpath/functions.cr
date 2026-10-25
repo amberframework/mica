@@ -36,13 +36,13 @@ module Mica::XML::XPath
 
     def self.check_signature(name : String, count : Int32, source : String) : Nil
       if UNSUPPORTED.includes?(name)
-        raise XPathError.new("The XPath function #{name}() is not supported in XPath #{source.inspect}")
+        raise XPathError.new("The XPath function #{XPath.excerpt(name)}() is not supported in XPath #{XPath.quote(source)}")
       end
       signature = SIGNATURES[name]?
-      raise XPathError.new("Unknown XPath function #{name}() in XPath #{source.inspect}") unless signature
+      raise XPathError.new("Unknown XPath function #{XPath.excerpt(name)}() in XPath #{XPath.quote(source)}") unless signature
       minimum, maximum = signature
       if count < minimum || (maximum >= 0 && count > maximum)
-        raise XPathError.new("Wrong number of arguments (#{count}) for #{name}() in XPath #{source.inspect}")
+        raise XPathError.new("Wrong number of arguments (#{count}) for #{XPath.excerpt(name)}() in XPath #{XPath.quote(source)}")
       end
     end
   end

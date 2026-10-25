@@ -76,9 +76,6 @@ module Mica::XML::XPath
       to_boolean(evaluate(expression, text_run_start(context), 1, 1))
     end
 
-    # Characters of the expression quoted in a budget error.
-    EXCERPT_CHARS = 120
-
     # Charges *count* operations and raises when the budget or the deadline
     # trips. The error's position is the expression being evaluated.
     @[AlwaysInline]
@@ -92,11 +89,10 @@ module Mica::XML::XPath
       @meter.raise_exceeded(verdict, expression_position, expression_context)
     end
 
-    # The expression, quoted (at most `EXCERPT_CHARS` characters), for
-    # budget messages.
+    # The expression, quoted (at most `XPath::EXCERPT_CHARS` characters),
+    # for budget messages.
     private def expression_context : String
-      excerpt = @source.size > EXCERPT_CHARS ? "#{@source[0, EXCERPT_CHARS]}..." : @source
-      "in XPath #{excerpt.inspect}"
+      "in XPath #{XPath.quote(@source)}"
     end
 
     # The position of the expression part being evaluated: line 1, the
