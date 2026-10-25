@@ -295,14 +295,21 @@ module Mica::XML::XPath
       # hashed and one compare each); probes beyond that are charged after.
       prepaid = 0_i64
       uri = nil
-      if prefix = test.prefix
+      local = test.local
+      prefix = test.prefix
+      if prefix && local && !@namespace_aware
+        # Without namespace processing `p:a` is one name, matched whole.
+        local = "#{prefix}:#{local}"
+        charge(local.bytesize)
+        prefix = nil
+      end
+      if prefix
         charge(prefix.bytesize + 1)
         uri = @namespaces[prefix]? || raise XPathError.new("Undefined namespace prefix '#{XPath.excerpt(prefix)}'")
         prepaid += 2 * uri.bytesize + 2
       end
       # The local name, or a processing-instruction target, becomes a name
       # id here, so matching compares ids.
-      local = test.local
       prepaid += 2 * local.bytesize + 2 if local
       charge(prepaid)
       name_operations = @names.lookup_operations

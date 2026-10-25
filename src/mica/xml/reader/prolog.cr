@@ -93,7 +93,9 @@ class Mica::XML::Reader
       break if byte == quote
       syntax_error("Invalid character in '#{what}'") if byte >= 0x80 || byte < 0x20 || byte == '<'.ord
       @pos += 1
-      check_token_size(@pos - @mark - start)
+      scanned = @pos - @mark - start
+      check_token_size(scanned)
+      scan_checkpoint if scanned % SCAN_CHUNK == 0
     end
     value = String.new(@buffer[@mark + start, @pos - @mark - start])
     @pos += 1

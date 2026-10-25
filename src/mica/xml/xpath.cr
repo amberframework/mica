@@ -82,7 +82,7 @@ module Mica::XML
       private def evaluator(node : Node, namespaces : Hash(String, String)?, variables : Hash(String, Value)?,
                             budget : Core::WorkBudget, meter : Core::WorkMeter?) : Evaluator
         work_meter = meter || Core::WorkMeter.new(budget)
-        work_meter.add_units(node.document.node_count.to_i64 + @source.bytesize)
+        work_meter.add_units(node.document.node_count.to_i64 + node.document.stored_value_bytes + @source.bytesize)
         Evaluator.new(node.document, namespaces, variables, work_meter, @source)
       end
     end

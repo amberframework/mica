@@ -405,25 +405,37 @@ module Mica::XML
     def read_inner_xml : String
       return "" unless @node_type.element?
       element = expand
-      markup = String.build do |io|
-        element.children.each(&.to_xml(io, indent: 0))
+      String.build do |io|
+        writer = MeteredWriter.new(self, io)
+        element.children.each(&.to_xml(writer, indent: 0))
       end
-      charge_serialized(markup)
     end
 
     # Returns the markup of the current element and its children. Consumes
     # the subtree like `expand`.
     def read_outer_xml : String
       return "" unless @node_type.element?
-      charge_serialized(expand.to_xml(indent: 0))
+      element = expand
+      String.build do |io|
+        element.to_xml(MeteredWriter.new(self, io), indent: 0)
+      end
     end
 
-    # Charges writing *markup*, which is linear in the subtree `expand`
-    # just charged (escaping at most multiplies its bytes by six), and
-    # returns it.
-    private def charge_serialized(markup : String) : String
-      charge(markup.bytesize)
-      markup
+    # Passes writes to *io*, charging each one's bytes to the reader first,
+    # so serializing an expanded subtree stops when the budget or the
+    # deadline runs out.
+    private class MeteredWriter < IO
+      def initialize(@reader : Reader, @io : IO)
+      end
+
+      def read(slice : Bytes) : Int32
+        raise Error.new("MeteredWriter is write-only")
+      end
+
+      def write(slice : Bytes) : Nil
+        @reader.charge(slice.size)
+        @io.write(slice)
+      end
     end
 
     # Returns the line of the current read position (1-based).

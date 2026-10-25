@@ -110,6 +110,14 @@ module Mica::XML
     # them, since an edit may read or copy any of them).
     @stored_value_bytes = 0_i64
 
+    # :nodoc:
+    #
+    # The bytes of every value stored so far (text, attribute values and
+    # other node values), for the work allowance of XPath and edits.
+    def stored_value_bytes : Int64
+      @stored_value_bytes
+    end
+
     # Returns the meter that edits through `Node` (setting, renaming and
     # removing attributes, names and content) are charged to. Its units are
     # the document's nodes, name bytes and value bytes when it starts, plus

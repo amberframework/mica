@@ -163,12 +163,17 @@ module Mica::XML
           rename_processing_instruction(new_name, name_id)
           return new_name
         end
-        raise Error.new("Invalid qualified name: #{Core.quote(new_name)}") unless names.qname?(name_id)
-        prefix_id = @document.split_prefix_id(name_id)
-        if prefix_id == names.intern("xmlns") || new_name == "xmlns"
-          raise Error.new("Use []= to declare namespaces, not a rename to #{Core.quote(new_name)}")
+        namespace_uri_id = NameTable::EMPTY_ID
+        # Namespace rules apply only with namespace processing; otherwise a
+        # name is one unit.
+        if @document.namespace_aware?
+          raise Error.new("Invalid qualified name: #{Core.quote(new_name)}") unless names.qname?(name_id)
+          prefix_id = @document.split_prefix_id(name_id)
+          if prefix_id == names.intern("xmlns") || new_name == "xmlns"
+            raise Error.new("Use []= to declare namespaces, not a rename to #{Core.quote(new_name)}")
+          end
+          namespace_uri_id = resolve_new_name(new_name, prefix_id)
         end
-        namespace_uri_id = resolve_new_name(new_name, prefix_id)
         check_attribute_rename(new_name, name_id, namespace_uri_id) if attribute?
         @document.rename(@index, name_id, namespace_uri_id)
         new_name
@@ -329,6 +334,11 @@ module Mica::XML
         end
         Escape.check_name(name)
         name_id = names.intern(name)
+        unless @document.namespace_aware?
+          # Without namespace processing a name is one unit.
+          @document.append_attribute(@index, name_id, NameTable::EMPTY_ID, text, Type::ATTRIBUTE_NODE)
+          return text
+        end
         raise Error.new("Invalid qualified name: #{Core.quote(name)}") unless names.qname?(name_id)
         xmlns_id = names.intern("xmlns")
         if name_id == xmlns_id || @document.split_prefix_id(name_id) == xmlns_id

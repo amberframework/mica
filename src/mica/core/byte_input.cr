@@ -66,7 +66,7 @@ module Mica::Core
       @source_prefix_bytes = prefix_bytes.to_i64
       @input_bytes = bytes.size.to_i64
       input_received(bytes.size)
-      check_input_size
+      check_initial_input_size
     end
 
     # Reads from *io*, starting with the already-read source bytes in
@@ -81,7 +81,7 @@ module Mica::Core
       @source_prefix_bytes = prefix_bytes.to_i64
       @input_bytes = carried.size.to_i64
       input_received(carried.size)
-      check_input_size
+      check_initial_input_size
     end
 
     # Makes at least one more byte available. Returns false at the end of
@@ -117,14 +117,7 @@ module Mica::Core
         @input_bytes_moved += @limit
         @buffer = grown
       end
-      space = @buffer.size - @limit
-      if max = input_size_limit
-        # Read at most one byte past the input size limit, enough to detect
-        # that it was exceeded.
-        remaining = max - @input_bytes + 1
-        space = remaining.clamp(1_i64, space.to_i64).to_i32
-      end
-      read = io.read(@buffer[@limit, space])
+      read = io.read(@buffer[@limit, read_space])
       if read == 0
         @io_eof = true
         return false
@@ -134,6 +127,25 @@ module Mica::Core
       input_received(read)
       check_input_size
       true
+    end
+
+    # Returns how many bytes the next read may fill: the free buffer space,
+    # or at most one byte past the input size limit (enough to detect that
+    # it was exceeded). Never overflows, even for a limit of Int64::MAX.
+    private def read_space : Int32
+      space = @buffer.size - @limit
+      max = input_size_limit || return space
+      remaining = max - @input_bytes
+      remaining < space ? Math.max(remaining + 1, 1_i64).to_i32 : space
+    end
+
+    # Checks the bytes a source starts with. The error points at the first
+    # byte past the limit.
+    private def check_initial_input_size : Nil
+      max = input_size_limit || return
+      return unless @input_bytes > max
+      @pos = (max - @source_prefix_bytes).clamp(0_i64, @limit.to_i64).to_i32
+      check_input_size
     end
 
     private def check_input_size : Nil
