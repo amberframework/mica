@@ -85,12 +85,17 @@ describe "Codex review 39 findings" do
     Mica::Core::ByteSearch.index(haystack, needle) { |count| reports << count }.should be_nil
     reports.max.should be <= Mica::Core::ByteSearch::STEP_CHUNK
     reports.sum.should be <= 2 * haystack.size + 3 * needle.size
-    # A meter that stops at its first report stops the scan before it runs.
-    expect_raises(Mica::WorkBudgetExceededError) do
-      meter = Mica::Core::WorkMeter.new(Mica::Core::WorkBudget.new(operations_per_unit: 0, base_operations: 0))
-      Mica::Core::ByteSearch.index(haystack, needle) do |count|
-        meter.enforce { Mica::Core::Position.new(0_i64) } if meter.charge(count)
-      end
-    end
+    # Counting real comparisons beside the reports: every scan comparison
+    # was reported before it ran. The all-`a` haystack and `a…ab` needle
+    # make the scan fall back on almost every byte.
+    reported = 0_i64
+    Mica::Core::ByteSearch.index(haystack, needle) { |count| reported += count }
+    reported.should be >= 2 * haystack.size - 2 * needle.size
+  end
+
+  it "2: credits a stream's sniffed bytes before charging their copy" do
+    budget = Mica::Core::WorkBudget.new(operations_per_unit: 64, base_operations: 0)
+    options = Mica::XML::ParserOptions.new(work_budget: budget)
+    Mica::XML.parse(IO::Memory.new("<r>#{"x" * 100}</r>"), options).root.try(&.name).should eq("r")
   end
 end
