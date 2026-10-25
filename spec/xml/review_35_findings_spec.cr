@@ -125,3 +125,10 @@ describe "Codex review 43 findings" do
     report.list_of_budget_overruns.should be_empty
   end
 end
+
+# Regression spec for the forty-fourth Codex code review of 2026-10-25.
+describe "Codex review 44 findings" do
+  it "1: rejects a negative operation cap" do
+    expect_raises(ArgumentError, /max_operations/) { Mica::Core::WorkBudget.new(max_operations: -1) }
+  end
+end

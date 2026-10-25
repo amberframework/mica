@@ -36,6 +36,9 @@ module Mica::Core
     )
       raise ArgumentError.new("operations_per_unit must not be negative") if operations_per_unit < 0
       raise ArgumentError.new("base_operations must not be negative") if base_operations < 0
+      if max_operations && max_operations < 0
+        raise ArgumentError.new("max_operations must not be negative")
+      end
       @operations_per_unit = operations_per_unit.to_i64
       @base_operations = base_operations.to_i64
       @max_operations = max_operations.try(&.to_i64)

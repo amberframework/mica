@@ -112,8 +112,9 @@ module Mica::Testing
         unless trial.failures.empty?
           @report.list_of_crashes << "#{id} #{trial.failures.first}"
         end
-        # Compared by subtraction, so an unlimited allowance cannot overflow.
-        if trial.operations > trial.allowance && trial.operations - trial.allowance > @overrun_slack
+        # Compared in Int128, so no allowance (unlimited or negative) can
+        # overflow the check.
+        if trial.operations.to_i128 - trial.allowance > @overrun_slack
           @report.list_of_budget_overruns << "#{id} #{trial.operations} ops > allowance #{trial.allowance}"
         end
         next unless @check_determinism
