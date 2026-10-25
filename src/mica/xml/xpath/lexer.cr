@@ -36,10 +36,9 @@ module Mica::XML::XPath
 
     @tokens = [] of Token
 
-    # Characters the lexer has stepped over (lookahead included), and how
-    # many of them were charged. A long literal, name or space run is
-    # charged every LEX_CHUNK characters, so it stops partway when the
-    # meter runs out.
+    # Bytes the lexer has stepped over (lookahead included), and how many
+    # of them were charged. A long literal, name or space run is charged
+    # every LEX_CHUNK bytes, so it stops partway when the meter runs out.
     @steps = 0
     @charged_steps = 0
     @token_start = 0

@@ -573,7 +573,9 @@ module Mica::XML
     private def check_internal_subset(name : String, subset : String) : Nil
       options = ParserOptions.new(namespace_aware: false)
       meter = Core::WorkMeter.new(options.work_budget)
-      copy = subset.bytesize.to_i64 + 2_i64 * name.bytesize + 16
+      # The fixed text of the check document: "<!DOCTYPE ", " [", "]><"
+      # and "/>".
+      copy = subset.bytesize.to_i64 + 2_i64 * name.bytesize + 17
       meter.add_units(copy)
       if meter.charge(copy)
         meter.enforce("while checking the internal DTD subset") { Core::Position.new(0_i64) }
