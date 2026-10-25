@@ -1,9 +1,10 @@
 # Adding a format to Mica
 
 Mica is one library with many formats. Each format lives in its own
-namespace (`Mica::XML` today; `Mica::JSON`, `Mica::YAML`, `Mica::CBOR`,
-`Mica::COSE`, `Mica::HTTP1`, `Mica::URI`, `Mica::Multipart`, `Mica::CSV`,
-`Mica::TOML` and `Mica::Markdown` later) and builds on `Mica::Core` for
+namespace (`Mica::XML` and `Mica::Form` today; `Mica::JSON`,
+`Mica::YAML`, `Mica::CBOR`, `Mica::COSE`, `Mica::HTTP1`, `Mica::URI`,
+`Mica::Multipart`, `Mica::CSV`, `Mica::TOML` and `Mica::Markdown` later)
+and builds on `Mica::Core` for
 everything that is not specific to its grammar. A new format needs no
 change to `Mica::Core`: it includes the core modules, implements a few
 hooks, and reuses the error types, the work budget and the test harnesses.

@@ -9,6 +9,10 @@ format parsers on one shared core:
 - `Mica::XML`: XML 1.0 (5th edition) and XML 1.1 (2nd edition) with
   Namespaces 1.0 and 1.1: a streaming reader, a DOM, a builder and
   XPath 1.0.
+- `Mica::Form`: `application/x-www-form-urlencoded` bodies and query
+  strings (WHATWG URL Standard, section 5) into ordered pairs, and bracket
+  and dot keys (`user[address][city]`, `tags[]`, `user.name`) into a
+  nested value, under required limits.
 - `Mica::Testing` (opt-in, `require "mica/testing"`): the complexity,
   fuzzing and requirement-traceability harnesses every format uses.
 
@@ -98,6 +102,46 @@ characters, splits `]]>` in CDATA, and raises `Mica::XML::BuilderError` for
 misuse (an attribute after content, a second root, a `--` in a comment).
 Methods match stdlib `XML::Builder`. It writes UTF-8 only, and when writing
 XML 1.1 it escapes control characters as character references.
+
+## Forms and query strings
+
+`Mica::Form` parses `application/x-www-form-urlencoded` bodies and URL
+query strings. Every entry point takes a required `limits:` argument, so
+each call site states its limits:
+
+```crystal
+require "mica"
+
+limits = Mica::Form::Limits::REQUEST_BODY # or QUERY_STRING, or Limits.new(...)
+
+pairs = Mica::Form::Pairs.parse("a=1&b=x+y&a=%C3%A9", limits: limits)
+pairs.fetch_all("a") # => ["1", "é"]
+pairs.to_s           # => "a=1&b=x+y&a=%C3%A9"
+
+value = Mica::Form.parse("user[name]=Ada&user[tags][]=x&items[2]=c", limits: limits)
+value["user"]["name"].as_s             # => "Ada"
+value["user"]["tags"].as_a.map(&.as_s) # => ["x"]
+value["items"].as_a.size               # => 3 (nil, nil, "c")
+```
+
+- `Pairs` follows the WHATWG urlencoded parser and serializer, except
+  that decoded bytes must be valid UTF-8: where WHATWG substitutes U+FFFD,
+  Mica raises `Mica::EncodingError` at the byte where the invalid sequence
+  starts. Stdlib `URI::Params` passes invalid UTF-8 through into its
+  strings and also splits on `;`.
+- `NestedKeys` implements the Rack bracket convention with an explicit
+  grammar (documented on the class): `a[b][c]`, `a[]` (append), `a[0]`
+  (index), Rack's `a[][x]` rule and dot keys `a.b.c`. Malformed keys raise
+  `Mica::Form::KeySyntaxError`; keys that need different kinds of value at
+  one path raise `Mica::Form::KeyConflictError`. Nothing is silently
+  skipped.
+- Limits: `max_input_bytes` (2 MiB for a request body), `max_pairs`
+  (1,000), `max_key_depth` (32), `max_array_index` (1,000; `a[999999999]`
+  is rejected at once, with no allocation), `max_array_slots` (10,000 in
+  the whole result) and a work budget with a 5 second deadline.
+  `Limits.unbounded(reason: "...")` turns them off for trusted input.
+- Parsing is linear in the input (`spec/form/complexity_spec.cr` checks 15
+  adversarial shapes by operation count at n and 8n).
 
 ## Security and limits
 
@@ -318,6 +362,15 @@ crystal-alpha build --release fuzz/campaign.cr -o bin/fuzz_campaign
 bin/fuzz_campaign SEED ITERATIONS [FIRST]
 MICA_FUZZ_SEED=7 MICA_FUZZ_ITERATIONS=300000 crystal-alpha spec spec/xml/fuzz_spec.cr
 crystal-alpha run --release fuzz/differential.cr -- 20261024 20000
+
+# Mica::Form: the web-platform-tests urlencoded vectors (pinned by commit
+# and sha256 in conformance/form/wpt_urlencoded.json), the release fuzz
+# campaign (with the stdlib URI::Params differential) and the benchmark
+# against stdlib URI::Params
+crystal-alpha run --release conformance/form/run.cr
+crystal-alpha build --release fuzz/form_campaign.cr -o bin/form_fuzz_campaign
+bin/form_fuzz_campaign SEED ITERATIONS [FIRST]
+bench/form_run.sh
 
 # Benchmarks against stdlib XML (libxml2)
 crystal-alpha run --release bench/generate.cr
