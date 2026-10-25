@@ -157,7 +157,9 @@ module Mica::Core
     # expensive context string call `verdict` themselves and then this.
     def raise_exceeded(verdict : Verdict, position : Position, context : String? = nil) : NoReturn
       message = describe(verdict)
-      message = "#{message} #{context}" if context
+      # The context is clipped, so a long caller-supplied string cannot
+      # grow the message.
+      message = "#{message} #{Core.excerpt(context, Core::CONTEXT_CHARS)}" if context
       if verdict.deadline_exceeded?
         raise DeadlineExceededError.new(message, position, elapsed)
       end

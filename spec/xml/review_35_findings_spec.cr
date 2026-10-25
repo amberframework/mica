@@ -158,3 +158,15 @@ describe "Codex review 46 findings" do
     report.list_of_crashes.first.should contain("(replay)")
   end
 end
+
+# Regression spec for the forty-seventh Codex code review of 2026-10-25.
+describe "Codex review 47 findings" do
+  it "1: clips a long context in a budget message" do
+    meter = Mica::Core::WorkMeter.new(Mica::Core::WorkBudget.new(operations_per_unit: 0, base_operations: 0))
+    meter.charge(1)
+    error = expect_raises(Mica::WorkBudgetExceededError) do
+      meter.enforce("x" * 1_000_000) { Mica::Core::Position.new(0_i64) }
+    end
+    (error.message || "").size.should be < 600
+  end
+end

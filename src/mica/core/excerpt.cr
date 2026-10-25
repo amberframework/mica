@@ -2,13 +2,17 @@ module Mica::Core
   # Characters of input quoted in an error message.
   EXCERPT_CHARS = 120
 
-  # Returns *text* cut to its first `EXCERPT_CHARS` characters (with "..."
-  # when cut), so an error message stays short however long the input is.
-  # Steps over at most `EXCERPT_CHARS` characters.
-  def self.excerpt(text : String) : String
+  # Characters of caller-supplied context (which may itself hold an
+  # excerpt) appended to a budget or deadline message.
+  CONTEXT_CHARS = 2 * EXCERPT_CHARS + 40
+
+  # Returns *text* cut to its first *limit* characters (with "..." when
+  # cut), so an error message stays short however long the input is.
+  # Steps over at most *limit* characters.
+  def self.excerpt(text : String, limit : Int32 = EXCERPT_CHARS) : String
     reader = Char::Reader.new(text)
     count = 0
-    while reader.has_next? && count < EXCERPT_CHARS
+    while reader.has_next? && count < limit
       reader.next_char
       count += 1
     end
