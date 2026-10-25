@@ -314,19 +314,23 @@ class Mica::XML::Reader
   # Grows the scratch buffer to hold *extra* more bytes.
   @[AlwaysInline]
   private def reserve_scratch(extra : Int32) : Nil
-    needed = @scratch_size + extra
+    needed = @scratch_size.to_i64 + extra
     return if needed <= @scratch.size
-    if needed.to_i64 > @options.max_token_bytes.to_i64 * 2 + Core::ByteInput::TOKEN_SLACK
+    # Sizes are computed in Int64 and capped at the largest buffer an
+    # Int32 index can address, so a raised limit never overflows.
+    limit = Math.min(@options.max_token_bytes.to_i64 * 2 + Core::ByteInput::TOKEN_SLACK, Int32::MAX.to_i64)
+    if needed > limit
       limit_error("Token exceeds max_token_bytes (#{@options.max_token_bytes})")
     end
-    capacity = @scratch.size
+    capacity = @scratch.size.to_i64
     while capacity < needed
       capacity *= 2
     end
+    capacity = Math.min(capacity, limit)
     # Growth copies what scratch holds (geometrically, so each byte a
     # bounded number of times): charged first.
     charge(@scratch_size)
-    grown = Bytes.new(capacity)
+    grown = Bytes.new(capacity.to_i32)
     grown.copy_from(@scratch[0, @scratch_size])
     @scratch = grown
   end

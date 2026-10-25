@@ -162,8 +162,9 @@ Every operation runs under a `WorkMeter`:
 
 Pick the default budget from measurement: run the format's corpus and its
 fuzz campaign, read `max_ops_per_unit` from the report, and set
-`operations_per_unit` to about twenty times that. XML measures at most
-3 operations per byte and uses 64.
+`operations_per_unit` to at least ten times that. XML measures at most
+5.6 operations per byte (the maximum over 2,000,000 fuzz cases)
+and uses 64, about eleven times that.
 
 ### Linear-time searching: `Core::ByteSearch`
 

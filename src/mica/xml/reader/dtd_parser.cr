@@ -296,8 +296,8 @@ class Mica::XML::Reader
   private def record_attribute_declaration(element_id : Int32, decl : DTD::AttributeDecl) : Nil
     return unless processing_declarations?
     # The duplicate check, the insertion, the element set and the default
-    # list each take one hash operation.
-    charge(4)
+    # list (a read and, on first use, a write) take five hash operations.
+    charge(5)
     @dtd.add_attribute_declaration(element_id, decl)
   end
 

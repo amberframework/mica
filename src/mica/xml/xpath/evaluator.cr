@@ -278,12 +278,14 @@ module Mica::XML::XPath
         charge(nodes.size)
         return nodes if strictly_increasing?(nodes)
       end
-      # Comparison sort: n log2 n comparisons.
-      charge(nodes.size.to_i64 * (64 - nodes.size.leading_zeros_count))
+      # Comparison sort: n log2 n comparisons, then one deduplication pass.
+      charge(nodes.size.to_i64 * (65 - nodes.size.leading_zeros_count))
       if @document.index_order?
         nodes.sort!
       else
         charge(ORDER_KEY_PASSES * @document.node_count) unless @document.order_keys_ready?
+        # sort_by! builds a key per node first.
+        charge(nodes.size)
         nodes.sort_by! { |node| @document.order_key(node) }
       end
       drop_adjacent_duplicates(nodes)
@@ -327,11 +329,11 @@ module Mica::XML::XPath
       if prefix
         charge(prefix.bytesize + 1)
         uri = @namespaces[prefix]? || raise XPathError.new("Undefined namespace prefix '#{XPath.excerpt(prefix)}'")
-        prepaid += 2 * uri.bytesize + 2
+        prepaid += 2_i64 * uri.bytesize + 2
       end
       # The local name, or a processing-instruction target, becomes a name
       # id here, so matching compares ids.
-      prepaid += 2 * local.bytesize + 2 if local
+      prepaid += 2_i64 * local.bytesize + 2 if local
       charge(prepaid)
       name_operations = @names.lookup_operations
       local_id = @names.lookup(local.to_slice) if local

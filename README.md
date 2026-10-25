@@ -138,7 +138,7 @@ and evaluation, before it returns).
 
 | Operation | Default budget | Default deadline | Measured cost of valid input |
 |---|---|---|---|
-| Parse (`ParserOptions::DEFAULT_WORK_BUDGET`) | 1,000,000 + 64 per byte | 60 s | at most 4.2 operations per byte (fuzz maximum) |
+| Parse (`ParserOptions::DEFAULT_WORK_BUDGET`) | 1,000,000 + 64 per byte | 60 s | at most 5.6 operations per byte (fuzz maximum over 2M cases) |
 | XPath (`XPath::DEFAULT_WORK_BUDGET`) | 1,000,000 + 64 per node | 10 s | about 2 operations per node for `count(//*)` |
 | DOM edits (`Document::DEFAULT_EDIT_BUDGET`) | 1,000,000 + 64 per node, name byte, edit call and byte given to edits | none | a few operations per edit |
 

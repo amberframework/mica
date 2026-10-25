@@ -362,7 +362,7 @@ module Mica::XML
       uri = @names[uri_id].to_slice
       # Building, hashing and comparing the declaration's name, and storing
       # the URI: charged first (the table's count is settled at the end).
-      reader.charge(2_i64 + uri.size + 3 * (@names[prefix_id].bytesize + 6))
+      reader.charge(2_i64 + uri.size + 3_i64 * (@names[prefix_id].bytesize + 6))
       declaration_id = prefix_id == NameTable::EMPTY_ID ? @xmlns_id : @names.intern("xmlns:#{@names[prefix_id]}")
       expansion.tail = add_attribute_node(Node::Type::NAMESPACE_DECL, expansion.root, declaration_id, @xmlns_namespace_id, uri, expansion.tail)
       mark_order_dirty
@@ -802,7 +802,7 @@ module Mica::XML
     # `index_work` before changing the tree, so nothing here can raise and
     # leave the tree and its index out of step.
     private def index_attribute(index : AttributeIndex, attribute : Int32, prepaid : Bool = false) : Nil
-      charge_edit(1) unless prepaid
+      charge_edit(INDEX_MAP_OPERATIONS) unless prepaid
       record = data(attribute)
       index.by_name[record.name_id] ||= attribute
       if record.kind.namespace_decl?
@@ -816,17 +816,19 @@ module Mica::XML
       insert_in_order(index, index.by_local_name.put_if_absent(local_id) { LocalCandidates.new }, attribute, prepaid)
     end
 
+    # The record plus a read and a write in each of the by-name, by-prefix
+    # or by-expanded-name and candidate maps.
+    private INDEX_MAP_OPERATIONS = 7_i64
+
     # The work `index_attribute` will charge for *attribute* (-1 for one
     # not yet added) named *name_id* of *kind* at list position *position*,
     # computed without changing anything (the steps `insert_in_order`
     # takes).
     private def index_work(index : AttributeIndex, attribute : Int32, name_id : Int32, kind : Node::Type, position : Int32) : Int64
-      # One record, the by-name and by-prefix or by-expanded-name maps and
-      # the candidate list lookup.
-      work = 3_i64
+      work = INDEX_MAP_OPERATIONS
       return work if kind.namespace_decl?
-      # The candidate lookup below is charged before it runs.
-      charge_edit(1)
+      # The candidate lookup and the order read below: charged first.
+      charge_edit(2)
       candidates = index.by_local_name[split_local_id(name_id)]? || return work
       list = candidates.list
       head = candidates.head
@@ -873,8 +875,8 @@ module Mica::XML
     end
 
     private def unindex_attribute(index : AttributeIndex, attribute : Int32) : Nil
-      # Up to three map lookups and deletions.
-      charge_edit(3)
+      # Up to three map lookups and three deletions.
+      charge_edit(6)
       record = data(attribute)
       index.by_name.delete(record.name_id) if index.by_name[record.name_id]? == attribute
       key = {record.namespace_uri_id, split_local_id(record.name_id)}
@@ -894,8 +896,9 @@ module Mica::XML
       index = attribute_index(element)
       # Every charge comes before the tree changes, so a budget trip leaves
       # the tree and its index unchanged.
-      # The index work and the prefix-use count update.
-      charge_edit(index_work(index, -1, name_id, kind, index.next_order) + 1)
+      # The index work and the prefix-use count update (a read and a
+      # write).
+      charge_edit(index_work(index, -1, name_id, kind, index.next_order) + 2)
       attribute = add_attribute_node(kind, element, name_id, namespace_uri_id, value.to_slice, index.tail)
       index.order[attribute] = index.next_order
       index.next_order += 1
@@ -915,8 +918,8 @@ module Mica::XML
       # Every charge comes before the tree changes, so a budget trip leaves
       # the tree and its index unchanged.
       charge_edit(index_work(attribute_index, index, name_id, record.kind, attribute_index.order[index])) if attribute_index
-      # The two prefix-use count updates.
-      charge_edit(2)
+      # The two prefix-use count updates (a read and a write each).
+      charge_edit(4)
       unindex_attribute(attribute_index, index) if attribute_index
       count_name_use(record.name_id, -1) if named
       write_rename(index, name_id, namespace_uri_id)
@@ -955,7 +958,8 @@ module Mica::XML
     end
 
     private def count_prefix_uses : Hash(Int32, Int32)
-      charge_edit(@size)
+      # A visit, a read and a write per node: charged first.
+      charge_edit(3_i64 * @size)
       counts = {} of Int32 => Int32
       @size.times do |node|
         record = data(node)
@@ -966,7 +970,7 @@ module Mica::XML
       counts
     end
 
-    # Its one map update is charged by the caller before the tree changes.
+    # Its read and write are charged by the caller before the tree changes.
     private def count_name_use(name_id : Int32, delta : Int32) : Nil
       counts = @prefix_use_counts || return
       prefix_id = @names.prefix_id(name_id)

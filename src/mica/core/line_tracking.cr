@@ -8,12 +8,16 @@ module Mica::Core
   # answer makes repeated questions on the same line cost only the distance
   # moved, so asking for the position after every event stays linear in the
   # input size even on a single-line document.
+  #
+  # Line and column numbers saturate at `Int32::MAX` (the byte offset in a
+  # `Position` stays exact), so a stream of any length cannot overflow
+  # them.
   module LineTracking
     @line = 1
     @line_start = 0_i64
-    @column_offset = 0
+    @column_offset = 0_i64
     @column_cache_offset = -1_i64
-    @column_cache_value = 0
+    @column_cache_value = 0_i64
     @column_cache_line_start = -1_i64
     # Bytes examined by `column_at`, for work accounting.
     @column_steps = 0_i64
@@ -22,9 +26,9 @@ module Mica::Core
     # *next_line_start*.
     @[AlwaysInline]
     private def record_line_break(next_line_start : Int64) : Nil
-      @line += 1
+      @line += 1 if @line < Int32::MAX
       @line_start = next_line_start
-      @column_offset = 0
+      @column_offset = 0_i64
     end
 
     # Folds the characters between the line start and the end of the bytes
@@ -58,9 +62,9 @@ module Mica::Core
     # meter can stop a long count partway.
     private def column_at(buffer : Bytes, pos : Int32, base : Int64, & : Int32 ->) : Int32
       absolute = base + pos
-      return (absolute - @line_start).to_i32 + 1 if @line_start < base || @line_start > absolute
+      return saturated_column(absolute - @line_start + 1) if @line_start < base || @line_start > absolute
       start = (@line_start - base).to_i32
-      column = 1 + @column_offset
+      column = 1_i64 + @column_offset
       cached = @column_cache_offset
       if @column_cache_line_start == @line_start && cached >= @line_start && cached >= base && cached <= absolute
         start = (cached - base).to_i32
@@ -78,7 +82,11 @@ module Mica::Core
       @column_cache_offset = absolute
       @column_cache_value = column
       @column_cache_line_start = @line_start
-      column
+      saturated_column(column)
+    end
+
+    private def saturated_column(column : Int64) : Int32
+      Math.min(column, Int32::MAX.to_i64).to_i32
     end
   end
 end

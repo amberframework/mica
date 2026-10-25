@@ -112,7 +112,9 @@ module Mica::Core
         @pin -= keep if pin >= 0
       end
       if @limit == @buffer.size
-        capacity = input_token_limit.to_i64 + TOKEN_SLACK
+        # Capped at the largest buffer an Int32 index can address, so a
+        # raised token limit never overflows the size computation.
+        capacity = Math.min(input_token_limit.to_i64 + TOKEN_SLACK, Int32::MAX.to_i64)
         if @buffer.size.to_i64 >= capacity
           input_limit_error("Token exceeds the token size limit (#{input_token_limit} bytes)")
         end

@@ -158,7 +158,10 @@ class Mica::XML::Reader
       limit_error("Entity references nested deeper than max_entity_depth (#{@options.max_entity_depth})")
     end
     charge_expansion(text.size)
-    charge(text.size)
+    # The scan, then for references the search for `;`, the pass over the
+    # body (digits or name) and interning a name: four passes, charged
+    # first.
+    charge(4_i64 * text.size)
     @attribute_entity_stack << entity
     index = 0
     size = text.size

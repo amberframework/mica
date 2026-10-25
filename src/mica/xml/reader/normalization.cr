@@ -59,8 +59,8 @@ class Mica::XML::Reader
   private def position_after(start : Core::Position, index : Int32, stop : Int32) : Core::Position
     # One pass over the bytes between: charged first.
     charge(stop - index) if stop > index
-    line = start.line
-    column = start.column
+    line = start.line.to_i64
+    column = start.column.to_i64
     while index < stop
       length = line_end_length(index, stop)
       if length > 0
@@ -72,7 +72,9 @@ class Mica::XML::Reader
       column += 1 unless @buffer[index] & 0xC0 == 0x80
       index += 1
     end
-    Core::Position.new(source_offset_at(@buffer, stop, @base_offset) { |count| charge(count) }, line, column)
+    # Line and column saturate, as in `Core::LineTracking`.
+    Core::Position.new(source_offset_at(@buffer, stop, @base_offset) { |count| charge(count) },
+      Math.min(line, Int32::MAX.to_i64).to_i32, Math.min(column, Int32::MAX.to_i64).to_i32)
   end
 
   # Returns the bytes of the line end at *index* (before *stop*), or 0.
@@ -260,7 +262,9 @@ class Mica::XML::Reader
   # Returns the non-space bytes that replacement text *text* adds to an
   # attribute value, as `expand_attribute_entity` expands it.
   private def replacement_output_size(text : Bytes) : Int32
-    charge(text.size)
+    # The scan, the search for each `;` and the pass over each reference
+    # body: charged first.
+    charge(3_i64 * text.size)
     size = 0
     index = 0
     while index < text.size
@@ -304,8 +308,28 @@ class Mica::XML::Reader
     if length > 0 && ComposingCharacters.includes?(code)
       raise NormalizationError.new("The #{construct} starts with the composing character U+#{hex_code(code)} (XML 1.1 section 2.13)", yield 0)
     end
-    return if String.new(bytes).unicode_normalized?(:nfc)
+    return if nfc?(bytes)
     raise NormalizationError.new("The #{construct} is not in Unicode Normalization Form C (XML 1.1 section 2.13)", yield offending_normalization_index(bytes))
+  end
+
+  # True when *bytes* are in NFC. The quick check is linear and covered by
+  # the per-byte charge. When it cannot decide, the full test normalizes,
+  # and canonical ordering sorts each run of combining characters, which
+  # costs up to n log n: that is charged first, so a long run of
+  # combining marks stops at the budget.
+  private def nfc?(bytes : Bytes) : Bool
+    text = String.new(bytes)
+    # `Unicode.quick_check_normalized` is the check `String#unicode_normalized?`
+    # runs first; calling it here lets the sort be charged before it runs.
+    case Unicode.quick_check_normalized(text, Unicode::NormalizationForm::NFC)
+    in .yes?
+      true
+    in .no?
+      false
+    in .maybe?
+      charge(bytes.size.to_i64 * (65 - bytes.size.leading_zeros_count))
+      text.unicode_normalized?(:nfc)
+    end
   end
 
   # Returns the byte index of the character that makes *bytes* (known not
@@ -326,7 +350,7 @@ class Mica::XML::Reader
         break unless length > 0 && ComposingCharacters.includes?(code)
         index += length
       end
-      next if String.new(bytes[segment_start, index - segment_start]).unicode_normalized?(:nfc)
+      next if nfc?(bytes[segment_start, index - segment_start])
       return blamed_in_segment(bytes, segment_start, first_composing, index)
     end
     0
