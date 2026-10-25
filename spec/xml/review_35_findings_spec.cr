@@ -110,3 +110,18 @@ describe "Codex review 42 findings" do
     meter.operations.should be >= 90_000
   end
 end
+
+# Regression spec for the forty-third Codex code review of 2026-10-25.
+describe "Codex review 43 findings" do
+  it "2: checks overruns against an unlimited allowance without overflow" do
+    mutator = Mica::Testing::ByteMutator.new(["<a/>".to_slice])
+    campaign = Mica::Testing::FuzzCampaign.new(mutator, seed: 3_i64, overrun_slack: 70_000_i64)
+    report = campaign.run(3) do |_, _|
+      meter = Mica::Core::WorkMeter.new(Mica::Core::WorkBudget.unlimited)
+      meter.charge(10)
+      Mica::Testing::FuzzCampaign::Trial.new("ok", nil, meter)
+    end
+    report.cases.should eq(3)
+    report.list_of_budget_overruns.should be_empty
+  end
+end
