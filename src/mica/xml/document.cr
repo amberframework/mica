@@ -298,6 +298,7 @@ module Mica::XML
         finish_text_merge(reader)
       end
       reader.finish_expand(name_id, namespace_uri_id, depth)
+      reader.settle_name_operations
       @expansion = nil
       @parse_operations = reader.operations - start_operations
     end
@@ -349,7 +350,9 @@ module Mica::XML
       return if reader.inherited_binding_uri(prefix_id, expansion.binding_mark) != uri_id
       expansion.declared << prefix_id
       uri = @names[uri_id].to_slice
-      reader.charge(2 + uri.size + @names[prefix_id].bytesize)
+      # Building, hashing and comparing the declaration's name, and storing
+      # the URI: charged first (the table's count is settled at the end).
+      reader.charge(2 + uri.size + 3 * (@names[prefix_id].bytesize + 6))
       declaration_id = prefix_id == NameTable::EMPTY_ID ? @xmlns_id : @names.intern("xmlns:#{@names[prefix_id]}")
       expansion.tail = add_attribute_node(Node::Type::NAMESPACE_DECL, expansion.root, declaration_id, @xmlns_namespace_id, uri, expansion.tail)
       mark_order_dirty

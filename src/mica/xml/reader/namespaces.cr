@@ -7,15 +7,13 @@ class Mica::XML::Reader
   # this tag's bindings.
   #
   # Checking and splitting the names passes over them once more. For a
-  # wide tag that pass is charged first, as the tag's bytes (which hold
-  # every name), so a budget trip stops it; a narrow tag's names join the
-  # token's pending work.
+  # wide tag (DTD defaults included) that pass is charged first, as the
+  # bytes of every attribute name, so a budget trip stops it; a narrow
+  # tag's names join the token's pending work.
   private def process_namespaces(element_id : Int32) : Int32
     binding_mark = @binding_prefixes.size
     count = @attrs.size
-    if count > LINEAR_ATTRIBUTE_SCAN
-      charge(@pos - @mark)
-    end
+    charge(attribute_name_bytes) if count > LINEAR_ATTRIBUTE_SCAN
     charge_in_token(count)
     index = 0
     while index < count
@@ -88,6 +86,13 @@ class Mica::XML::Reader
     end
     # In XML 1.1 documents (Namespaces 1.1), `xmlns:p=""` undeclares p.
     push_binding(prefix_id, uri_id)
+  end
+
+  # Returns the bytes of the current tag's attribute names, one step each.
+  private def attribute_name_bytes : Int64
+    total = @attrs.size.to_i64
+    @attrs.each { |slot| total += @names[slot.name_id].bytesize }
+    total
   end
 
   # Interns a declaration's URI. Hashing and storing it pass over its bytes,

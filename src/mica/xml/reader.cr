@@ -513,6 +513,14 @@ module Mica::XML
 
     # :nodoc:
     #
+    # Charges the name-table work done since the last charge (the DOM
+    # builder settles an expansion with it).
+    def settle_name_operations : Nil
+      charge(take_name_operations)
+    end
+
+    # :nodoc:
+    #
     # The binding stack size before the current start tag's declarations:
     # bindings below it were declared by the tag's ancestors.
     def event_binding_mark : Int32
@@ -581,11 +589,13 @@ module Mica::XML
 
     private def attribute_index(name : String) : Int32
       return -1 unless @node_type.element?
-      # The caller's name is hashed and compared: charged before and after.
-      charge(name.bytesize + 1)
+      # The caller's name is hashed and compared (two passes): charged
+      # before; probes beyond that after.
+      prepaid = 2_i64 * name.bytesize + 2
+      charge(prepaid)
       lookups = @names.lookup_operations
       id = @names.lookup(name.to_slice)
-      charge(@names.lookup_operations - lookups)
+      charge(Math.max(@names.lookup_operations - lookups - prepaid, 0_i64))
       return -1 if id < 0
       find_attribute_slot(id) || -1
     end

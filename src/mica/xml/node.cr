@@ -273,6 +273,8 @@ module Mica::XML
     def content=(text : String) : String
       @document.editing(text.bytesize.to_i64) do
         Escape.check_text(text, xml11_document?)
+        # The delimiter checks scan the text once more.
+        @document.charge_edit(text.bytesize) if comment? || processing_instruction?
         if comment? && (text.includes?("--") || text.ends_with?('-'))
           raise Error.new("A comment cannot contain '--' or end with '-'")
         end
@@ -661,7 +663,8 @@ module Mica::XML
       # go without changing how any name resolves.
       inherited = @document.resolve_prefix(@document.data(owner.index).parent, prefix_id)
       uri = @document.value_bytes(@index)
-      @document.charge_edit(uri.size)
+      # Interning hashes and compares the URI: both passes first.
+      @document.charge_edit(2 * uri.size)
       return if inherited == names.intern(uri)
       if owner.declaration_in_use?(prefix_id)
         raise Error.new("Removing #{Core.quote(names[@document.data(@index).name_id])} would unbind names in its scope")
