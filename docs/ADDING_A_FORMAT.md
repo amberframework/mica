@@ -127,8 +127,15 @@ Every operation runs under a `WorkMeter`:
    work of a start tag with at most 16 attributes), and name interning is
    charged at the token's checkpoint, so a budget trip overshoots by at
    most the names of one narrow tag (17 names of up to `max_name_bytes`:
-   the element and 16 attributes) or one 64 KiB chunk. Work that follows a completed operation (settling an edit's
-   name-table work) is recorded without raising; the next charge trips.
+   the element and 16 attributes) or one 64 KiB chunk. Three more bounded
+   steps are charged right after they run rather than before: comparing
+   same-hash candidates in a name-table lookup (at most `MAX_RUN` + 1 of
+   them, and only on a full 32-bit hash match under a per-table random
+   seed), the geometric growth of a string builder (its copies total less
+   than the bytes appended, which are charged), and escaping at most
+   4 KiB before a metered write. Work that follows a completed operation
+   (settling an edit's name-table work) is recorded without raising; the
+   next charge trips.
 5. Call `meter.enforce_deadline { position }` after each IO read (in the
    `input_received` hook, and for `TextInput` formats also in
    `source_read_returned`, which runs after each read a transcoder makes

@@ -128,6 +128,7 @@ class Mica::XML::Reader
       parameter = true
     end
     name_id = scan_declared_name_id
+    charge(@names[name_id].bytesize)
     if @options.namespace_aware? && !@names.ncname?(name_id)
       syntax_error("Entity name '#{Core.excerpt(@names[name_id])}' must not contain a colon")
     end
@@ -187,6 +188,7 @@ class Mica::XML::Reader
           @pos += 1
           start, size = scan_name_span
           expect_byte(';', "to end the entity reference")
+          charge(size + 2)
           value.write_byte('&'.ord.to_u8)
           value.write(@buffer[@mark + start, size])
           value.write_byte(';'.ord.to_u8)
@@ -483,6 +485,7 @@ class Mica::XML::Reader
     @pos += 10
     require_spaces("after '<!NOTATION'")
     name_id = scan_declared_name_id
+    charge(@names[name_id].bytesize)
     if @options.namespace_aware? && !@names.ncname?(name_id)
       syntax_error("Notation name '#{Core.excerpt(@names[name_id])}' must not contain a colon")
     end

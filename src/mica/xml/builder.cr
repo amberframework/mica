@@ -47,6 +47,12 @@ module Mica::XML
     # lookup is one hash access however deep the scopes are.
     @bindings = [] of String?
     @uris_by_prefix = {} of String? => Array(String)
+
+    # A small id per distinct bound URI, assigned once per binding and kept
+    # beside it per prefix, so expanded-name checks hash an id rather than
+    # the URI (a long URI and many attributes stay linear).
+    @uri_ids = {} of String => Int32
+    @uri_ids_by_prefix = {} of String? => Array(Int32)
     @xml11 = false
     @indent_text = ""
     @quote_char = '"'
@@ -165,6 +171,7 @@ module Mica::XML
       while @bindings.size > frame.binding_mark
         prefix = @bindings.pop
         @uris_by_prefix[prefix]?.try(&.pop)
+        @uri_ids_by_prefix[prefix]?.try(&.pop)
       end
     end
 
@@ -476,6 +483,7 @@ module Mica::XML
       raise BuilderError.new("Namespace #{Core.quote(uri)} cannot be declared") if reserved.includes?(uri)
       @bindings << prefix
       (@uris_by_prefix[prefix] ||= [] of String) << uri
+      (@uri_ids_by_prefix[prefix] ||= [] of Int32) << (@uri_ids[uri] ||= @uri_ids.size)
     end
 
     # Returns the URI bound to *prefix* (nil prefix: the default
@@ -491,14 +499,14 @@ module Mica::XML
     # attributes share an expanded name.
     private def check_start_tag(frame : Frame) : Nil
       check_prefix_bound(frame.name)
-      expanded = Set({String, String}).new
+      expanded = Set({Int32, String}).new
       frame.attribute_names.each do |name|
         next if name == "xmlns" || name.starts_with?("xmlns:")
         colon = name.index(':')
         next unless colon
         check_prefix_bound(name)
-        uri = bound_uri(name[0, colon]) || ""
-        unless expanded.add?({uri, name[colon + 1..]})
+        uri_id = @uri_ids_by_prefix[name[0, colon]]?.try(&.last?) || -1
+        unless expanded.add?({uri_id, name[colon + 1..]})
           raise BuilderError.new("Attribute #{Core.quote(name)} duplicates another attribute's expanded name")
         end
       end

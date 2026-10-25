@@ -6,14 +6,15 @@ class Mica::XML::Reader
   # attribute names for duplicates. Returns the binding stack size before
   # this tag's bindings.
   #
-  # Checking and splitting the names passes over them once more. For a
-  # wide tag (DTD defaults included) that pass is charged first, as the
-  # bytes of every attribute name, so a budget trip stops it; a narrow
-  # tag's names join the token's pending work.
+  # Checking (QName), splitting and resolving the names pass over them up
+  # to three more times. For a wide tag (DTD defaults included) those
+  # passes are charged first, over the element and every attribute name,
+  # so a budget trip stops them; a narrow tag's names join the token's
+  # pending work.
   private def process_namespaces(element_id : Int32) : Int32
     binding_mark = @binding_prefixes.size
     count = @attrs.size
-    charge(attribute_name_bytes) if count > LINEAR_ATTRIBUTE_SCAN
+    charge(3 * (attribute_name_bytes + @names[element_id].bytesize)) if count > LINEAR_ATTRIBUTE_SCAN
     charge_in_token(count)
     index = 0
     while index < count

@@ -162,7 +162,9 @@ module Mica::XML
     def editing(bytes : Int64, &)
       meter = edit_meter
       meter.add_units(bytes + 1)
-      charge_edit(2 * bytes + 1)
+      # Validating, hashing and comparing the input (names are checked as
+      # Names, then as QNames, split and interned): charged first.
+      charge_edit(4 * bytes + 1)
       unshare_names if @shared_names
       previous_hook = @names.before_rebuild
       @names.before_rebuild = edit_rebuild_hook

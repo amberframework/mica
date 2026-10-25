@@ -62,9 +62,8 @@ class Mica::XML::Reader
 
   # Work prepaid for bytes of a streamed token: when the buffer later
   # drops them, `discarding_input` folds each one once into the column
-  # count (a byte count measured at about 2 GB/s, so half an operation per
-  # byte) and, for transcoded input, into the source offset (one more
-  # half). Charging that with the token that scanned the bytes keeps the
+  # count (one operation per byte) and, for transcoded input, into the
+  # source offset (one more). Charging that with the token that scanned the bytes keeps the
   # fold inside the token's own budget, instead of landing as one lump of
   # up to a buffer's size on whichever event triggers the refill (which a
   # meter renewed per message could not absorb). In-memory input and
@@ -72,7 +71,7 @@ class Mica::XML::Reader
   @[AlwaysInline]
   private def discard_prepay(scanned : Int) : Int64
     return 0_i64 unless @io
-    @transcoded_from ? scanned.to_i64 : (scanned >> 1).to_i64
+    @transcoded_from ? 2_i64 * scanned : scanned.to_i64
   end
 
   # Returns the name-table work done since it was last charged and marks
@@ -121,6 +120,9 @@ class Mica::XML::Reader
   # *name_id*.
   @[AlwaysInline]
   private def end_tag_matches?(name_id : Int32, offset : Int32, size : Int32) : Bool
+    # The comparison passes over the name once more (a name, so it joins
+    # the token's pending work).
+    charge_in_token(size)
     expected = @names[name_id].to_slice
     expected.size == size && Core::ByteScan.matches?(@buffer, offset, expected)
   end
@@ -593,6 +595,8 @@ class Mica::XML::Reader
     if target.bytesize == 3 && target.compare("xml", case_insensitive: true) == 0
       syntax_error("The processing instruction target '#{Core.excerpt(target)}' is reserved")
     end
+    # The reserved-name and colon checks pass over the target again.
+    charge_in_token(target.bytesize)
     if @options.namespace_aware? && target.includes?(':')
       syntax_error("Processing instruction target '#{Core.excerpt(target)}' must not contain a colon")
     end

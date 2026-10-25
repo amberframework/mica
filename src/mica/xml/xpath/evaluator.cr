@@ -704,9 +704,10 @@ module Mica::XML::XPath
       value != other
     end
 
-    # Charges hashing *value* and returns it.
+    # Charges hashing *value* and comparing it with an equal entry (a set
+    # insertion or lookup does both), and returns it.
     private def hashed(value : String) : String
-      charge(value.bytesize)
+      charge(2 * value.bytesize)
       value
     end
 
@@ -850,11 +851,13 @@ module Mica::XML::XPath
       when Bool
         result ? 1.0 : 0.0
       when String
-        charge(result.bytesize)
+        # Conversion passes over the digits twice (skip, then significant
+        # digits): both charged first.
+        charge(2 * result.bytesize)
         XPath.string_to_number(result)
       else
         text = to_string(result)
-        charge(text.bytesize)
+        charge(2 * text.bytesize)
         XPath.string_to_number(text)
       end
     end
