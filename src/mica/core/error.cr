@@ -1,8 +1,9 @@
 module Mica
-  # Base class of every error the library raises, for every format. Rescue
-  # `Mica::Error` to handle any parse, limit, budget, encoding, query or
-  # builder failure. Lookups by key follow Crystal's `Hash#[]`: `[]` raises
-  # `KeyError` for a missing attribute and `[]?` returns nil.
+  # Base class of the errors Mica raises for its own failures, in every
+  # format: parse, limit, budget, deadline, encoding, query, edit and
+  # builder failures. Rescue `Mica::Error` to handle all of them. Lookups by
+  # key follow Crystal's `Hash#[]` instead: `[]` raises `KeyError` for a
+  # missing attribute and `[]?` returns nil.
   class Error < Exception
   end
 

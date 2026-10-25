@@ -370,8 +370,12 @@ module Mica::XML
         raise Error.new("A namespace prefix cannot be bound to an empty URI") if uri.empty?
         raise Error.new("A prefix cannot be bound to #{Core.quote(uri)}") if reserved.includes?(uri)
       end
-      if subtree_uses_prefix?(prefix_id)
-        raise Error.new("Declaring #{Core.quote(names[name_id])} would rename existing nodes in its scope")
+      # Restating the binding already in scope renames nothing.
+      current = @document.resolve_prefix(@index, prefix_id)
+      unless current >= 0 && names.lookup(uri.to_slice) == current
+        if subtree_uses_prefix?(prefix_id)
+          raise Error.new("Declaring #{Core.quote(names[name_id])} would rename existing nodes in its scope")
+        end
       end
       @document.append_attribute(@index, name_id, @document.xmlns_namespace_id, uri, Type::NAMESPACE_DECL)
     end

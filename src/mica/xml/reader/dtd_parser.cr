@@ -137,6 +137,8 @@ class Mica::XML::Reader
       if normalization_checked?
         check_normalized(value, "entity replacement text")
       end
+      # Entity.new scans the text once for markup.
+      charge(value.size)
       entity = DTD::Entity.new(name_id, value, nil, nil, nil, parameter)
     else
       public_id, system_id = parse_external_id(require_system: true)

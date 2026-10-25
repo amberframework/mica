@@ -37,14 +37,24 @@ module Mica::XML
       end
     end
 
+    # Bytes scanned at most between two writes, so a writer that charges
+    # each write (`Reader#read_outer_xml`) sees the work of a long value in
+    # bounded steps.
+    private ESCAPE_CHUNK = 4096
+
     # Copies *bytes* to *io*, replacing each ASCII byte the block maps to a
     # string, and (with *xml11*) each XML 1.1 restricted character, NEL and
-    # LSEP with a character reference. One pass over the bytes.
+    # LSEP with a character reference. One pass over the bytes, writing at
+    # least every `ESCAPE_CHUNK` bytes.
     private def self.write_escaped(io : IO, bytes : Bytes, xml11 : Bool, & : UInt8 -> String?) : Nil
       start = 0
       index = 0
       size = bytes.size
       while index < size
+        if index - start >= ESCAPE_CHUNK
+          io.write(bytes[start, index - start])
+          start = index
+        end
         byte = bytes[index]
         replacement = nil
         length = 1
