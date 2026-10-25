@@ -51,6 +51,9 @@ module Mica::Core
       rest = @buffer[@pos, @limit - @pos]
       io = @io
       source = io || IO::Memory.new(rest, writable: false)
+      # Carrying the buffered bytes copies them here and in the transcoder:
+      # charged first.
+      moving_input(2 * rest.size) if io
       carried = io ? rest.dup : Bytes.empty
       @input_bytes -= rest.size
       @base_offset += @pos

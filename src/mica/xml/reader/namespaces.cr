@@ -53,7 +53,7 @@ class Mica::XML::Reader
   end
 
   private def bind_default_namespace(slot : AttributeSlot) : Nil
-    uri_id = @names.intern(attribute_value_bytes(slot))
+    uri_id = intern_namespace_uri(slot)
     if uri_id == @xml_namespace_id || uri_id == @xmlns_namespace_id
       syntax_error("The default namespace cannot be '#{Core.excerpt(@names[uri_id])}'")
     end
@@ -62,7 +62,7 @@ class Mica::XML::Reader
 
   private def bind_prefix(slot : AttributeSlot) : Nil
     prefix_id = @names.local_id(slot.name_id)
-    uri_id = @names.intern(attribute_value_bytes(slot))
+    uri_id = intern_namespace_uri(slot)
     if prefix_id == @xml_id
       unless uri_id == @xml_namespace_id
         syntax_error("The xml prefix must be bound to #{XML_NAMESPACE}")
@@ -80,6 +80,15 @@ class Mica::XML::Reader
     end
     # In XML 1.1 documents (Namespaces 1.1), `xmlns:p=""` undeclares p.
     push_binding(prefix_id, uri_id)
+  end
+
+  # Interns a declaration's URI. Hashing and storing it pass over its bytes,
+  # which can be long: charged before interning (the table's own count of
+  # the same work is charged again later, an overcharge kept for order).
+  private def intern_namespace_uri(slot : AttributeSlot) : Int32
+    value = attribute_value_bytes(slot)
+    charge(2 * value.size)
+    @names.intern(value)
   end
 
   # Pushes a binding and links it to the previous binding of the same

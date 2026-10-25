@@ -675,9 +675,10 @@ module Mica::XML::XPath
       return false if left.empty? || right.empty?
       case operator
       when "="
+        # Hashing each value is one more pass over it: charged first.
         right_values = Set(String).new
-        right.each { |node| right_values << string_value(node) }
-        left.any? { |node| right_values.includes?(string_value(node)) }
+        right.each { |node| right_values << hashed(string_value(node)) }
+        left.any? { |node| right_values.includes?(hashed(string_value(node))) }
       when "!="
         # Some pair differs unless both sides hold one and the same value.
         first = string_value(right[0])
@@ -697,6 +698,12 @@ module Mica::XML::XPath
       end
     end
 
+    # Charges hashing *value* and returns it.
+    private def hashed(value : String) : String
+      charge(value.bytesize)
+      value
+    end
+
     # Returns the smallest and largest number among the nodes' values,
     # ignoring NaN (comparisons with NaN are false); NaN, NaN when every
     # value is NaN.
@@ -704,7 +711,10 @@ module Mica::XML::XPath
       low = Float64::NAN
       high = Float64::NAN
       nodes.each do |node|
-        number = XPath.string_to_number(string_value(node))
+        value = string_value(node)
+        # Converting passes over the value a bounded number of times.
+        charge(2 * value.bytesize)
+        number = XPath.string_to_number(value)
         next if number.nan?
         low = number if low.nan? || number < low
         high = number if high.nan? || number > high
@@ -775,9 +785,9 @@ module Mica::XML::XPath
           end
         end
       end
-      value = Node.new(@document, node).content
-      charge(1 + value.bytesize)
-      value
+      bytes = @document.value_bytes(node)
+      charge(1 + bytes.size)
+      String.new(bytes)
     end
 
     private def each_text_in_subtree(node : Int32, & : Bytes ->) : Nil

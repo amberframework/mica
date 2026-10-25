@@ -163,7 +163,9 @@ options = Mica::XML::ParserOptions.new(
 )
 Mica::XML.parse(body, options)
 
-# One meter shared by a parse and the queries that follow it:
+# One meter shared by a parse and the queries that follow it. Each call
+# adds its own input to the allowance (a query re-reads the document), so a
+# request that makes many calls is bounded by max_operations or a timeout:
 meter = Mica::Core::WorkMeter.new(Mica::Core::WorkBudget.new(timeout: 1.second))
 document = Mica::XML.parse(body, meter: meter)
 document.xpath_nodes("//item", meter: meter)

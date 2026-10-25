@@ -119,7 +119,13 @@ Every operation runs under a `WorkMeter`:
    `Mica::WorkBudgetExceededError` or `Mica::DeadlineExceededError` when
    the budget or the deadline has run out (the block runs only then).
 4. In long scanning loops, charge at least every 64 KiB (`SCAN_CHUNK` in
-   the XML reader) so a single huge token cannot outrun the meter.
+   the XML reader) so a single huge token cannot outrun the meter. Charge
+   each further pass over input-derived bytes (a copy, a hash, a
+   conversion, a buffer move) before it runs. A small fixed amount may be
+   gathered first and charged within the same token (the XML reader
+   gathers copies under 256 bytes and its in-token bookkeeping), and name
+   interning is charged at the token's checkpoint, so a budget trip
+   overshoots by at most one name (`max_name_bytes`) or one 64 KiB chunk.
 5. Call `meter.enforce_deadline { position }` after each IO read (in the
    `input_received` hook, and for `TextInput` formats also in
    `source_read_returned`, which runs after each read a transcoder makes
