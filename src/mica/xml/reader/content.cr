@@ -541,8 +541,10 @@ class Mica::XML::Reader
   end
 
   # Returns true when the value is all white space; stops at the first
-  # other byte, so it reads each byte at most once. A long value is scanned
-  # in chunks of `WHITESPACE_CHUNK` bytes, each charged before it is read.
+  # other byte, so it reads each byte at most once. A value of at most
+  # `SCRATCH_CHARGE_NOW` bytes is in-token work, like a short copy; a longer
+  # one is scanned in chunks of `WHITESPACE_CHUNK` bytes, each charged
+  # before it is read.
   private def whitespace_value? : Bool
     if @value_in_scratch
       bytes = @scratch
@@ -552,7 +554,7 @@ class Mica::XML::Reader
       from = @mark + @value_start
     end
     stop = from + @value_size
-    if @value_size <= WHITESPACE_CHUNK
+    if @value_size <= SCRATCH_CHARGE_NOW
       index = Core::ByteScan.skip_while(bytes, from, stop) { |byte| CharClass.space?(byte) }
       charge_in_token(index < stop ? index - from + 1 : index - from)
       return index == stop

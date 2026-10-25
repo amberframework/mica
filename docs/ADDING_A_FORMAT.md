@@ -123,7 +123,8 @@ Every operation runs under a `WorkMeter`:
    each further pass over input-derived bytes (a copy, a hash, a
    conversion, a buffer move) before it runs. A small fixed amount may be
    gathered first and charged within the same token (the XML reader
-   gathers copies under 256 bytes, its in-token bookkeeping and the name
+   gathers copies under 256 bytes, a white-space check of at most 256
+   bytes, its in-token bookkeeping and the name
    work of a start tag with at most 16 attributes), and name interning is
    charged at the token's checkpoint, so a budget trip overshoots by at
    most the names of one narrow tag (17 names of up to `max_name_bytes`:
