@@ -44,6 +44,8 @@ class Mica::XML::Reader
       rest = prefix[size, prefix.size - size]
       if encoding.utf16?
         @encoding = "UTF-16"
+        # The transcoder copies the sniffed bytes: charged first.
+        moving_input(rest.size.to_i64)
         setup_transcoded_stream(Core::Transcoder.new(io, encoding, rest), size)
         return
       end

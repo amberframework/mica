@@ -59,8 +59,8 @@ module Mica::XML::XPath
         start = @reader.pos
         @token_start = start
         @tokens << next_token.copy_with(offset: start)
-        # One operation per character stepped over (spaces included) and
-        # per token.
+        # One operation per byte stepped over (spaces included) and per
+        # token.
         charge_steps(1)
       end
       charge_steps(0)
@@ -74,6 +74,8 @@ module Mica::XML::XPath
 
     private def peek(offset : Int32 = 1) : Char
       position = @reader.pos
+      # Decoding the lookahead: at most four bytes per character.
+      @steps += 4 * offset
       offset.times { @reader.next_char }
       char = @reader.current_char
       @reader.pos = position
@@ -81,9 +83,12 @@ module Mica::XML::XPath
     end
 
     private def advance : Char
-      @steps += 1
-      charge_steps(0) if @steps - @charged_steps >= LEX_CHUNK
+      # Charged by bytes, at the current position, so a long literal of
+      # multibyte characters trips where the work is.
+      charge_steps(0, @reader.pos) if @steps - @charged_steps >= LEX_CHUNK
+      before = @reader.pos
       char = @reader.next_char
+      @steps += @reader.pos - before
       check_encoding
       char
     end
@@ -102,8 +107,8 @@ module Mica::XML::XPath
       XPath.charge_compile(@meter, bytes, @source, @token_start)
     end
 
-    private def charge_steps(extra : Int32) : Nil
-      XPath.charge_compile(@meter, @steps - @charged_steps + extra, @source, @token_start)
+    private def charge_steps(extra : Int32, offset : Int32 = @token_start) : Nil
+      XPath.charge_compile(@meter, @steps - @charged_steps + extra, @source, offset)
       @charged_steps = @steps
     end
 

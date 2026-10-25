@@ -76,6 +76,8 @@ module Mica::Core
     # Reads from *io*, starting with the already-read source bytes in
     # *carried*.
     private def setup_stream(io : IO, carried : Bytes = Bytes.empty, prefix_bytes : Int32 = 0) : Nil
+      # Copying the carried bytes into the buffer: charged first.
+      moving_input(carried.size.to_i64) unless carried.empty?
       @io = io
       @io_eof = false
       @buffer = Bytes.new(Math.max(INITIAL_BUFFER_SIZE, carried.size))

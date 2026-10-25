@@ -55,3 +55,23 @@ describe "Codex review 36 findings" do
     error.byte_offset.should be < 160_000
   end
 end
+
+# Regression specs for the thirty-seventh Codex code review of 2026-10-24.
+describe "Codex review 37 findings" do
+  it "2 and 3: charges XPath lexing by bytes and positions a trip where it happened" do
+    literal = "\u{1F600}" * 100_000
+    meter = Mica::Core::WorkMeter.new(Mica::Core::WorkBudget.unlimited)
+    Mica::XML::XPath.compile("'#{literal}'", meter: meter)
+    meter.operations.should be >= 4 * 100_000
+    budget = Mica::Core::WorkBudget.new(operations_per_unit: 0, base_operations: 50_000)
+    error = expect_raises(Mica::WorkBudgetExceededError) do
+      Mica::XML::XPath.compile("'#{literal}'", meter: Mica::Core::WorkMeter.new(budget))
+    end
+    error.byte_offset.should be > 40_000
+  end
+
+  it "1: charges a builder's subset check copy to the check's own meter" do
+    subset = "<!-- #{"c" * 1_000} -->"
+    Mica::XML.build(&.dtd("r", nil, nil, subset)).should contain(subset)
+  end
+end

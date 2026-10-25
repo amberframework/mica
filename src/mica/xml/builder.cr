@@ -567,9 +567,18 @@ module Mica::XML
     end
 
     # Parses the raw internal subset so a malformed one cannot reach the
-    # output.
+    # output. The parse's meter starts first and charges building the
+    # check document, so the copy counts against the same budget and
+    # deadline as the parse.
     private def check_internal_subset(name : String, subset : String) : Nil
-      Mica::XML.parse("<!DOCTYPE #{name} [#{subset}]><#{name}/>", ParserOptions.new(namespace_aware: false))
+      options = ParserOptions.new(namespace_aware: false)
+      meter = Core::WorkMeter.new(options.work_budget)
+      copy = subset.bytesize.to_i64 + 2_i64 * name.bytesize + 16
+      meter.add_units(copy)
+      if meter.charge(copy)
+        meter.enforce("while checking the internal DTD subset") { Core::Position.new(0_i64) }
+      end
+      Mica::XML.parse("<!DOCTYPE #{name} [#{subset}]><#{name}/>", options, meter: meter)
     rescue error : LimitExceededError
       # A budget, deadline or size limit keeps its own type and position.
       raise error

@@ -33,7 +33,10 @@ module Mica::Core
     @eof = false
 
     # *prefix* holds source bytes already read from *source* (for example
-    # while sniffing a byte order mark); they are decoded first.
+    # while sniffing a byte order mark); they are decoded first. The
+    # constructor copies *prefix* unmetered: a caller with a meter charges
+    # that copy before constructing (the XML reader does, through
+    # `moving_input`).
     def initialize(@source : IO, @source_encoding : Encoding, prefix : Bytes = Bytes.empty)
       unless @source_encoding.transcoded?
         raise ArgumentError.new("Transcoder does not handle #{@source_encoding.label}")
