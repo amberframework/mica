@@ -547,12 +547,13 @@ module Mica::XML
     @[AlwaysInline]
     private def add_node(kind : Node::Type, parent : Int32, name_id : Int32, namespace_uri_id : Int32, value : Bytes, previous_sibling : Int32 = -1) : Int32
       index = @size
-      if index & PAGE_MASK == 0
-        if index == Int32::MAX & ~PAGE_MASK
-          raise Error.new("Document exceeds the maximum node count")
-        end
-        @pages << Page.new
+      if index & PAGE_MASK == 0 && index == Int32::MAX & ~PAGE_MASK
+        raise Error.new("Document exceeds the maximum node count")
       end
+      # The value is stored first: when the heap is full, nothing else has
+      # changed.
+      value_ref = value.empty? ? 0 : copy_value(value)
+      @pages << Page.new if index & PAGE_MASK == 0
       @size += 1
       record = NodeData.new(kind)
       record.parent = parent
@@ -560,7 +561,7 @@ module Mica::XML
       record.name_id = name_id
       record.namespace_uri_id = namespace_uri_id
       unless value.empty?
-        record.value_ref = copy_value(value)
+        record.value_ref = value_ref
         record.value_size = value.size
       end
       # index is @size - 1, so only the page lookup needs its check.
@@ -598,21 +599,30 @@ module Mica::XML
     # Copies non-empty *value* into the value heap and returns its
     # reference: a chunk offset, or a negative large-value index.
     private def copy_value(value : Bytes) : Int32
-      @stored_value_bytes += value.size
       size = value.size
       if size > LARGE_VALUE
         @large_values << value.dup
+        @stored_value_bytes += size
         return -@large_values.size
       end
+      ensure_value_room(size)
       if @chunk_used + size > CHUNK_SIZE
-        raise Error.new("Document text exceeds 2 GiB") if @chunks.size >= MAX_CHUNKS
         @chunks << Bytes.new(CHUNK_SIZE)
         @chunk_used = 0
       end
       Core::ByteScan.copy_into(@chunks.last, @chunk_used, value)
       ref = ((@chunks.size - 1) << CHUNK_BITS) + @chunk_used
       @chunk_used += size
+      @stored_value_bytes += size
       ref
+    end
+
+    # Raises before any change when a value of *size* bytes would not fit in
+    # the value heap.
+    private def ensure_value_room(size : Int32) : Nil
+      return if size == 0 || size > LARGE_VALUE
+      return unless @chunk_used + size > CHUNK_SIZE && @chunks.size >= MAX_CHUNKS
+      raise Error.new("Document text exceeds 2 GiB")
     end
 
     # Adds an attribute node after *previous* (or first, when *previous* is
@@ -685,6 +695,8 @@ module Mica::XML
     # Replaces the children of *index* with one text node holding *text*.
     def replace_children_with_text(index : Int32, text : String) : Nil
       charge_edit(1 + text.bytesize)
+      # A full value heap fails here, before any child is removed.
+      ensure_value_room(text.bytesize)
       # Every child's removal is charged before the first one, so a budget
       # trip leaves the children in place: a step and an unlink each.
       child = data(index).first_child
