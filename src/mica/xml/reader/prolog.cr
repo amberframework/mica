@@ -154,11 +154,17 @@ class Mica::XML::Reader
   end
 
   # Reads one token outside the root element: white space (skipped), a
-  # True when the byte after `<!DOCTYPE` is XML white space, so the markup
-  # is a document type declaration and not a malformed name.
-  private def doctype_keyword_ends? : Bool
-    byte = peek_byte_at(9)
-    byte == 0x20 || byte == 0x09 || byte == 0x0A || byte == 0x0D
+  # Refuses the document type declaration at the current `<!DOCTYPE`. The
+  # keyword must be followed by white space, recognized by the same
+  # `skip_spaces` that `parse_doctype` uses (so XML 1.1 NEL and LSEP count);
+  # otherwise the markup is malformed and gets parse_doctype's syntax error.
+  # Nothing after the white space is read.
+  private def refuse_document_type : NoReturn
+    position = error_position
+    @pos += 9
+    syntax_error("Expected white space after '<!DOCTYPE'") unless skip_spaces
+    charge_scanned_before_error
+    raise DocumentTypeNotAllowedError.new("A document type declaration (DTD) is not allowed here", position)
   end
 
   # comment, a PI, the DOCTYPE or the root start tag. Returns true when it
@@ -181,12 +187,7 @@ class Mica::XML::Reader
       if starts_with?("<!--")
         parse_comment
       elsif starts_with?("<!DOCTYPE")
-        # Only a well-formed `<!DOCTYPE` followed by white space is a DTD;
-        # anything else falls through to parse_doctype's syntax error.
-        if !@options.allow_document_type? && doctype_keyword_ends?
-          charge_scanned_before_error
-          raise DocumentTypeNotAllowedError.new("A document type declaration (DTD) is not allowed here", error_position)
-        end
+        refuse_document_type unless @options.allow_document_type?
         if !@phase.prolog? || @doctype_seen
           syntax_error("A DOCTYPE declaration must come once, before the root element")
         end

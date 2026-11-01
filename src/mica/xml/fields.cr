@@ -126,6 +126,10 @@ module Mica::XML
         while @reader.read
           @reader.charge(1)
           case @reader.node_type
+          when .document_type?
+            # The reader refuses a DTD before this event when DTDs are off,
+            # which read requires; this is the second line of defense.
+            reject("A request body cannot declare a document type (DTD)")
           when .entity_reference?
             reject("A request body cannot contain entity references")
           when .element?

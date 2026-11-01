@@ -49,6 +49,15 @@ describe "ParserOptions#allow_document_type" do
     expect_raises(Mica::XML::DocumentTypeNotAllowedError) { Mica::XML.parse(source, NO_DTD) }
   end
 
+  it "refuses a DOCTYPE followed by XML 1.1 white space (NEL or LSEP)" do
+    ["\u0085", "\u2028"].each do |line_end|
+      body = %(<?xml version='1.1'?><!DOCTYPE#{line_end}r [<!ENTITY e 'admin'>]><r><role>&e;</role></r>)
+
+      expect_raises(Mica::XML::DocumentTypeNotAllowedError) { read_all(body) }
+      expect_raises(Mica::XML::Fields::RejectedDocumentError, /DTD/) { Mica::XML::Fields.read(body) }
+    end
+  end
+
   it "reports a malformed <!DOCTYPE as a syntax error, not a refused DTD" do
     error = expect_raises(Mica::ParseError) { read_all(%(<!DOCTYPEx><r/>)) }
     error.is_a?(Mica::XML::DocumentTypeNotAllowedError).should be_false
