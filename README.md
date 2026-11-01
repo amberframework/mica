@@ -374,3 +374,7 @@ requires stdlib `xml`; the library and its specs never link libxml2.
 ## License
 
 MIT
+
+`src/mica/xml/composing_characters.cr` is generated from the Unicode 17.0.0
+character data that ships with the Crystal standard library; that data is
+under the Unicode License v3.
