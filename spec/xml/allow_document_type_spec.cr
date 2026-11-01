@@ -1,4 +1,5 @@
 require "../spec_helper"
+require "../../src/mica/xml/fields"
 
 private NO_DTD = Mica::XML::ParserOptions.new(allow_document_type: false)
 
@@ -46,6 +47,13 @@ describe "ParserOptions#allow_document_type" do
 
     expect_raises(Mica::XML::DocumentTypeNotAllowedError) { read_all(source) }
     expect_raises(Mica::XML::DocumentTypeNotAllowedError) { Mica::XML.parse(source, NO_DTD) }
+  end
+
+  it "reports a malformed <!DOCTYPE as a syntax error, not a refused DTD" do
+    error = expect_raises(Mica::ParseError) { read_all(%(<!DOCTYPEx><r/>)) }
+    error.is_a?(Mica::XML::DocumentTypeNotAllowedError).should be_false
+
+    expect_raises(Mica::ParseError) { Mica::XML::Fields.read(%(<!DOCTYPEx><r/>)) }
   end
 
   it "still reads a document without a DOCTYPE" do

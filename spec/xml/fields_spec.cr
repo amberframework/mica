@@ -201,8 +201,9 @@ describe Mica::XML::Fields do
       end
 
       # Two hashed passes over the name per child are charged on top of
-      # reading: 200 children x 2 x 2,001 operations is about 800,000.
-      just_the_reading = Mica::Core::WorkBudget.new(operations_per_unit: 0, base_operations: reader.operations + 400_000)
+      # reading: 200 children x 2 x 2,001 operations is about 800,000. One
+      # charged pass (about 400,000) would fit under this budget.
+      just_the_reading = Mica::Core::WorkBudget.new(operations_per_unit: 0, base_operations: reader.operations + 600_000)
       options = Mica::XML::ParserOptions.new(work_budget: just_the_reading, max_input_bytes: 1_000_000_i64, allow_document_type: false)
       expect_raises(Mica::WorkBudgetExceededError) { Mica::XML::Fields.read(wide, options) }
     end

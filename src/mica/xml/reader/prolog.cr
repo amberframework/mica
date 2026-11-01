@@ -154,6 +154,13 @@ class Mica::XML::Reader
   end
 
   # Reads one token outside the root element: white space (skipped), a
+  # True when the byte after `<!DOCTYPE` is XML white space, so the markup
+  # is a document type declaration and not a malformed name.
+  private def doctype_keyword_ends? : Bool
+    byte = peek_byte_at(9)
+    byte == 0x20 || byte == 0x09 || byte == 0x0A || byte == 0x0D
+  end
+
   # comment, a PI, the DOCTYPE or the root start tag. Returns true when it
   # produced an event.
   private def misc_token : Bool
@@ -174,7 +181,9 @@ class Mica::XML::Reader
       if starts_with?("<!--")
         parse_comment
       elsif starts_with?("<!DOCTYPE")
-        unless @options.allow_document_type?
+        # Only a well-formed `<!DOCTYPE` followed by white space is a DTD;
+        # anything else falls through to parse_doctype's syntax error.
+        if !@options.allow_document_type? && doctype_keyword_ends?
           charge_scanned_before_error
           raise DocumentTypeNotAllowedError.new("A document type declaration (DTD) is not allowed here", error_position)
         end
