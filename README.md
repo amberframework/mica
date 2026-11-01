@@ -31,7 +31,7 @@ to `Mica::XML`.
 ```yaml
 dependencies:
   mica:
-    github: ORG/mica # repository location pending
+    github: amberframework/mica
     version: 0.1.0
 ```
 
@@ -98,6 +98,37 @@ characters, splits `]]>` in CDATA, and raises `Mica::XML::BuilderError` for
 misuse (an attribute after content, a second root, a `--` in a comment).
 Methods match stdlib `XML::Builder`. It writes UTF-8 only, and when writing
 XML 1.1 it escapes control characters as character references.
+
+## Request bodies as fields
+
+`require "mica/xml/fields"` (opt-in; it pulls in stdlib `JSON`) reads an XML
+document into the same `Hash(String, JSON::Any)` a JSON object body
+produces, so one schema validates either format. The root element stands
+for the object; child elements become fields by local name; repeated names
+become arrays; attributes become `"@name"` keys; mixed text becomes
+`"#text"`. Values stay strings for the schema to convert.
+
+```crystal
+require "mica/xml/fields"
+
+Mica::XML::Fields.read(%(<user id="7"><name>Ada</name><role>admin</role><role>dev</role></user>))
+# => {"@id" => "7", "name" => "Ada", "role" => ["admin", "dev"]}
+```
+
+`Fields.read` parses with `Fields::REQUEST_BODY_OPTIONS` (the secure
+defaults, with nesting capped at 64 levels) unless you pass other options.
+In an Amber V2 application, register it as the XML body parser:
+
+```crystal
+# config/initializers/request_body_parsers.cr
+require "mica/xml/fields"
+
+{"application/xml", "text/xml"}.each do |media_type|
+  Amber::Schema::Parser::ParserRegistry.register_body_parser(media_type) do |body|
+    Mica::XML::Fields.read(body)
+  end
+end
+```
 
 ## Security and limits
 

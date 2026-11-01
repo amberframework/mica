@@ -11,6 +11,7 @@ description: |
 crystal: ">= 1.21.0, < 2.0.0"
 
 license: MIT
+repository: https://github.com/amberframework/mica
 
 development_dependencies:
   ameba:
