@@ -108,10 +108,12 @@ for the object; child elements become fields by local name; repeated names
 become arrays; attributes become `"@name"` keys; mixed text becomes
 `"#text"`. Values stay strings for the schema to convert.
 
-A request body is untrusted, so `Fields.read` refuses a document type
-declaration (DTD), names that collide across namespaces, and nesting deeper
-than 64 levels (`Mica::XML::Fields::RejectedDocumentError`), caps the body at
-1 MiB, and charges the conversion to the same work budget as the parse.
+A request body is untrusted, so `Fields.read` streams it once through the
+reader (no DOM), refuses a document type declaration (DTD) at the
+declaration, names that collide across namespaces, and nesting deeper than 64
+levels (`Mica::XML::Fields::RejectedDocumentError`), requires a body size cap
+(1 MiB by default), and charges every event and copied byte to the parse's
+work budget.
 
 ```crystal
 require "mica/xml/fields"

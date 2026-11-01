@@ -140,32 +140,54 @@ describe Mica::XML::Fields do
       fields(%(<r><x unit="kg"/></r>))["x"].should eq(JSON::Any.new({"@unit" => JSON::Any.new("kg")}))
     end
 
-    it "refuses a body larger than MAX_BODY_BYTES" do
+    it "refuses a body larger than MAX_BODY_BYTES, from a String or an IO" do
       big = "<r><x>" + "a" * Mica::XML::Fields::MAX_BODY_BYTES + "</x></r>"
 
       expect_raises(Mica::LimitExceededError) { fields(big) }
+      expect_raises(Mica::LimitExceededError) { Mica::XML::Fields.read(IO::Memory.new(big)) }
     end
 
-    it "caps conversion depth at MAX_DEPTH even when the caller allows deeper parsing" do
-      options = Mica::XML::ParserOptions.new(max_element_depth: 100_000)
-      deep = "<a>" * 1_000 + "</a>" * 1_000
-
-      expect_raises(Mica::XML::Fields::RejectedDocumentError, /deeper than 64/) do
-        Mica::XML::Fields.read(deep, options)
+    it "requires options that cap the body size" do
+      expect_raises(ArgumentError, /max_input_bytes/) do
+        Mica::XML::Fields.read("<r/>", Mica::XML::ParserOptions.new)
       end
+    end
+
+    it "caps depth at MAX_DEPTH even when the caller allows deeper parsing" do
+      options = Mica::XML::ParserOptions.new(max_element_depth: 100_000, max_input_bytes: 1_000_000_i64)
+      deep = "<a>" * 1_000 + "</a>" * 1_000
+      leaf_at_65 = "<a>" * 64 + "<a/>" + "</a>" * 64
+
+      [deep, leaf_at_65].each do |xml|
+        expect_raises(Mica::XML::Fields::RejectedDocumentError, /deeper than 64/) do
+          Mica::XML::Fields.read(xml, options)
+        end
+      end
+    end
+
+    it "refuses a DTD at its declaration, before any element is read" do
+      declarations = (1..100).map { |attribute_number| %(<!ATTLIST e a#{attribute_number} CDATA "">) }.join
+      body = %(<!DOCTYPE r [#{declarations}]><r>) + "<e/>" * 10_000 + "</r>"
+      error = expect_raises(Mica::XML::Fields::RejectedDocumentError, /DTD/) { fields(body) }
+
+      # The reader stops at the end of the declaration, before the root
+      # element and every <e/> that the defaults would apply to.
+      position_match = error.message.to_s.match(/byte (\d+)/)
+      raise "the error names no byte offset" unless position_match
+      position_match[1].to_i.should be <= body.index!("<r>")
     end
 
     it "charges the conversion to the same work budget as the parse" do
-      wide = "<r>" + "<item>x</item>" * 2_000 + "</r>"
-      parse_only = Mica::Core::WorkMeter.new(Mica::Core::WorkBudget.unlimited)
-      Mica::XML.parse(wide, Mica::XML::ParserOptions.new(work_budget: Mica::Core::WorkBudget.unlimited), parse_only)
-
-      # A budget that covers the parse but not the parse plus the
-      # conversion stops the read.
-      just_the_parse = Mica::Core::WorkBudget.new(operations_per_unit: 0, base_operations: parse_only.operations + 10)
-      expect_raises(Mica::WorkBudgetExceededError) do
-        Mica::XML::Fields.read(wide, Mica::XML::ParserOptions.new(work_budget: just_the_parse))
+      wide = "<r>" + "<x/>" * 10_000 + "</r>"
+      reader = Mica::XML::Reader.new(wide, Mica::XML::ParserOptions.new(work_budget: Mica::Core::WorkBudget.unlimited))
+      while reader.read
       end
+
+      # A budget that covers reading the body, but not reading plus
+      # converting it, stops the read.
+      just_the_reading = Mica::Core::WorkBudget.new(operations_per_unit: 0, base_operations: reader.operations + 10_000)
+      options = Mica::XML::ParserOptions.new(work_budget: just_the_reading, max_input_bytes: 1_000_000_i64)
+      expect_raises(Mica::WorkBudgetExceededError) { Mica::XML::Fields.read(wide, options) }
     end
 
     it "reads a wide body with many repeated names and attributes" do
@@ -180,14 +202,14 @@ describe Mica::XML::Fields do
       }))
     end
 
-    it "stops an exponential entity expansion with a limit error" do
+    it "refuses an exponential entity expansion at its DTD, before expanding anything" do
       entities = String.build do |io|
         io << %(<!ENTITY e0 "lol">)
         (1..12).each { |level| io << %(<!ENTITY e#{level} ") << "&e#{level - 1};" * 10 << %(">) }
       end
       xml = %(<!DOCTYPE user [#{entities}]><user><name>&e12;</name></user>)
 
-      expect_raises(Mica::LimitExceededError) { fields(xml) }
+      expect_raises(Mica::XML::Fields::RejectedDocumentError, /DTD/) { fields(xml) }
     end
   end
 end
