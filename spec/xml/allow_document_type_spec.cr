@@ -58,6 +58,17 @@ describe "ParserOptions#allow_document_type" do
     end
   end
 
+  it "refuses after the first white space character, without reading on" do
+    io = IO::Memory.new("<!DOCTYPE" + " " * 2_000_000)
+    options = Mica::XML::ParserOptions.new(max_input_bytes: 1_000_000_i64, allow_document_type: false)
+    reader = Mica::XML::Reader.new(io, options)
+
+    expect_raises(Mica::XML::DocumentTypeNotAllowedError) do
+      while reader.read
+      end
+    end
+  end
+
   it "reports a malformed <!DOCTYPE as a syntax error, not a refused DTD" do
     error = expect_raises(Mica::ParseError) { read_all(%(<!DOCTYPEx><r/>)) }
     error.is_a?(Mica::XML::DocumentTypeNotAllowedError).should be_false

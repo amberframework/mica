@@ -155,16 +155,24 @@ class Mica::XML::Reader
 
   # Reads one token outside the root element: white space (skipped), a
   # Refuses the document type declaration at the current `<!DOCTYPE`. The
-  # keyword must be followed by white space, recognized by the same
-  # `skip_spaces` that `parse_doctype` uses (so XML 1.1 NEL and LSEP count);
-  # otherwise the markup is malformed and gets parse_doctype's syntax error.
-  # Nothing after the white space is read.
+  # keyword must be followed by one white space character, recognized as
+  # `skip_spaces` recognizes it (so XML 1.1 NEL and LSEP count); otherwise
+  # the markup is malformed and gets the syntax error parse_doctype would
+  # give. Only that one character is read, so a stream that stalls after it
+  # is refused at once.
   private def refuse_document_type : NoReturn
     position = error_position
     @pos += 9
-    syntax_error("Expected white space after '<!DOCTYPE'") unless skip_spaces
+    syntax_error("Expected white space after '<!DOCTYPE'") unless white_space_follows?
     charge_scanned_before_error
     raise DocumentTypeNotAllowedError.new("A document type declaration (DTD) is not allowed here", position)
+  end
+
+  # True when the next character is white space, without consuming it.
+  private def white_space_follows? : Bool
+    byte = peek_byte
+    return true if byte == 0x20 || byte == 0x09 || byte == 0x0A || byte == 0x0D
+    byte >= 0x80 && xml11_line_ends? && xml11_line_end_length > 0
   end
 
   # comment, a PI, the DOCTYPE or the root start tag. Returns true when it
