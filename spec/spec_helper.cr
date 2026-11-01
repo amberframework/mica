@@ -1,5 +1,40 @@
 require "spec"
 require "../src/mica"
+require "../src/mica/testing"
+
+# Which spec covers which specification requirement (see
+# Mica::Testing::Traceability and spec/requirements/).
+REQUIREMENTS = Mica::Testing::Traceability::Registry.new
+
+# Defines an example that covers the requirement *requirement_id* (an id
+# from a catalog in spec/requirements/), or several ids given as a tuple.
+# Ids are recorded when the spec file loads, so the traceability spec sees
+# all of them before any example runs.
+def it_satisfies(requirement_id : String | Tuple, description : String, file = __FILE__, line = __LINE__, end_line = __END_LINE__, &block)
+  location = "#{file.sub(Dir.current + "/", "")}:#{line}"
+  if requirement_id.is_a?(String)
+    REQUIREMENTS.record(requirement_id, location)
+  else
+    requirement_id.each { |id| REQUIREMENTS.record(id.to_s, location) }
+  end
+  it(description, file, line, end_line, tags: "requirement", &block)
+end
+
+# Complexity measurements from spec/xml/complexity_spec.cr. Set
+# MICA_COMPLEXITY_REPORT to a path to write them as TSV.
+COMPLEXITY_RESULTS = [] of Mica::Testing::Complexity::Result
+
+Spec.after_suite do
+  if path = ENV["MICA_COMPLEXITY_REPORT"]?
+    File.open(path, "w") do |file|
+      file << "pattern\tn\tops_n\tops_4n\tratio\tbound\n"
+      COMPLEXITY_RESULTS.each do |result|
+        file << result.name << '\t' << result.size << '\t' << result.small << '\t' << result.large << '\t'
+        file << result.ratio.round(3) << '\t' << result.bound << '\n'
+      end
+    end
+  end
+end
 
 # An IO that returns at most a few bytes per read, to exercise the reader's
 # buffer refill and compaction at every byte boundary.
@@ -11,7 +46,7 @@ class TrickleIO < IO
   def read(slice : Bytes) : Int32
     count = Math.min(Math.min(@chunk, slice.size), @bytes.size - @offset)
     return 0 if count <= 0
-    slice.copy_from(@bytes.to_unsafe + @offset, count)
+    slice[0, count].copy_from(@bytes[@offset, count])
     @offset += count
     count
   end
@@ -22,7 +57,7 @@ class TrickleIO < IO
 end
 
 # Returns the reader's events as readable strings.
-def reader_events(reader : Mica::Reader) : Array(String)
+def reader_events(reader : Mica::XML::Reader) : Array(String)
   events = [] of String
   while reader.read
     event = "#{reader.node_type}:#{reader.depth}:#{reader.name}"
@@ -39,8 +74,8 @@ def reader_events(reader : Mica::Reader) : Array(String)
   events
 end
 
-def reader_events(xml : String, options : Mica::ParserOptions = Mica::ParserOptions.default) : Array(String)
-  reader_events(Mica::Reader.new(xml, options))
+def reader_events(xml : String, options : Mica::XML::ParserOptions = Mica::XML::ParserOptions.default) : Array(String)
+  reader_events(Mica::XML::Reader.new(xml, options))
 end
 
 def utf16(text : String, big_endian : Bool) : Bytes
@@ -62,10 +97,10 @@ def utf16(text : String, big_endian : Bool) : Bytes
   io.to_slice
 end
 
-def root_of(document : Mica::Document) : Mica::Node
+def root_of(document : Mica::XML::Document) : Mica::XML::Node
   document.root || raise "Document has no root element"
 end
 
-def node_at(context : Mica::Document | Mica::Node, path : String) : Mica::Node
+def node_at(context : Mica::XML::Document | Mica::XML::Node, path : String) : Mica::XML::Node
   context.xpath_node(path) || raise "No node matches #{path}"
 end

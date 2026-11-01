@@ -1,0 +1,106 @@
+require "../spec_helper"
+
+private def elapsed(&) : Time::Span
+  started = Time.instant
+  yield
+  Time.instant - started
+end
+
+describe "Mica security defaults" do
+  it_satisfies "MICA-ENTITY-AMPLIFICATION", "stops the billion laughs attack quickly" do
+    lol = String.build do |io|
+      io << %(<?xml version="1.0"?><!DOCTYPE lolz [<!ENTITY lol "lol">)
+      (1..9).each { |level| io << %(<!ENTITY lol#{level} ") << "&lol#{level == 1 ? "" : level - 1};" * 10 << %(">) }
+      io << %(]><lolz>&lol9;</lolz>)
+    end
+    time = elapsed do
+      expect_raises(Mica::LimitExceededError, /max_entity_expansions/) { Mica::XML.parse(lol) }
+    end
+    time.should be < 1.second
+  end
+
+  it_satisfies "MICA-ENTITY-AMPLIFICATION", "stops the billion laughs attack inside attribute values" do
+    lol = String.build do |io|
+      io << %(<!DOCTYPE lolz [<!ENTITY lol "lol">)
+      (1..9).each { |level| io << %(<!ENTITY lol#{level} ") << "&lol#{level == 1 ? "" : level - 1};" * 10 << %(">) }
+      io << %(]><lolz a="&lol9;"/>)
+    end
+    expect_raises(Mica::LimitExceededError) { Mica::XML.parse(lol) }
+  end
+
+  it_satisfies "MICA-ENTITY-AMPLIFICATION", "stops the quadratic blowup attack quickly" do
+    big = "x" * 100_000
+    xml = %(<!DOCTYPE r [<!ENTITY a "#{big}">]><r>#{"&a;" * 50_000}</r>)
+    time = elapsed do
+      expect_raises(Mica::LimitExceededError, /max_entity_expansion_bytes/) { Mica::XML.parse(xml) }
+    end
+    time.should be < 1.second
+  end
+
+  it_satisfies "MICA-LIMITS", "bounds attributes added from DTD defaults by count and by bytes" do
+    xml = %(<!DOCTYPE r [<!ATTLIST e d CDATA "#{"x" * 1000}">]><r>#{"<e/>" * 2000}</r>)
+    by_bytes = Mica::XML::ParserOptions.new(max_default_attribute_bytes: 100_000)
+    expect_raises(Mica::LimitExceededError, /max_default_attribute_bytes/) { Mica::XML.parse(xml, by_bytes) }
+    by_count = Mica::XML::ParserOptions.new(max_default_attributes: 1_000)
+    expect_raises(Mica::LimitExceededError, /max_default_attributes/) { Mica::XML.parse(xml, by_count) }
+    Mica::XML.parse(xml).xpath_float("count(//e[@d])").should eq(2000)
+  end
+
+  it_satisfies "MICA-LIMITS", "limits element nesting depth without recursion" do
+    deep = "<a>" * 2000 + "</a>" * 2000
+    expect_raises(Mica::LimitExceededError, /max_element_depth/) { Mica::XML.parse(deep) }
+    Mica::XML.parse(deep, Mica::XML::ParserOptions.new(max_element_depth: 2000)).root.should_not be_nil
+  end
+
+  it_satisfies "MICA-LIMITS", "limits entity nesting depth" do
+    entities = (1..30).map { |level| %(<!ENTITY e#{level} "&e#{level + 1};">) }.join + %(<!ENTITY e31 "x">)
+    expect_raises(Mica::LimitExceededError, /max_entity_depth/) { Mica::XML.parse(%(<!DOCTYPE r [#{entities}]><r>&e1;</r>)) }
+  end
+
+  it_satisfies "MICA-LIMITS", "limits attributes per element, name length, token size and input size" do
+    many = "<a " + (1..20).map { |index| %(a#{index}="1") }.join(' ') + "/>"
+    expect_raises(Mica::LimitExceededError) { Mica::XML.parse(many, Mica::XML::ParserOptions.new(max_attributes: 10)) }
+    expect_raises(Mica::LimitExceededError) { Mica::XML.parse("<#{"n" * 200}/>", Mica::XML::ParserOptions.new(max_name_bytes: 100)) }
+    expect_raises(Mica::LimitExceededError) { Mica::XML.parse("<a>#{"t" * 5000}</a>", Mica::XML::ParserOptions.new(max_token_bytes: 1000)) }
+    expect_raises(Mica::LimitExceededError) do
+      Mica::XML.parse(IO::Memory.new("<a>#{"t" * 300_000}</a>"), Mica::XML::ParserOptions.new(max_token_bytes: 1000))
+    end
+    expect_raises(Mica::LimitExceededError) do
+      Mica::XML.parse(IO::Memory.new("<a>#{"<b/>" * 100_000}</a>"), Mica::XML::ParserOptions.new(max_input_bytes: 10_000_i64))
+    end
+  end
+
+  it_satisfies "MICA-NO-EXTERNAL", "never reads external DTDs or entities" do
+    secret = File.tempname("mica-secret", ".txt")
+    File.write(secret, "TOP-SECRET")
+    begin
+      xml = %(<!DOCTYPE r SYSTEM "file://#{secret}" [<!ENTITY s SYSTEM "file://#{secret}"><!ENTITY % p SYSTEM "file://#{secret}">%p;]><r>&s;</r>)
+      document = Mica::XML.parse(xml)
+      document.to_xml.should_not contain("TOP-SECRET")
+      root_of(document).content.should eq("")
+    ensure
+      File.delete(secret)
+    end
+  end
+
+  it_satisfies "MICA-HASH-FLOODING", "seeds name hashing per table" do
+    Mica::XML::NameTable.new.intern("x").should eq(Mica::XML::NameTable.new.intern("x"))
+  end
+end
+
+describe "Mica linear-time guards" do
+  it "checks duplicate attributes on very wide elements in linear time" do
+    wide = "<a " + (1..9_999).map { |index| %(a#{index}="1") }.join(' ') + "/>"
+    started = Time.instant
+    root_of(Mica::XML.parse(wide)).attributes.size.should eq(9_999)
+    (Time.instant - started).should be < 1.second
+    expect_raises(Mica::ParseError, /appears twice/) { Mica::XML.parse(wide.sub("/>", %( a5000="2"/>))) }
+  end
+
+  it "merges text split by many entity boundaries in linear time" do
+    xml = %(<!DOCTYPE r [<!ENTITY e "]">]><r>#{"#{"t" * 1000}&e;" * 5_000}</r>)
+    started = Time.instant
+    root_of(Mica::XML.parse(xml)).content.size.should eq(5_000 * 1001)
+    (Time.instant - started).should be < 1.second
+  end
+end

@@ -1,0 +1,148 @@
+require "../spec_helper"
+
+# Regression specs for the Codex code review of 2026-10-24 (findings 1-9).
+describe "Codex review findings" do
+  describe "1: namespace declarations on the DOM" do
+    it "refuses to change a declaration that names in scope depend on" do
+      document = Mica::XML.parse(%(<r xmlns:p="u"><p:x/></r>))
+      expect_raises(Mica::Error, /not supported/) { root_of(document)["xmlns:p"] = "v" }
+      root_of(document)["xmlns:p"] = "u"
+      document.xpath_nodes("//p:x", {"p" => "u"}).size.should eq(1)
+    end
+
+    it "refuses declarations that would rename nodes or break Namespaces 1.0" do
+      document = Mica::XML.parse(%(<r><x/></r>))
+      expect_raises(Mica::Error, /rename existing nodes/) { root_of(document)["xmlns"] = "urn:d" }
+      expect_raises(Mica::Error, /empty URI/) { root_of(document)["xmlns:q"] = "" }
+      root_of(document)["xmlns:q"] = "urn:q"
+      root_of(document)["q:a"] = "1"
+      Mica::XML.parse(root_of(document).to_xml).xpath_string("string(/r/@q:a)", {"q" => "urn:q"}).should eq("1")
+    end
+
+    it "refuses a second attribute with the same expanded name" do
+      document = Mica::XML.parse(%(<r xmlns:p="u" xmlns:q="u" p:a="1"/>))
+      expect_raises(Mica::Error, /expanded name/) { root_of(document)["q:a"] = "2" }
+    end
+  end
+
+  describe "2: builder namespaces and duplicates" do
+    it "rejects unbound prefixes, invalid QNames and duplicate attributes" do
+      expect_raises(Mica::XML::BuilderError, /not declared/) { Mica::XML.build(&.element("p:r")) }
+      expect_raises(Mica::XML::BuilderError, /Invalid qualified name/) { Mica::XML.build(&.element("a:b:c")) }
+      expect_raises(Mica::XML::BuilderError, /written twice/) do
+        Mica::XML.build_fragment { |xml| xml.element("r") { xml.attribute("a", 1); xml.attribute("a", 2) } }
+      end
+      expect_raises(Mica::XML::BuilderError, /expanded name/) do
+        Mica::XML.build_fragment do |xml|
+          xml.element("r") do
+            xml.namespace("p", "u")
+            xml.namespace("q", "u")
+            xml.attribute("p:a", 1)
+            xml.attribute("q:a", 2)
+          end
+        end
+      end
+    end
+
+    it "accepts a prefix declared after start_element on the same tag" do
+      xml = Mica::XML.build_fragment { |builder| builder.start_element("p:r"); builder.namespace("p", "urn:p"); builder.end_element }
+      xml.should eq(%(<p:r xmlns:p="urn:p"/>))
+      Mica::XML.parse(xml)
+    end
+  end
+
+  it "3: scans long name tokens across buffer compaction" do
+    prefix = "<!--#{"x" * 60_000}--><!DOCTYPE r ["
+    xml = prefix + "<!ATTLIST r a (" + "a" * prefix.bytesize + ") #IMPLIED>]><r/>"
+    options = Mica::XML::ParserOptions.new(max_name_bytes: 200_000)
+    Mica::XML.parse(IO::Memory.new(xml), options).root.should_not be_nil
+  end
+
+  it "4: splits a ]]> that spans several CDATA writes" do
+    xml = Mica::XML.build_fragment { |builder| builder.element("r") { builder.cdata { builder.text("]]"); builder.text(">") } } }
+    root_of(Mica::XML.parse(xml)).content.should eq("]]>")
+  end
+
+  it "5: treats adjacent text and CDATA as one XPath text node" do
+    document = Mica::XML.parse(%(<r>a<![CDATA[b]]>c</r>))
+    document.xpath_nodes("/r/text()").size.should eq(1)
+    document.xpath_string("string(/r/text()[1])").should eq("abc")
+    document.xpath_string("/r/text()").should eq("abc")
+  end
+
+  it "6: checks a declared UTF-16 byte order against the BOM" do
+    xml = %(<?xml version="1.0" encoding="UTF-16BE"?><a/>)
+    expect_raises(Mica::EncodingError, /byte order mark/) { Mica::XML.parse(utf16(xml, false)) }
+    Mica::XML.parse(utf16(xml, true)).root.should_not be_nil
+  end
+
+  it "7: validates the version and DTD identifiers it writes" do
+    expect_raises(Mica::XML::BuilderError) { Mica::XML.build(version: "1.0\" x=\"y", &.element("a")) }
+    expect_raises(Mica::XML::BuilderError) { Mica::XML.build(&.dtd("a", "p\"q", "s")) }
+    expect_raises(Mica::XML::BuilderError) { Mica::XML.build(&.dtd("a", nil, "a\"b'c")) }
+    expect_raises(Mica::XML::BuilderError) { Mica::XML.build(&.dtd("a", nil, nil, "<!ENTITY")) }
+    xml = Mica::XML.build { |builder| builder.dtd("a", nil, %(a"b)); builder.element("a") }
+    xml.should contain(%(SYSTEM 'a"b'))
+    Mica::XML.parse(xml)
+  end
+
+  it "8: bounds the height of long operator chains" do
+    expect_raises(Mica::XML::XPathError, /nested too deeply/) { Mica::XML.parse("<a/>").xpath((["1"] * 5000).join(" + ")) }
+    Mica::XML.parse("<a/>").xpath_float((["1"] * 200).join(" + ")).should eq(200.0)
+  end
+
+  it "9: refuses to rename a PI to the reserved target xml" do
+    document = Mica::XML.parse("<a><?p d?></a>")
+    expect_raises(Mica::Error, /reserved/) { node_at(document, "//processing-instruction()").name = "XmL" }
+  end
+
+  describe "verification pass of the fixes" do
+    it "1: refuses to unlink a declaration that names in scope still use" do
+      document = Mica::XML.parse(%(<r xmlns:p="u"><p:x/></r>))
+      declaration = (0...document.node_count).map { |index| document.node_at(index) }.find!(&.type.namespace_decl?)
+      expect_raises(Mica::Error, /unbind/) { declaration.unlink }
+      document.root.to_s.should contain(%(xmlns:p="u"))
+    end
+
+    it "1: unlinks a declaration that no name uses" do
+      document = Mica::XML.parse(%(<r xmlns:p="u"><x/></r>))
+      declaration = (0...document.node_count).map { |index| document.node_at(index) }.find!(&.type.namespace_decl?)
+      declaration.unlink
+      document.root.try(&.to_xml(indent: 0)).should eq("<r><x/></r>")
+    end
+
+    it "1: unlinks a redundant declaration that an ancestor already provides" do
+      document = Mica::XML.parse(%(<r xmlns:p="u"><p:x xmlns:p="u"/></r>))
+      inner = node_at(document, "/r/*")
+      inner.namespace_definitions.size.should eq(1)
+      (0...document.node_count).map { |index| document.node_at(index) }.reverse_each.find!(&.type.namespace_decl?).unlink
+      document.root.try(&.to_xml(indent: 0)).should eq(%(<r xmlns:p="u"><p:x/></r>))
+    end
+
+    it "1: accepts an ancestor declaration that a descendant shadows" do
+      document = Mica::XML.parse(%(<r><p:x xmlns:p="u"/></r>))
+      root_of(document)["xmlns:p"] = "v"
+      reparsed = Mica::XML.parse(document.to_xml(indent: 0))
+      node_at(reparsed, "/r/*").namespace.try(&.href).should eq("u")
+    end
+
+    it "5: evaluates from the start of a text run when the context is inside it" do
+      document = Mica::XML.parse(%(<r>a<![CDATA[b]]></r>))
+      cdata = root_of(document).children[1]
+      cdata.xpath_nodes("self::text()").size.should eq(1)
+      cdata.xpath_string("string()").should eq("ab")
+    end
+
+    it "7: rejects system identifiers with characters outside the XML Char production" do
+      expect_raises(Mica::Error, /not allowed/) { Mica::XML.build { |builder| builder.dtd("r", nil, "\u0000"); builder.element("r") } }
+      expect_raises(Mica::Error, /not allowed/) { Mica::XML.build(&.dtd("r", "p", "\u0001")) }
+    end
+
+    it "9: renames a PI to a colon target when namespaces are off" do
+      document = Mica::XML.parse("<a><?p d?></a>", Mica::XML::ParserOptions.new(namespace_aware: false))
+      pi = node_at(document, "//processing-instruction()")
+      pi.name = "p:q"
+      document.to_xml(indent: 0).should contain("<?p:q d?>")
+    end
+  end
+end

@@ -3,9 +3,12 @@
 #
 #   crystal-alpha run --release conformance/run.cr -- /path/to/xmlconf [results.tsv]
 #
-# Applicable cases: XML 1.0 (5th edition) and Namespaces 1.0 recommendations.
-# Cases for XML 1.1 / Namespaces 1.1 and cases limited to editions 1-4 are
-# skipped. NAMESPACE="no" cases are parsed without namespace processing.
+# Two suites are scored separately:
+#   1.0: XML 1.0 (5th edition) and Namespaces 1.0 cases; cases limited to
+#        editions 1-4 are skipped.
+#   1.1: XML 1.1 and Namespaces 1.1 cases (RECOMMENDATION XML1.1 / NS1.1,
+#        or VERSION="1.1"), from the eduni, IBM and errata catalogs.
+# NAMESPACE="no" cases are parsed without namespace processing.
 #
 # Expectations for a non-validating processor that never reads external
 # entities:
@@ -28,7 +31,8 @@ record TestCase,
   output : String?,
   sections : String,
   description : String,
-  catalog : String
+  catalog : String,
+  suite : String
 
 record Outcome, test : TestCase, verdict : String, detail : String
 
@@ -43,16 +47,22 @@ catalogs = [
   "eduni/errata-2e/errata2e.xml", "eduni/namespaces/1.0/rmt-ns10.xml",
   "eduni/errata-3e/errata3e.xml", "eduni/namespaces/errata-1e/errata1e.xml",
   "eduni/errata-4e/errata4e.xml", "eduni/misc/ht-bh.xml",
+  "eduni/xml-1.1/xml11.xml", "eduni/namespaces/1.1/rmt-ns11.xml",
+  "ibm/xml-1.1/ibm_valid.xml", "ibm/xml-1.1/ibm_invalid.xml", "ibm/xml-1.1/ibm_not-wf.xml",
 ]
 
-def applicable?(test : Mica::Node) : Bool
+# Returns the suite ("1.0" or "1.1") a case belongs to, or nil to skip it.
+def suite_of(test : Mica::XML::Node) : String?
   recommendation = test["RECOMMENDATION"]? || "XML1.0"
-  return false unless recommendation.starts_with?("XML1.0") || recommendation.starts_with?("NS1.0")
-  return false if test["VERSION"]? == "1.1"
-  if edition = test["EDITION"]?
-    return false unless edition.split.includes?("5")
+  versions = (test["VERSION"]? || "").split
+  only_1_0 = versions.includes?("1.0") && !versions.includes?("1.1")
+  if !only_1_0 && (recommendation.starts_with?("XML1.1") || recommendation.starts_with?("NS1.1") || versions.includes?("1.1"))
+    return "1.1"
   end
-  true
+  if edition = test["EDITION"]?
+    return unless edition.split.includes?("5")
+  end
+  "1.0"
 end
 
 list_of_tests = [] of TestCase
@@ -63,9 +73,10 @@ catalogs.each do |catalog|
   # Some catalogs are fragments (several top-level TEST elements), so wrap
   # the content in one element after dropping the declaration and DOCTYPE.
   text = File.read(catalog_path).sub(/\A<\?xml[^>]*\?>/, "").sub(/<!DOCTYPE[^>]*>/, "")
-  document = Mica.parse("<CATALOG>#{text}</CATALOG>")
+  document = Mica::XML.parse("<CATALOG>#{text}</CATALOG>")
   document.xpath_nodes("//TEST").each do |test|
-    unless applicable?(test)
+    suite = suite_of(test)
+    unless suite
       skipped += 1
       next
     end
@@ -83,15 +94,16 @@ catalogs.each do |catalog|
       sections: test["SECTIONS"]? || "",
       description: test.content.strip.gsub(/\s+/, " "),
       catalog: catalog,
+      suite: suite,
     )
   end
 end
 
 def run_case(test : TestCase) : Outcome
   bytes = File.read(test.uri).to_slice
-  options = Mica::ParserOptions.new(namespace_aware: test.namespace)
+  options = Mica::XML::ParserOptions.new(namespace_aware: test.namespace)
   begin
-    document = Mica.parse(bytes, options)
+    document = Mica::XML.parse(bytes, options)
   rescue ex : Mica::Error
     return judge_rejection(test, ex)
   rescue ex
@@ -111,7 +123,7 @@ def judge_rejection(test : TestCase, error : Mica::Error) : Outcome
   end
 end
 
-def judge_acceptance(test : TestCase, document : Mica::Document) : Outcome
+def judge_acceptance(test : TestCase, document : Mica::XML::Document) : Outcome
   case test.type
   when "valid", "invalid"
     output = test.output
@@ -126,6 +138,11 @@ def judge_acceptance(test : TestCase, document : Mica::Document) : Outcome
     if test.entities != "none"
       return Outcome.new(test, "EXTERNAL-NA", "accepted; error is in an external entity Mica does not read")
     end
+    if document.system_id
+      # Some catalogs (IBM XML 1.1 P77) mark ENTITIES="none" for errors
+      # that live in the external DTD subset.
+      return Outcome.new(test, "EXTERNAL-NA", "accepted; the document has an external DTD subset Mica does not read")
+    end
     Outcome.new(test, "FAIL", "accepted a not-wf document")
   else
     Outcome.new(test, "ERROR-CASE", "accepted")
@@ -134,21 +151,24 @@ end
 
 outcomes = list_of_tests.map { |test| run_case(test) }
 
-counts = Hash(String, Hash(String, Int32)).new { |hash, key| hash[key] = Hash(String, Int32).new(0) }
-outcomes.each { |outcome| counts[outcome.test.type][outcome.verdict] += 1 }
-
-puts "xmlconf applicable cases: #{list_of_tests.size} (skipped as XML 1.1 / NS 1.1 / editions 1-4: #{skipped})"
-counts.keys.sort!.each do |type|
-  verdicts = counts[type]
-  total = verdicts.values.sum
-  summary = verdicts.to_a.sort.map { |verdict, count| "#{verdict}=#{count}" }.join(" ")
-  puts "  #{type.ljust(8)} total=#{total} #{summary}"
+{"1.0", "1.1"}.each do |suite|
+  members = outcomes.select { |outcome| outcome.test.suite == suite }
+  counts = Hash(String, Hash(String, Int32)).new { |hash, key| hash[key] = Hash(String, Int32).new(0) }
+  members.each { |outcome| counts[outcome.test.type][outcome.verdict] += 1 }
+  puts "xmlconf XML #{suite} applicable cases: #{members.size}"
+  counts.keys.sort!.each do |type|
+    verdicts = counts[type]
+    total = verdicts.values.sum
+    summary = verdicts.to_a.sort.map { |verdict, count| "#{verdict}=#{count}" }.join(" ")
+    puts "  #{type.ljust(8)} total=#{total} #{summary}"
+  end
+  compared = members.count { |outcome| outcome.detail.includes?("canonical output") || outcome.verdict == "OUTPUT-MISMATCH" }
+  puts "  valid cases with canonical output compared: #{compared}"
+  scored = members.reject { |outcome| outcome.verdict == "ERROR-CASE" || outcome.verdict == "EXTERNAL-NA" }
+  passed = scored.count { |outcome| outcome.verdict == "PASS" }
+  puts "  scored: #{passed}/#{scored.size} pass"
 end
-compared = outcomes.count { |outcome| outcome.detail.includes?("canonical output") || outcome.verdict == "OUTPUT-MISMATCH" }
-puts "valid cases with canonical output compared: #{compared}"
-scored = outcomes.reject { |outcome| outcome.verdict == "ERROR-CASE" || outcome.verdict == "EXTERNAL-NA" }
-passed = scored.count { |outcome| outcome.verdict == "PASS" }
-puts "scored: #{passed}/#{scored.size} pass"
+puts "skipped (editions 1-4 only): #{skipped}"
 
 failures = outcomes.select { |outcome| {"FAIL", "CRASH", "OUTPUT-MISMATCH"}.includes?(outcome.verdict) }
 unless failures.empty?
@@ -165,7 +185,7 @@ end
 if results_path
   File.open(results_path, "w") do |file|
     outcomes.each do |outcome|
-      file << outcome.test.id << '\t' << outcome.test.type << '\t' << outcome.verdict << '\t' << outcome.test.catalog << '\t' << outcome.detail.gsub(/[\t\n]/, " ") << '\n'
+      file << outcome.test.suite << '\t' << outcome.test.id << '\t' << outcome.test.type << '\t' << outcome.verdict << '\t' << outcome.test.catalog << '\t' << outcome.detail.gsub(/[\t\n]/, " ") << '\n'
     end
   end
 end

@@ -46,7 +46,7 @@ catalogs = [
   "eduni/errata-4e/errata4e.xml", "eduni/misc/ht-bh.xml",
 ]
 
-def applicable?(test : Mica::Node) : Bool
+def applicable?(test : Mica::XML::Node) : Bool
   recommendation = test["RECOMMENDATION"]? || "XML1.0"
   return false unless recommendation.starts_with?("XML1.0") || recommendation.starts_with?("NS1.0")
   return false if test["VERSION"]? == "1.1"
@@ -64,7 +64,7 @@ catalogs.each do |catalog|
   # Some catalogs are fragments (several top-level TEST elements), so wrap
   # the content in one element after dropping the declaration and DOCTYPE.
   text = File.read(catalog_path).sub(/\A<\?xml[^>]*\?>/, "").sub(/<!DOCTYPE[^>]*>/, "")
-  document = Mica.parse("<CATALOG>#{text}</CATALOG>")
+  document = Mica::XML.parse("<CATALOG>#{text}</CATALOG>")
   document.xpath_nodes("//TEST").each do |test|
     unless applicable?(test)
       skipped += 1

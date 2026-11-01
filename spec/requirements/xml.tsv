@@ -1,0 +1,50 @@
+# Requirements from the W3C XML 1.0 (5th edition), XML 1.1 (2nd edition),
+# Namespaces in XML 1.0 / 1.1 and XPath 1.0 recommendations that Mica's
+# specs cover directly. The xmlconf suite (conformance/run.cr) covers the
+# grammar productions case by case; this catalog traces the behaviors the
+# specs pin down. Format: id<TAB>section<TAB>summary.
+XML10-2.1-well-formed	XML 1.0 2.1	Documents that break a well-formedness constraint are rejected
+XML10-2.2-Char	XML 1.0 2.2	Only characters matching the Char production may appear
+XML10-2.4-character-data	XML 1.0 2.4	'<' and '&' in character data and attribute values are escaped on output
+XML10-2.5-comments	XML 1.0 2.5	Comments are reported and may not contain '--'
+XML10-2.6-pi	XML 1.0 2.6	Processing instructions are reported with target and data
+XML10-2.7-cdata	XML 1.0 2.7	CDATA sections are reported literally
+XML10-2.8-doctype	XML 1.0 2.8	The document type declaration is reported
+XML10-2.8-parameter-entities	XML 1.0 2.8	Internal parameter entities expand between declarations
+XML10-2.10-white-space	XML 1.0 2.10	White space in content is passed to the application
+XML10-2.11-line-ends	XML 1.0 2.11	CR LF and lone CR become LF
+XML10-3.1-tags	XML 1.0 3.1	Start tags, end tags and attributes
+XML10-3.1-empty-element	XML 1.0 3.1	Empty-element tags
+XML10-3.1-no-external-in-attributes	XML 1.0 3.1	WFC No External Entity References in attribute values
+XML10-3.3-attlist	XML 1.0 3.3	Attribute-list declarations
+XML10-3.3.2-defaults	XML 1.0 3.3.2	Declared attribute defaults are applied
+XML10-3.3.3-attribute-normalization	XML 1.0 3.3.3	Attribute-value normalization, including tokenized types
+XML10-4.1-char-refs	XML 1.0 4.1	Character references expand to legal characters
+XML10-4.1-entity-declared	XML 1.0 4.1	WFC Entity Declared (and its external-subset exemption)
+XML10-4.1-no-recursion	XML 1.0 4.1	WFC No Recursion
+XML10-4.3.2-balanced-entities	XML 1.0 4.3.2	Replacement text of internal entities is balanced
+XML10-4.3.3-encoding-errors	XML 1.0 4.3.3	Encoding errors are fatal errors
+XML10-4.3.3-utf16	XML 1.0 4.3.3	UTF-16 documents begin with a byte order mark
+XML10-4.3.3-byte-order-mark	XML 1.0 4.3.3	A UTF-8 byte order mark is skipped
+XML10-4.3.3-encoding-declaration	XML 1.0 4.3.3	The encoding declaration selects ISO-8859-1 or US-ASCII decoding
+XML10-4.6-predefined-entities	XML 1.0 4.6	The five predefined entities
+XML10-5.1-non-validating	XML 1.0 5.1	A non-validating processor stops processing declarations after an unread parameter entity
+XML11-2.2-restricted-chars	XML 1.1 2.2	C0 (except TAB, LF, CR), DEL and C1 (except NEL) controls may not appear literally
+XML11-2.11-line-ends	XML 1.1 2.11	NEL, LSEP, CR NEL and CR LF become LF
+XML11-2.13-normalization	XML 1.1 2.13	Full normalization checking on request
+XML11-4.1-char-refs	XML 1.1 4.1	Character references may name C0 controls other than NUL
+XML11-4.3.4-version	XML 1.1 4.3.4	Version numbers 1.x are accepted
+NS10-3-reserved-prefixes	Namespaces 1.0 3	The xml and xmlns prefixes are reserved
+NS10-5-prefix-declared	Namespaces 1.0 5	NSC Prefix Declared
+NS10-6-scoping	Namespaces 1.0 6	Namespace declarations apply to their element and its descendants
+NS10-6.2-default-undeclare	Namespaces 1.0 6.2	xmlns="" undeclares the default namespace
+NS10-6.3-attribute-uniqueness	Namespaces 1.0 6.3	No two attributes with the same expanded name
+NS11-undeclare	Namespaces 1.1 5	xmlns:p="" undeclares a prefix in XML 1.1
+XPATH10-2-location-paths	XPath 1.0 2	Location paths
+XPATH10-2.2-axes	XPath 1.0 2.2	All thirteen axes
+XPATH10-2.4-predicates	XPath 1.0 2.4	Predicates with proximity positions
+XPATH10-3.1-variables	XPath 1.0 3.1	Variable references
+XPATH10-3.3-node-sets	XPath 1.0 3.3	Unions in document order
+XPATH10-3.4-booleans	XPath 1.0 3.4	Comparisons and boolean logic
+XPATH10-4.2-string-functions	XPath 1.0 4.2	String functions
+XPATH10-4.4-number-functions	XPath 1.0 4.4	Number functions and conversions
