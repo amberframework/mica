@@ -23,11 +23,11 @@ module Mica::XML
   # Values stay strings; the schema converts them, as it does for form data.
   #
   # A request body is untrusted, so `read` streams it once through
-  # `Mica::XML::Reader` (no DOM is built). The reader raises
-  # `Mica::XML::DocumentTypeNotAllowedError` at a `<!DOCTYPE`, before it
-  # reads any declaration, and `read` raises `Fields::RejectedDocumentError`
-  # at the first sign of what a field hash cannot carry faithfully: sibling
-  # elements or attributes that share a local name but not a namespace, or
+  # `Mica::XML::Reader` (no DOM is built) and raises
+  # `Fields::RejectedDocumentError` at the first sign of what a field hash
+  # cannot carry faithfully or safely: a document type declaration (DTD),
+  # refused at the `<!DOCTYPE` before any declaration is read; sibling
+  # elements or attributes that share a local name but not a namespace; or
   # nesting deeper than `MAX_DEPTH`. Every event and every
   # copied byte is charged to the parse's work meter, so the whole read
   # stays linear in the body's size.
@@ -56,7 +56,8 @@ module Mica::XML
 
     private XMLNS_NAMESPACE = "http://www.w3.org/2000/xmlns/"
 
-    # Raised when a well-formed document is refused as a request body: its
+    # Raised when a document is refused as a request body: it declares a
+    # DTD (raised at the `<!DOCTYPE`, before any declaration is read), its
     # names collide across namespaces, it nests deeper than `MAX_DEPTH`, or
     # it contains an entity reference.
     class RejectedDocumentError < Mica::Error
@@ -65,9 +66,8 @@ module Mica::XML
     # Parses *source* and returns its fields. Raises the errors of
     # `Mica::XML::Reader` (`Mica::ParseError`, `Mica::LimitExceededError`,
     # `Mica::EncodingError`) when the body is not well-formed or trips a
-    # limit, the work budget or the deadline,
-    # `Mica::XML::DocumentTypeNotAllowedError` for a DTD, and
-    # `RejectedDocumentError` as described on `Fields`. Custom *options* must
+    # limit, the work budget or the deadline, and `RejectedDocumentError`
+    # as described on `Fields`. Custom *options* must
     # keep what the mapping relies on: `allow_document_type: false`,
     # `namespace_aware: true` and a `max_input_bytes` cap; `ArgumentError`
     # otherwise.
@@ -83,6 +83,8 @@ module Mica::XML
       end
 
       Conversion.new(Reader.new(source, options)).perform
+    rescue error : DocumentTypeNotAllowedError
+      raise RejectedDocumentError.new(error.message.to_s)
     end
 
     # One element being read: its attributes, its child values grouped by
@@ -91,15 +93,24 @@ module Mica::XML
       getter local_name : String
       getter namespace_uri : String?
       getter attribute_fields = {} of String => JSON::Any
-      getter child_values_by_name = {} of String => Array(JSON::Any)
-      getter child_namespace_by_name = {} of String => String?
+      getter child_groups_by_name = {} of String => ChildGroup
       getter text = String::Builder.new
 
       def initialize(@local_name : String, @namespace_uri : String?)
       end
 
       def has_child_elements? : Bool
-        !child_values_by_name.empty?
+        !child_groups_by_name.empty?
+      end
+    end
+
+    # The child elements of one element that share a local name: their
+    # namespace (all must agree) and their values in document order.
+    private class ChildGroup
+      getter namespace_uri : String?
+      getter values = [] of JSON::Any
+
+      def initialize(@namespace_uri : String?)
       end
     end
 
@@ -186,21 +197,20 @@ module Mica::XML
 
       private def add_child(parent : OpenElement, element : OpenElement, value : JSON::Any) : Nil
         name = element.local_name
-        @reader.charge(1 + name.bytesize)
-        if parent.child_namespace_by_name.has_key?(name)
-          if parent.child_namespace_by_name[name] != element.namespace_uri
-            reject("Sibling elements share the local name #{Core.quote(name)} in different namespaces")
-          end
-        else
-          parent.child_namespace_by_name[name] = element.namespace_uri
+        # One hash lookup (and at most one insert), each hashing the name.
+        @reader.charge(2 * (1 + name.bytesize))
+        group = parent.child_groups_by_name[name] ||= ChildGroup.new(element.namespace_uri)
+        if group.namespace_uri != element.namespace_uri
+          reject("Sibling elements share the local name #{Core.quote(name)} in different namespaces")
         end
-        (parent.child_values_by_name[name] ||= [] of JSON::Any) << value
+        group.values << value
       end
 
       private def fields_of(element : OpenElement) : Hash(String, JSON::Any)
         fields = element.attribute_fields
-        element.child_values_by_name.each do |name, values|
-          @reader.charge(values.size)
+        element.child_groups_by_name.each do |name, group|
+          values = group.values
+          @reader.charge(values.size + 1 + name.bytesize)
           fields[name] = values.size == 1 ? values.first : JSON::Any.new(values)
         end
 

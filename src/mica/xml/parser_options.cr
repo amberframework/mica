@@ -70,7 +70,6 @@ module Mica::XML
 
     def initialize(
       @namespace_aware : Bool = true,
-      @allow_document_type : Bool = true,
       @max_entity_expansions : Int32 = 10_000,
       @max_entity_expansion_bytes : Int64 = 16_i64 * 1024 * 1024,
       @max_entity_depth : Int32 = 16,
@@ -83,6 +82,7 @@ module Mica::XML
       @max_input_bytes : Int64? = nil,
       @work_budget : Core::WorkBudget = DEFAULT_WORK_BUDGET,
       @check_normalization : Bool = false,
+      @allow_document_type : Bool = true,
     )
       check_limit("max_entity_expansions", @max_entity_expansions)
       check_limit("max_entity_expansion_bytes", @max_entity_expansion_bytes)
