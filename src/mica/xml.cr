@@ -24,6 +24,12 @@ module Mica::XML
     Document.parse(source, options, meter)
   end
 
+  # Raised when a document declares a DTD and its `ParserOptions` set
+  # `allow_document_type: false`. It is raised at the `<!DOCTYPE` itself,
+  # before the internal subset is read.
+  class DocumentTypeNotAllowedError < Mica::ParseError
+  end
+
   # Raised when an XPath expression cannot be parsed or evaluated.
   class XPathError < Mica::Error
   end

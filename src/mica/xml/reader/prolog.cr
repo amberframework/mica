@@ -174,6 +174,10 @@ class Mica::XML::Reader
       if starts_with?("<!--")
         parse_comment
       elsif starts_with?("<!DOCTYPE")
+        unless @options.allow_document_type?
+          charge_scanned_before_error
+          raise DocumentTypeNotAllowedError.new("A document type declaration (DTD) is not allowed here", error_position)
+        end
         if !@phase.prolog? || @doctype_seen
           syntax_error("A DOCTYPE declaration must come once, before the root element")
         end

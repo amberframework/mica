@@ -76,6 +76,11 @@ describe Mica::XML::Fields do
       result.should eq({"name" => JSON::Any.new("Ada")})
     end
 
+    it "reads a root element's own text as #text, exactly" do
+      fields(%(<r>hello</r>)).should eq({"#text" => JSON::Any.new("hello")})
+      fields(%(<r>   </r>)).should eq({"#text" => JSON::Any.new("   ")})
+    end
+
     it "returns no fields for a root element with no content" do
       fields(%(<empty/>)).should eq({} of String => JSON::Any)
     end
@@ -108,7 +113,7 @@ describe Mica::XML::Fields do
       internal = %(<!DOCTYPE r [<!ENTITY a "aaaa">]><r><x>&a;</x></r>)
 
       [external, defaults, internal].each do |xml|
-        expect_raises(Mica::XML::Fields::RejectedDocumentError, /DTD/) { fields(xml) }
+        expect_raises(Mica::XML::DocumentTypeNotAllowedError, /DTD/) { fields(xml) }
       end
     end
 
@@ -147,14 +152,20 @@ describe Mica::XML::Fields do
       expect_raises(Mica::LimitExceededError) { Mica::XML::Fields.read(IO::Memory.new(big)) }
     end
 
-    it "requires options that cap the body size" do
+    it "requires options that keep the size cap, the DTD refusal and namespace processing" do
       expect_raises(ArgumentError, /max_input_bytes/) do
-        Mica::XML::Fields.read("<r/>", Mica::XML::ParserOptions.new)
+        Mica::XML::Fields.read("<r/>", Mica::XML::ParserOptions.new(allow_document_type: false))
+      end
+      expect_raises(ArgumentError, /allow_document_type/) do
+        Mica::XML::Fields.read("<r/>", Mica::XML::ParserOptions.new(max_input_bytes: 100_i64))
+      end
+      expect_raises(ArgumentError, /namespace_aware/) do
+        Mica::XML::Fields.read("<r/>", Mica::XML::ParserOptions.new(namespace_aware: false, allow_document_type: false, max_input_bytes: 100_i64))
       end
     end
 
     it "caps depth at MAX_DEPTH even when the caller allows deeper parsing" do
-      options = Mica::XML::ParserOptions.new(max_element_depth: 100_000, max_input_bytes: 1_000_000_i64)
+      options = Mica::XML::ParserOptions.new(allow_document_type: false, max_element_depth: 100_000, max_input_bytes: 1_000_000_i64)
       deep = "<a>" * 1_000 + "</a>" * 1_000
       leaf_at_65 = "<a>" * 64 + "<a/>" + "</a>" * 64
 
@@ -165,20 +176,25 @@ describe Mica::XML::Fields do
       end
     end
 
-    it "refuses a DTD at its declaration, before any element is read" do
+    it "refuses a DTD at its <!DOCTYPE, before any declaration is read" do
       declarations = (1..100).map { |attribute_number| %(<!ATTLIST e a#{attribute_number} CDATA "">) }.join
       body = %(<!DOCTYPE r [#{declarations}]><r>) + "<e/>" * 10_000 + "</r>"
-      error = expect_raises(Mica::XML::Fields::RejectedDocumentError, /DTD/) { fields(body) }
+      error = expect_raises(Mica::XML::DocumentTypeNotAllowedError, /DTD/) { fields(body) }
 
-      # The reader stops at the end of the declaration, before the root
-      # element and every <e/> that the defaults would apply to.
-      position_match = error.message.to_s.match(/byte (\d+)/)
-      raise "the error names no byte offset" unless position_match
-      position_match[1].to_i.should be <= body.index!("<r>")
+      # The reader stops at the <!DOCTYPE itself, byte 0.
+      error.byte_offset.should eq(0)
+    end
+
+    it "refuses parameter entities before expanding any of them" do
+      declarations = "<!ELEMENT e EMPTY>" * 80
+      body = %(<!DOCTYPE r [<!ENTITY % p '#{declarations}'>) + "%p;" * 9_000 + "]><r/>"
+
+      error = expect_raises(Mica::XML::DocumentTypeNotAllowedError) { fields(body) }
+      error.byte_offset.should eq(0)
     end
 
     it "charges the conversion to the same work budget as the parse" do
-      wide = "<r>" + "<x/>" * 10_000 + "</r>"
+      wide = "<r>" + "<x>text</x>" * 10_000 + "</r>"
       reader = Mica::XML::Reader.new(wide, Mica::XML::ParserOptions.new(work_budget: Mica::Core::WorkBudget.unlimited))
       while reader.read
       end
@@ -186,7 +202,7 @@ describe Mica::XML::Fields do
       # A budget that covers reading the body, but not reading plus
       # converting it, stops the read.
       just_the_reading = Mica::Core::WorkBudget.new(operations_per_unit: 0, base_operations: reader.operations + 10_000)
-      options = Mica::XML::ParserOptions.new(work_budget: just_the_reading, max_input_bytes: 1_000_000_i64)
+      options = Mica::XML::ParserOptions.new(allow_document_type: false, work_budget: just_the_reading, max_input_bytes: 1_000_000_i64)
       expect_raises(Mica::WorkBudgetExceededError) { Mica::XML::Fields.read(wide, options) }
     end
 
@@ -209,7 +225,7 @@ describe Mica::XML::Fields do
       end
       xml = %(<!DOCTYPE user [#{entities}]><user><name>&e12;</name></user>)
 
-      expect_raises(Mica::XML::Fields::RejectedDocumentError, /DTD/) { fields(xml) }
+      expect_raises(Mica::XML::DocumentTypeNotAllowedError, /DTD/) { fields(xml) }
     end
   end
 end

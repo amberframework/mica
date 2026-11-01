@@ -25,6 +25,12 @@ module Mica::XML
 
     # Processes Namespaces in XML (prefix binding, QName syntax).
     getter? namespace_aware : Bool
+    # Accepts a document type declaration. When false, the reader raises
+    # `Mica::XML::DocumentTypeNotAllowedError` as soon as it recognizes
+    # `<!DOCTYPE`, before it reads the internal subset or expands any
+    # parameter entity. Request bodies and other untrusted input that never
+    # needs a DTD should turn it off.
+    getter? allow_document_type : Bool
     # Maximum number of entity references expanded in one document.
     getter max_entity_expansions : Int32
     # Maximum total bytes produced by entity expansion in one document.
@@ -64,6 +70,7 @@ module Mica::XML
 
     def initialize(
       @namespace_aware : Bool = true,
+      @allow_document_type : Bool = true,
       @max_entity_expansions : Int32 = 10_000,
       @max_entity_expansion_bytes : Int64 = 16_i64 * 1024 * 1024,
       @max_entity_depth : Int32 = 16,

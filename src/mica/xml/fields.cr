@@ -23,11 +23,12 @@ module Mica::XML
   # Values stay strings; the schema converts them, as it does for form data.
   #
   # A request body is untrusted, so `read` streams it once through
-  # `Mica::XML::Reader` (no DOM is built) and raises
-  # `Fields::RejectedDocumentError` at the first sign of what a field hash
-  # cannot carry faithfully or safely: a document type declaration (DTD),
-  # sibling elements or attributes that share a local name but not a
-  # namespace, or nesting deeper than `MAX_DEPTH`. Every event and every
+  # `Mica::XML::Reader` (no DOM is built). The reader raises
+  # `Mica::XML::DocumentTypeNotAllowedError` at a `<!DOCTYPE`, before it
+  # reads any declaration, and `read` raises `Fields::RejectedDocumentError`
+  # at the first sign of what a field hash cannot carry faithfully: sibling
+  # elements or attributes that share a local name but not a namespace, or
+  # nesting deeper than `MAX_DEPTH`. Every event and every
   # copied byte is charged to the parse's work meter, so the whole read
   # stays linear in the body's size.
   #
@@ -45,27 +46,40 @@ module Mica::XML
     # The largest body `read` accepts with its default options.
     MAX_BODY_BYTES = 1_i64 * 1024 * 1024
 
-    # Parser options for request bodies: the secure defaults, with nesting
-    # capped at `MAX_DEPTH` and the body capped at `MAX_BODY_BYTES`.
-    REQUEST_BODY_OPTIONS = ParserOptions.new(max_element_depth: MAX_DEPTH, max_input_bytes: MAX_BODY_BYTES)
+    # Parser options for request bodies: the secure defaults, with no DTD,
+    # nesting capped at `MAX_DEPTH` and the body capped at `MAX_BODY_BYTES`.
+    REQUEST_BODY_OPTIONS = ParserOptions.new(
+      allow_document_type: false,
+      max_element_depth: MAX_DEPTH,
+      max_input_bytes: MAX_BODY_BYTES,
+    )
 
     private XMLNS_NAMESPACE = "http://www.w3.org/2000/xmlns/"
 
-    # Raised when a well-formed document is refused as a request body: it
-    # declares a DTD, its names collide across namespaces, or it nests
-    # deeper than `MAX_DEPTH`.
+    # Raised when a well-formed document is refused as a request body: its
+    # names collide across namespaces, it nests deeper than `MAX_DEPTH`, or
+    # it contains an entity reference.
     class RejectedDocumentError < Mica::Error
     end
 
     # Parses *source* and returns its fields. Raises the errors of
     # `Mica::XML::Reader` (`Mica::ParseError`, `Mica::LimitExceededError`,
     # `Mica::EncodingError`) when the body is not well-formed or trips a
-    # limit, the work budget or the deadline, and `RejectedDocumentError` as
-    # described on `Fields`. *options* must cap `max_input_bytes`, because a
-    # request body always needs a size limit; `ArgumentError` otherwise.
+    # limit, the work budget or the deadline,
+    # `Mica::XML::DocumentTypeNotAllowedError` for a DTD, and
+    # `RejectedDocumentError` as described on `Fields`. Custom *options* must
+    # keep what the mapping relies on: `allow_document_type: false`,
+    # `namespace_aware: true` and a `max_input_bytes` cap; `ArgumentError`
+    # otherwise.
     def self.read(source : String | Bytes | IO, options : ParserOptions = REQUEST_BODY_OPTIONS) : Hash(String, JSON::Any)
       unless options.max_input_bytes
         raise ArgumentError.new("Request-body options must set max_input_bytes")
+      end
+      if options.allow_document_type?
+        raise ArgumentError.new("Request-body options must set allow_document_type: false")
+      end
+      unless options.namespace_aware?
+        raise ArgumentError.new("Request-body options must keep namespace_aware: true")
       end
 
       Conversion.new(Reader.new(source, options)).perform
@@ -101,8 +115,6 @@ module Mica::XML
         while @reader.read
           @reader.charge(1)
           case @reader.node_type
-          when .document_type?
-            reject("A request body cannot declare a document type (DTD)")
           when .entity_reference?
             reject("A request body cannot contain entity references")
           when .element?
@@ -164,7 +176,7 @@ module Mica::XML
         return fields_of(element) unless parent
 
         value = if element.attribute_fields.empty? && !element.has_child_elements?
-                  JSON::Any.new(element.text.to_s)
+                  JSON::Any.new(charged_text(element))
                 else
                   JSON::Any.new(fields_of(element))
                 end
@@ -174,12 +186,12 @@ module Mica::XML
 
       private def add_child(parent : OpenElement, element : OpenElement, value : JSON::Any) : Nil
         name = element.local_name
+        @reader.charge(1 + name.bytesize)
         if parent.child_namespace_by_name.has_key?(name)
           if parent.child_namespace_by_name[name] != element.namespace_uri
             reject("Sibling elements share the local name #{Core.quote(name)} in different namespaces")
           end
         else
-          @reader.charge(name.bytesize)
           parent.child_namespace_by_name[name] = element.namespace_uri
         end
         (parent.child_values_by_name[name] ||= [] of JSON::Any) << value
@@ -192,10 +204,20 @@ module Mica::XML
           fields[name] = values.size == 1 ? values.first : JSON::Any.new(values)
         end
 
-        text = element.text.to_s
-        text = text.strip if element.has_child_elements?
+        text = charged_text(element)
+        if element.has_child_elements?
+          @reader.charge(text.bytesize)
+          text = text.strip
+        end
         fields["#text"] = JSON::Any.new(text) unless text.empty?
         fields
+      end
+
+      # The element's text as one string; the copy is charged.
+      private def charged_text(element : OpenElement) : String
+        text = element.text.to_s
+        @reader.charge(text.bytesize)
+        text
       end
 
       private def reject(message : String) : NoReturn
