@@ -108,6 +108,11 @@ for the object; child elements become fields by local name; repeated names
 become arrays; attributes become `"@name"` keys; mixed text becomes
 `"#text"`. Values stay strings for the schema to convert.
 
+A request body is untrusted, so `Fields.read` refuses a document type
+declaration (DTD), names that collide across namespaces, and nesting deeper
+than 64 levels (`Mica::XML::Fields::RejectedDocumentError`), caps the body at
+1 MiB, and charges the conversion to the same work budget as the parse.
+
 ```crystal
 require "mica/xml/fields"
 
@@ -116,7 +121,8 @@ Mica::XML::Fields.read(%(<user id="7"><name>Ada</name><role>admin</role><role>de
 ```
 
 `Fields.read` parses with `Fields::REQUEST_BODY_OPTIONS` (the secure
-defaults, with nesting capped at 64 levels) unless you pass other options.
+defaults, nesting capped at 64 levels, bodies at 1 MiB) unless you pass
+other options; the DTD, namespace and depth checks apply either way.
 In an Amber V2 application, register it as the XML body parser:
 
 ```crystal

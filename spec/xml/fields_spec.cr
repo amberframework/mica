@@ -102,10 +102,82 @@ describe Mica::XML::Fields do
       fields(at_limit).has_key?("a").should be_true
     end
 
-    it "never resolves an external entity, so a body cannot read local files" do
-      xml = %(<!DOCTYPE user [<!ENTITY secret SYSTEM "file:///etc/passwd">]><user><name>&secret;</name></user>)
+    it "refuses a DTD, so no external entity, default attribute or entity text reaches the fields" do
+      external = %(<!DOCTYPE user [<!ENTITY secret SYSTEM "file:///etc/passwd">]><user><name>pre&secret;post</name></user>)
+      defaults = %(<!DOCTYPE r [<!ATTLIST e x CDATA "v">]><r><e/></r>)
+      internal = %(<!DOCTYPE r [<!ENTITY a "aaaa">]><r><x>&a;</x></r>)
 
-      fields(xml)["name"].should eq(JSON::Any.new(""))
+      [external, defaults, internal].each do |xml|
+        expect_raises(Mica::XML::Fields::RejectedDocumentError, /DTD/) { fields(xml) }
+      end
+    end
+
+    it "still reads the five predefined entities and character references" do
+      fields(%(<r><x>&lt;&gt;&amp;&apos;&quot;&#65;</x></r>))["x"].should eq(JSON::Any.new(%(<>&'"A)))
+    end
+
+    it "refuses attributes that share a local name in different namespaces" do
+      xml = %(<r xmlns:a="urn:a" xmlns:b="urn:b" a:id="first" b:id="second"/>)
+
+      expect_raises(Mica::XML::Fields::RejectedDocumentError, /attributes share/) { fields(xml) }
+    end
+
+    it "refuses sibling elements that share a local name in different namespaces" do
+      xml = %(<r xmlns:a="urn:a" xmlns:b="urn:b"><a:id>1</a:id><b:id>2</b:id></r>)
+
+      expect_raises(Mica::XML::Fields::RejectedDocumentError, /elements share/) { fields(xml) }
+    end
+
+    it "keeps a text value exactly, with or without attributes" do
+      result = fields(%(<r><x unit="kg">  value  </x><y>  spaced  </y><z unit="g">   </z></r>))
+
+      result["x"].should eq(JSON::Any.new({"@unit" => JSON::Any.new("kg"), "#text" => JSON::Any.new("  value  ")}))
+      result["y"].should eq(JSON::Any.new("  spaced  "))
+      result["z"].should eq(JSON::Any.new({"@unit" => JSON::Any.new("g"), "#text" => JSON::Any.new("   ")}))
+    end
+
+    it "leaves #text out of an element with attributes and no text" do
+      fields(%(<r><x unit="kg"/></r>))["x"].should eq(JSON::Any.new({"@unit" => JSON::Any.new("kg")}))
+    end
+
+    it "refuses a body larger than MAX_BODY_BYTES" do
+      big = "<r><x>" + "a" * Mica::XML::Fields::MAX_BODY_BYTES + "</x></r>"
+
+      expect_raises(Mica::LimitExceededError) { fields(big) }
+    end
+
+    it "caps conversion depth at MAX_DEPTH even when the caller allows deeper parsing" do
+      options = Mica::XML::ParserOptions.new(max_element_depth: 100_000)
+      deep = "<a>" * 1_000 + "</a>" * 1_000
+
+      expect_raises(Mica::XML::Fields::RejectedDocumentError, /deeper than 64/) do
+        Mica::XML::Fields.read(deep, options)
+      end
+    end
+
+    it "charges the conversion to the same work budget as the parse" do
+      wide = "<r>" + "<item>x</item>" * 2_000 + "</r>"
+      parse_only = Mica::Core::WorkMeter.new(Mica::Core::WorkBudget.unlimited)
+      Mica::XML.parse(wide, Mica::XML::ParserOptions.new(work_budget: Mica::Core::WorkBudget.unlimited), parse_only)
+
+      # A budget that covers the parse but not the parse plus the
+      # conversion stops the read.
+      just_the_parse = Mica::Core::WorkBudget.new(operations_per_unit: 0, base_operations: parse_only.operations + 10)
+      expect_raises(Mica::WorkBudgetExceededError) do
+        Mica::XML::Fields.read(wide, Mica::XML::ParserOptions.new(work_budget: just_the_parse))
+      end
+    end
+
+    it "reads a wide body with many repeated names and attributes" do
+      wide = "<r>" + %(<item a="1" b="2">x</item>) * 10_000 + "</r>"
+      list_of_items = fields(wide)["item"].as_a
+
+      list_of_items.size.should eq(10_000)
+      list_of_items.last.should eq(JSON::Any.new({
+        "@a"    => JSON::Any.new("1"),
+        "@b"    => JSON::Any.new("2"),
+        "#text" => JSON::Any.new("x"),
+      }))
     end
 
     it "stops an exponential entity expansion with a limit error" do
