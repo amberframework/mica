@@ -32,7 +32,7 @@ to `Mica::XML`.
 dependencies:
   mica:
     github: amberframework/mica
-    version: 0.1.0
+    version: 0.1.1
 ```
 
 ```crystal

@@ -5,7 +5,7 @@
 # input. No format needs a C library, and none reads the network or file
 # system while parsing.
 module Mica
-  VERSION = {{ `shards version "#{__DIR__}"`.chomp.stringify }}
+  VERSION = "0.1.1"
 end
 
 require "./mica/core"
