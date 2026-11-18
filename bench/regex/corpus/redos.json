@@ -1,0 +1,123 @@
+{
+  "description": "ReDoS families. The haystack is prepend + unit * n + append; each family runs at every n in sizes with the first-match model (one search from the start), under the configured deadline.",
+  "sizes": [
+    16,
+    24,
+    32,
+    64,
+    256,
+    1024,
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576
+  ],
+  "deadline_ms": 1000,
+  "families": [
+    {
+      "name": "nested-plus-dollar",
+      "pattern": "(a+)+$",
+      "prepend": "",
+      "unit": "a",
+      "append": "b",
+      "source": "followup-17 section 6.8"
+    },
+    {
+      "name": "alternation-a-or-a",
+      "pattern": "(a|a)*b",
+      "prepend": "",
+      "unit": "a",
+      "append": "",
+      "source": "followup-17 section 6.8"
+    },
+    {
+      "name": "alternation-a-or-aa-b",
+      "pattern": "(a|aa)*b",
+      "prepend": "",
+      "unit": "a",
+      "append": "",
+      "source": "task brief 2026-11-18"
+    },
+    {
+      "name": "alternation-a-or-aa-c",
+      "pattern": "(a|aa)*c",
+      "prepend": "",
+      "unit": "a",
+      "append": "",
+      "source": "followup-17 section 6.8"
+    },
+    {
+      "name": "double-plus-group",
+      "pattern": "(x+x+)+y",
+      "prepend": "",
+      "unit": "x",
+      "append": "",
+      "source": "followup-17 section 6.8"
+    },
+    {
+      "name": "dot-star-a-twenty",
+      "pattern": "(.*a){20}",
+      "prepend": "",
+      "unit": "a",
+      "append": "",
+      "source": "followup-17 section 6.8"
+    },
+    {
+      "name": "words-then-bang",
+      "pattern": "^(\\w+\\s?)*$",
+      "prepend": "",
+      "unit": "ab ",
+      "append": "!",
+      "source": "followup-17 section 6.8"
+    },
+    {
+      "name": "owasp-email",
+      "pattern": "^([a-zA-Z0-9])(([\\-.]|[_]+)?([a-zA-Z0-9]+))*(@){1}[a-z0-9]+[.]{1}(([a-z]{2,3})|([a-z]{2,3}[.]{1}[a-z]{2,3}))$",
+      "prepend": "",
+      "unit": "a",
+      "append": "!",
+      "source": "followup-17 section 6.8 (OWASP ReDoS email example)"
+    },
+    {
+      "name": "cloudflare-2019",
+      "pattern": ".*(?:.*=.*)",
+      "prepend": "x=",
+      "unit": "x",
+      "append": "",
+      "source": "followup-17 section 6.8 (Cloudflare outage 2019-07-02, reduced)"
+    },
+    {
+      "name": "stack-overflow-2016",
+      "pattern": "^[\\s\\x{200c}]+|[\\s\\x{200c}]+$",
+      "prepend": "x",
+      "unit": " ",
+      "append": "x",
+      "source": "followup-17 section 6.8 (Stack Overflow outage 2016-07-20)"
+    },
+    {
+      "name": "alternation-overlap-abc",
+      "pattern": "(a|b|ab)*c",
+      "prepend": "",
+      "unit": "ab",
+      "append": "",
+      "source": "alternation blowup"
+    },
+    {
+      "name": "optional-alternation",
+      "pattern": "(a|a?)+b",
+      "prepend": "",
+      "unit": "a",
+      "append": "",
+      "source": "alternation blowup"
+    },
+    {
+      "name": "trailing-space-run",
+      "pattern": "\\s+$",
+      "prepend": "x",
+      "unit": " ",
+      "append": "x",
+      "source": "long non-matching input (quadratic in the start position)"
+    }
+  ]
+}
