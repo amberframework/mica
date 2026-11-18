@@ -2,3 +2,6 @@ maintenance_exemptions:
   - target: libxml2
     reason: "Comparison baseline only: conformance/run_libxml2.cr, bench/bench_stdlib.cr and fuzz/differential.cr measure stdlib XML (libxml2) against Mica. The library itself (src/) never requires xml; spec binaries do not link libxml2."
     expires: 2027-04-24
+  - target: pcre2
+    reason: "Differential baseline only: spec/regex/differential/pcre2_syntax_oracle.cr records PCRE2 10.49's verdicts on its own test corpus, and the spec runner (stdlib) links libpcre2-8. The library itself (src/) never uses stdlib Regex, and scripts/check_linkage.sh proves a Mica::Regex program links no PCRE2."
+    expires: 2027-05-18

@@ -1,0 +1,3 @@
+# Approved divergences between Mica::Regex (Crystal dialect) and PCRE2 10.49
+# on the testinput corpus: cases where Mica deliberately gives a different
+# accept or reject verdict. Format: case id<TAB>reason.
