@@ -9,6 +9,12 @@ format parsers on one shared core:
 - `Mica::XML`: XML 1.0 (5th edition) and XML 1.1 (2nd edition) with
   Namespaces 1.0 and 1.1: a streaming reader, a DOM, a builder and
   XPath 1.0.
+- `Mica::Regex`: a pure-Crystal regular expression engine whose searches
+  run in time linear in the haystack (the RE2 and Rust regex family). Its
+  first milestone is in: the Crystal-dialect parser (PCRE2 syntax, with
+  backreferences, lookaround and the other backtracking-only constructs
+  refused by name), compile limits, Unicode 17 classes and case folding,
+  and `Mica::Regex::Syntax.check`. See [docs/regex.md](docs/regex.md).
 - `Mica::Testing` (opt-in, `require "mica/testing"`): the complexity,
   fuzzing and requirement-traceability harnesses every format uses.
 
@@ -16,7 +22,7 @@ More formats (JSON, YAML, CBOR, COSE, HTTP/1.1, URIs, multipart, CSV, TOML,
 Markdown) plug into the same core; see
 [docs/ADDING_A_FORMAT.md](docs/ADDING_A_FORMAT.md).
 
-Mica has no C parsing dependencies: no libxml2 and no regex engine. A Mica
+Mica has no C parsing dependencies: no libxml2 and no PCRE2. A Mica
 program links only libgc, libiconv and libSystem, which the Crystal runtime
 itself needs (`scripts/check_linkage.sh` checks this). Mica never reads the
 network or the file system while parsing, and it is secure by default:
