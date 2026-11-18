@@ -1,0 +1,25 @@
+# Requirements for Mica::Regex milestone R1 (the Crystal-dialect front end):
+# the PCRE2 10.49 pattern syntax subset it accepts, the constructs it
+# refuses by name, its compile limits and allocation ledger, Unicode tables
+# and case folding, and the complexity of compiling. The PCRE2 testinput
+# census (spec/regex/pcre2_syntax_census_spec.cr) covers the grammar case by
+# case; this catalog traces the behaviors the specs pin down.
+# Format: id<TAB>section<TAB>summary.
+REGEX-R1-literals	docs/regex.md Syntax	Literals, escapes (\a \e \f \n \r \t \xhh \x{} \o{} \0 octal \cX \N{U+}) and \Q...\E quoting read as PCRE2 reads them
+REGEX-R1-classes	docs/regex.md Syntax	Bracketed classes, ranges, negation, POSIX classes and class escapes follow PCRE2's class rules
+REGEX-R1-properties	docs/regex.md Unicode	\p and \P accept PCRE2's loose property names (general categories, scripts, script extensions, Bidi classes, Boolean properties, Any, L&, Xan, Xps, Xsp, Xwd, Xuc)
+REGEX-R1-quantifiers	docs/regex.md Syntax	*, +, ?, {n}, {n,}, {n,m}, {,m} with lazy suffix; a quantifier with nothing to repeat is an error
+REGEX-R1-groups	docs/regex.md Syntax	Capturing, named, non-capturing and branch-reset groups number captures as PCRE2 does
+REGEX-R1-options	docs/regex.md Options	Inline option settings (?imnrsxxJUa-...) and start-of-pattern settings apply with PCRE2's scoping
+REGEX-R1-excluded	docs/regex.md Excluded constructs	Backreferences, lookaround, atomic and possessive forms, recursion, conditionals, callouts, verbs, \K, \C and \X raise UnsupportedConstructError naming the construct and its byte offset
+REGEX-R1-errors	docs/regex.md Errors	Malformed patterns raise SyntaxError with the byte offset PCRE2 reports
+REGEX-R1-limits	docs/regex.md Limits	Pattern bytes, nesting depth, captures, class ranges, program states and compile bytes are refused with CompileLimitError naming the limit
+REGEX-R1-preflight	docs/regex.md Limits	The size preflight bounds program states with saturating arithmetic before Hir is built
+REGEX-R1-ledger	docs/regex.md Limits	Every compile allocation is charged to the ledger before it is made, and compiling stays under max_compile_bytes
+REGEX-R1-unicode-tables	docs/regex.md Unicode	Unicode 17.0.0 tables are generated from the sha256-pinned UCD and match PCRE2 10.49's property names
+REGEX-R1-case-folding	docs/regex.md Case folding	Case-insensitive classes close over simple case folding per dialect; (?r) keeps ASCII and non-ASCII apart
+REGEX-R1-utf8-sequences	docs/regex.md Limits	Code point ranges split into exact UTF-8 byte-range sequences, surrogates excluded
+REGEX-R1-hir	docs/regex.md Hir	Patterns translate to Hir with folded classes, explicit repetition counts and captures only
+REGEX-R1-pcre2-census	docs/regex.md PCRE2 census	Every PCRE2 10.49 testinput pattern is classified; Mica and PCRE2 agree on acceptance except for listed exclusions and divergences
+REGEX-R1-compile-complexity	docs/regex.md Limits	Compile work grows linearly with pattern size, and the roadmap 6.8 families are refused under max_compile_bytes
+REGEX-R1-fuzz	docs/regex.md Fuzzing	Random and mutated patterns end in a result or a Mica::Error, never a crash
