@@ -1,3 +1,4 @@
 # Approved divergences between Mica::Regex (Crystal dialect) and PCRE2 10.49
 # on the testinput corpus: cases where Mica deliberately gives a different
-# accept or reject verdict. Format: case id<TAB>reason.
+# accept or reject verdict. Format: case id<TAB>reason<TAB>approval, where
+# approval is `approved by @login` for a code owner of /conformance/regex/.

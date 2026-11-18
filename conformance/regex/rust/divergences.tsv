@@ -1,5 +1,5 @@
 # Approved divergences: the corpus engine expects another result and PCRE2 10.49 gives Mica's.
-# id<TAB>reason<TAB>approval
+# id<TAB>reason<TAB>approval (`approved by @login`, a code owner of /conformance/regex/)
 crazy.toml/empty11	Iteration: Crystal's String#scan reports an empty match that starts where the previous match ended; Rust regex skips it. PCRE2 10.49 and Mica give 0-0 | 1-2 | 2-2 | 3-3; the corpus engine expects 0-0 | 1-2 | 3-3	pending CODEOWNERS review
 empty.toml/110	Iteration: Crystal's String#scan reports an empty match that starts where the previous match ended; Rust regex skips it. PCRE2 10.49 and Mica give 0-0 | 1-2 | 2-2 | 3-3; the corpus engine expects 0-0 | 1-2 | 3-3	pending CODEOWNERS review
 empty.toml/230	Iteration: Crystal's String#scan reports an empty match that starts where the previous match ended; Rust regex skips it. PCRE2 10.49 and Mica give 0-0 | 1-2 | 2-2 | 3-3; the corpus engine expects 0-0 | 1-2 | 3-3	pending CODEOWNERS review

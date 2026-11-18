@@ -1,4 +1,5 @@
 require "../spec_helper"
+require "./support/conformance_approval"
 require "./support/pcre2_corpus"
 
 # The PCRE2 10.49 syntax census. Every pattern in the testinput corpus is
@@ -132,5 +133,7 @@ describe "PCRE2 10.49 syntax census" do
     # Every approved divergence still diverges, so the list cannot go stale.
     used = list_of_rows.select(&.category.approved_divergence?).map(&.test_case.id).to_set
     (approved.keys.to_set - used).should eq(Set(String).new)
+    # Every approved divergence names a code owner as its approver.
+    ConformanceApproval.unapproved(ConformanceApproval.read_rows(PCRE2Census::DIVERGENCES_PATH)).should eq([] of String)
   end
 end

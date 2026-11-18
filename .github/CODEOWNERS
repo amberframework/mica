@@ -1,0 +1,14 @@
+# Code owners (GitHub). A pull request that changes an owned path needs an
+# approving review from its owner before it merges.
+#
+# Conformance lists (roadmap 6.5): every exclusion and every divergence row
+# is a decision about what Mica::Regex promises, so the regex conformance
+# files and the gate that reads them belong to the project lead. Each
+# divergence row also names its approver in its approval column; the
+# conformance specs accept only an owner listed on the /conformance/regex/
+# line below.
+/conformance/regex/ @crimson-knight
+/spec/regex/search_conformance_spec.cr @crimson-knight
+/spec/regex/pcre2_syntax_census_spec.cr @crimson-knight
+/spec/regex/support/conformance_approval.cr @crimson-knight
+/.github/CODEOWNERS @crimson-knight

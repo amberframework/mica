@@ -258,7 +258,11 @@ Differences, all deliberate:
 - A byte index inside a character raises `ArgumentError`.
 - After an empty match in `gsub`, the next search starts one character past
   the match (stdlib measures the character at the previous offset instead;
-  roadmap 6.7 item 5).
+  roadmap 6.7 item 5). So `gsub` agrees with `scan` and with PCRE2's match
+  positions, and can differ from `String#gsub` after multibyte text: `\b`
+  replaced by `<>` in `"héllo wörld"` gives `"<>héllo<> <>wörld<>"` in
+  Mica and `"<>héllo<> wörld<>"` in stdlib (milestone R5 fixes the stdlib
+  side).
 
 ## Search limits
 
@@ -279,12 +283,25 @@ stepped, c per capture slot vector copied, and one per backtracker visit
 and undo entry. An iteration call (`each_match`, `scan`, `gsub`, `sub`,
 `split`) draws every search from one allowance, so a run of matches cannot
 reset it; its block, and the output it builds, are not regex work (output
-is bounded by `max_output_bytes` instead). A call that runs out raises
+is bounded by `max_output_bytes` instead). Under `CompileOptions::FirstLine`
+the search for the first line feed is charged one operation per byte, and
+an iteration call scans each byte for it at most once. `split` meters and
+validates the haystack on every path, the empty pattern (one operation per
+character) and `limit <= 1` included.
+
+`gsub` and `sub` charge `max_output_bytes` before each piece is written:
+each literal run of the haystack, each literal run and each group of a
+replacement string, and the `to_s` of a block's value. Memory for the
+result is therefore bounded by the cap: the buffer starts at the smaller
+of the haystack size and the cap and doubles, so it allocates at most about
+four times the cap in all, plus a few bytes per match. A call that runs out raises
 `Mica::Regex::SearchLimitError` (a `Mica::LimitExceededError`) whose
 `limit_name` is `max_work` or `max_output_bytes` and whose `limit_value`
 is the value for that call; a `timeout:` that passes raises
-`Mica::DeadlineExceededError`. A search never returns a partial or wrong
-result.
+`Mica::DeadlineExceededError`. The clock is read at the start of every
+call and then at work checkpoints, so a timeout that has already passed
+fails any call, while a running search notices its deadline at the next
+checkpoint. A search never returns a partial or wrong result.
 
 ## Engines
 
@@ -413,8 +430,14 @@ Rust divergences, each confirmed against PCRE2:
 | Multiline `^` does not match after a newline that ends the haystack | 3 |
 | The Crystal dialect accepts `(?)` | 1 |
 
-Every divergence row says "pending CODEOWNERS review" until a code owner
-approves it.
+Every divergence row ends in an approval column. `.github/CODEOWNERS`
+gives `/conformance/regex/` (and the gates that read it) to the project
+lead, so a change to these lists needs the owner's approving review, and
+the RE2, Rust and PCRE2 census gates fail on any divergence row whose
+approval column is not `approved by @login` for an owner of that path. A
+regenerated list keeps the approval of every row that stays and marks a
+new row `pending CODEOWNERS review`. The 108 Rust rows are pending the
+owner's review, so the Rust gate fails until they are approved.
 
 ## Engine differential
 
@@ -489,6 +512,15 @@ exception, within the work budget, deterministically.
   ten million cases (R4).
 - The PCRE2 testdata corpus (`testinput1`/`testoutput1`) as a search
   corpus, restricted to valid UTF-8 (R3).
-- Code owner approval of the Rust divergence rows ("pending CODEOWNERS
-  review").
+- Code owner approval of the 108 Rust divergence rows (the Rust gate
+  fails until each row says `approved by @crimson-knight`).
+- Program size under nested nullable unbounded loops: each such loop gets
+  a fresh copy of its body, so `(?:(?:...a?)*)*` grows exponentially with
+  nesting depth (770 states at depth 8, 196,610 at depth 16, refused at
+  depth 20 with 3.1 million states, which PCRE2 accepts). The size
+  preflight counts the copies, so compiling stays bounded and safe, but
+  compile size is not linear in pattern size for this shape.
+- `split` charges output bytes but not a per-piece overhead: an empty
+  piece costs one array entry. Pieces number at most n + 1, so this is
+  linear.
 - The ECMA-262 and XSD parsers (R6, R7) and `\X` (R9).

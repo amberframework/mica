@@ -1,5 +1,6 @@
 require "../spec_helper"
 require "./support/search_corpus"
+require "./support/conformance_approval"
 
 # The search conformance gate of milestone R2 (roadmap 6.5): the RE2
 # search tests and the Rust regex TOML tests, each pinned by commit and
@@ -17,10 +18,15 @@ require "./support/search_corpus"
 # - **eligible**: every other case, and every eligible case must pass, on
 #   every engine path that applies (two-phase, Pike VM, backtracker).
 #
+# Every divergence row must name its approver, a code owner of
+# /conformance/regex/ (see `ConformanceApproval`); an unapproved row fails
+# the gate.
+#
 # The lists must partition the corpus and match the files exactly; the
 # eligible count is pinned in denominator.json. Set
 # MICA_REGEX_CONFORMANCE_WRITE=1 to rewrite the files from a run (a change
-# then shows in review).
+# then shows in review); a rewrite keeps the approval of every row that
+# stays and marks a new row pending.
 module SearchConformance
   record Classified, id : String, pattern : String, category : String, reason : String
 
@@ -131,12 +137,15 @@ module SearchConformance
       file << "# Cases outside the Crystal dialect's search semantics (roadmap 6.5). id<TAB>reason\n"
       rows.each { |row| file << row.id << '\t' << row.reason << '\n' if row.category == "excluded" }
     end
-    File.open(File.join(directory, "divergences.tsv"), "w") do |file|
+    divergences_path = File.join(directory, "divergences.tsv")
+    previous = ConformanceApproval.read_rows(divergences_path)
+    File.open(divergences_path, "w") do |file|
       file << "# Approved divergences: the corpus engine expects another result and PCRE2 10.49 gives Mica's.\n"
-      file << "# id<TAB>reason<TAB>approval\n"
+      file << "# id<TAB>reason<TAB>approval (`approved by @login`, a code owner of /conformance/regex/)\n"
       rows.each do |row|
         next unless row.category == "divergent"
-        file << row.id << '\t' << row.reason << '\t' << "pending CODEOWNERS review" << '\n'
+        approval = previous[row.id]?.try(&.approval) || ConformanceApproval::PENDING
+        file << row.id << '\t' << row.reason << '\t' << approval << '\n'
       end
     end
     counts = Denominator.new(rows.size, rows.count(&.category.==("excluded")), rows.count(&.category.==("divergent")),
@@ -170,6 +179,10 @@ end
       eligible = rows.count(&.category.==("passed"))
       (denominator.excluded + denominator.divergent + eligible).should eq(rows.size)
       eligible.should eq(denominator.eligible)
+
+      rows_by_id = ConformanceApproval.read_rows(File.join(corpus.directory, "divergences.tsv"))
+      unapproved = ConformanceApproval.unapproved(rows_by_id)
+      {unapproved.size, unapproved.first(10)}.should eq({0, [] of String})
     end
   end
 end
