@@ -11,7 +11,10 @@ preflight, the high-level intermediate representation (`Hir`) with Unicode
 classes and per-dialect case folding, and `Mica::Regex::Syntax.check`) and
 **R2, the engines and the native API** (the NFA compiler, the Pike VM, the
 bounded backtracker, and `Mica::Regex::Expression`, whose methods follow
-Crystal's `Regex`). The lazy DFA and literal acceleration arrive in R3.
+Crystal's `Regex`), and **R3, the fast paths** (the forward and reverse
+lazy DFAs, the one-pass DFA, literal extraction with memchr-style,
+rare-byte and packed prefilters, the process-wide `CachePool`, and engine
+selection; see "Engine selection" and "Benchmarks").
 
 ```crystal
 require "mica"
@@ -238,8 +241,8 @@ Mica::Regex::Expression.new(",\\s*", compile_limits: Mica::Regex::CompileLimits:
 
 | stdlib | Mica |
 |---|---|
-| `Regex.new(source, options)` | `Expression.new(source, options, compile_limits:)` (also `Mica::Regex.compile(source, dialect:, compile_limits:)`) |
-| `regex.match(str, pos, options)`, `match!`, `match_at_byte_index`, `matches?`, `matches_at_byte_index?` | the same, plus a required `limits:` and an optional `timeout:` |
+| `Regex.new(source, options)` | `Expression.new(source, options, compile_limits:)` (also `Mica::Regex.compile(source, dialect:, compile_limits:)`), with an optional `cache_pool:` (see "Cache memory") |
+| `regex.match(str, pos, options)`, `match!`, `match_at_byte_index`, `matches?`, `matches_at_byte_index?` | the same, plus a required `limits:` and an optional `timeout:`; `search(haystack, byte_offset, limits:, deadline:)` is `match_at_byte_index` under the name roadmap 6.2.6 gives it |
 | `str.scan(regex)`, `str.gsub(regex, ...)`, `str.sub(regex, ...)`, `str.split(regex, ...)` | `expression.scan(str, ...)`, `gsub`, `sub`, `split` (every form: string with backreferences, hash, block), plus `each_match` |
 | `regex.source`, `options`, `capture_count`, `name_table`, `to_s`, `==`, `hash` | the same |
 | `Regex.escape`, `Regex.needs_escape?`, `Regex.union` | `Mica::Regex.escape`, `needs_escape?`, `union_source` (returns the source; compile it with the limits that fit). Each expression member keeps every option with an inline form, `n`, `r`, `U`, `xx` and `(?aD)` to `(?aT)` included, so the union matches exactly what the member matches; a member with `Anchored`, `FirstLine`, `DollarEndOnly` or `EndAnchored` raises `ArgumentError` |
@@ -315,8 +318,10 @@ when it finishes, and never emits more states than the preflight bound.
 There is no unanchored `.*?` prefix: the engines start a thread at each
 character boundary instead.
 
-A search runs in two phases (roadmap 6.2.1, without the lazy DFA that R3
-adds):
+A search runs in two phases (roadmap 6.2.1). Milestone R3 puts the lazy
+DFAs, the literal search and the one-pass DFA in front (see "Engine
+selection"); the R2 engines below remain the fallback for everything the
+fast paths leave alone, and `Engine::TwoPhase` still runs them as R2 did:
 
 1. A **Pike VM** tracking only group 0 finds the leftmost-first span
    `[s, e)`: each thread carries only the position where it started.
@@ -370,6 +375,131 @@ and `\Z` match before a final newline, and the word assertions use PCRE2's
 UCP word set (or ASCII under `(?aW)`), all as in PCRE2 with Crystal's
 options.
 
+## Engine selection
+
+`SearchPlan` (built on a program's first search, so compiling costs what
+it did in R2) picks the fastest correct path for each search:
+
+| Phase | Path | When | Cost |
+|---|---|---|---|
+| 1 | **Literal search** | the pattern is a finite set of literals with no assertion (`LiteralSet#exact?`), and the search is not anchored | O(n) prefilter scan plus the literal bytes compared at each candidate |
+| 1 | **Lazy DFAs**: forward for `e`, reverse for `s` | every program without `\G`, unless `FirstLine` or `EndAnchored` is set | one table read per byte; O(m) per state built |
+| 1 | **Pike VM**, span layout | otherwise, and whenever a lazy DFA gives up | O(m·(n + 1)) |
+| 2 | **One-pass DFA** | captures asked for and the pattern is one-pass | O(L + c) |
+| 2 | Bounded backtracker, then Pike VM | as in R2 | as in R2 |
+
+While the forward DFA sits in its start state, the prefilter (when the
+pattern has prefix literals) skips to the next position where a literal
+starts. A lazy DFA gives up, and the search runs on the Pike VM, when its
+cache thrashes, when the `CachePool` has no room, or when a Unicode word
+assertion meets a non-ASCII byte. Once a DFA gives up in a call, the
+call's later searches go straight to the Pike VM, so the work a thrashing
+cache wastes is spent once per call. Every path charges its work to the
+call's `SearchMeter` and reads the deadline at the same checkpoints, so
+the work budget and the deadline hold on every path.
+
+`Engine` (internal, for specs, fuzzers and benchmarks) forces a path:
+`Auto` (all of the above), `NoAccelerators` (the lazy DFAs and the
+one-pass DFA without the literal search and prefilters), `TwoPhase` (R2's
+two phases), `PikeVM` and `Backtracker`.
+
+**Calls reuse their workspaces.** A program keeps one *hot lease*: the
+lazy-DFA caches, the Pike VM and backtracker workspaces and the searcher
+of the call that finished last, taken back with one atomic swap by the
+next call. Idle leases beyond it keep only their DFA caches (at most 8 per
+program). A lease also remembers the last `String` it validated (strings
+are immutable), so separate calls over one haystack, as `String#scan` and
+`gsub` make through `match_at_byte_index`, validate it once.
+
+## Lazy DFA
+
+`LazyDFA` builds DFA states on demand from the NFA, as RE2 and Rust regex
+do, into a `DFACache` leased for the search:
+
+- **Forward**, a state is the ordered list of NFA states the Pike VM would
+  hold, so priority is kept: reaching the match state drops every
+  lower-priority thread, and the last match end the scan records before
+  the DFA dies is the leftmost-first end. A new thread starts at every
+  character boundary until the first match.
+- **Reverse**, over `ReverseNFA` (the NFA with every edge turned around,
+  starting at the match state), a state is a sorted set (priority plays no
+  part), and the scan from `e` back to the search start records every
+  position where `[s, e)` matches; the smallest is the start, because the
+  forward match starts where the leftmost match starts.
+- **Assertions** are decided when a transition is built: a state carries
+  what the bytes already read say (start or end of text, previous byte a
+  line feed, an ASCII word character, a continuation byte, not ASCII), and
+  the next byte is the transition's input, so the closure that reaches a
+  match runs one byte late. The end of the haystack is an extra input, and
+  so is a line feed that ends it (for `$` and `\Z`). Unicode word
+  assertions next to a non-ASCII byte, and `\G`, are left to the Pike VM.
+- **Byte classes** (`ByteClasses`) group bytes no state can tell apart, so
+  a state has one transition per class.
+- **Cost:** every byte read, every NFA state a new state's closure visits,
+  and every state a cache clear discards is charged one operation. A cache
+  that would pass `CachePool#max_cache_bytes` is cleared; one that has
+  been cleared more than 3 times with fewer than 10 bytes read per state
+  built since the last clear is thrashing, and the DFA gives up. So a
+  search stays O(m·(n + 1)).
+
+## One-pass DFA
+
+`OnePassDFA` (RE2's OnePass) reads captures in one pass for a pattern
+where the next byte always decides the way: each DFA state stands for one
+NFA state a byte transition leads to, each byte class has at most one path
+(with the slots it saves and the assertions it passes), and the match
+state at most one path. Paths after the match state in priority order are
+dropped. A pattern where two paths meet the same byte class, NFA state or
+match is not one-pass, and its captures come from the backtracker or the
+Pike VM. It is built on the first capture search, for programs of at most
+1,500 states and 64 slots, and runs only over the span phase 1 found.
+
+## Literal acceleration
+
+At compile time `LiteralSet.extract` walks `Hir` for the literals every
+match starts with (at most 64 of at most 32 bytes; small classes and
+case-insensitive letters expand; a large class, an optional start or an
+empty match ends extraction). When the set is the whole pattern (every
+literal exact, no assertion, no anchoring option), the literal search
+alone finds matches, in priority order at the leftmost candidate.
+
+`Prefilter` chooses one of three searchers:
+
+| Searcher | When | How |
+|---|---|---|
+| Rare byte | one literal | `memchr` for its least common byte by a fixed frequency rank (non-ASCII lead bytes rank as common, continuation bytes as rare), then the literal is compared around it |
+| First bytes | at most three distinct first bytes | `memchr` for each, keeping where each was last found so no byte is read twice |
+| Packed (Teddy style) | up to 64 literals | three 256-entry masks, one per leading byte, a bit per literal; a position is a candidate when the masks share a bit, and only those literals are compared |
+
+Every candidate is verified before it is returned. The accelerators follow
+roadmap 6.2.2: they are consulted only while the forward DFA is in its
+start state and only move forward, so no byte is read twice by them, and
+every byte read and every literal byte compared is charged. **The guard:**
+once 32 candidates have been verified and they came less than 8 bytes
+apart on average, a prefilter that is only an accelerator stops at the
+candidate it holds (no match starts before it), and the call stops using
+it. The reverse-suffix and reverse-inner optimizations are not built (see
+"Open items").
+
+## Cache memory
+
+`CachePool` (roadmap 6.2.4) caps the bytes all lazy-DFA caches hold
+together, process wide, with an atomic counter: 64 MiB by default, each
+cache at most 2 MiB. A cache reserves 64 KiB at a time before it grows.
+When a reservation does not fit, idle caches are evicted (oldest first);
+when none is idle, the search runs on the Pike VM. The default pool is the
+one deliberate piece of global state; an application sets it once at its
+boundary, and callers that need isolation pass their own pool to
+`Expression.new(..., cache_pool:)`:
+
+```crystal
+Mica::Regex.configure_cache_pool(max_bytes: 32_i64 * 1024 * 1024)
+```
+
+A cache is freed with its lease; the bytes it reserved go back to the pool
+then (a finalizer on a small reservation object, so collection needs no
+cycle through the program).
+
 ## Search complexity
 
 `spec/regex/search_complexity_spec.cr` measures the work each search
@@ -383,6 +513,16 @@ C x its bound, and growth from x1 to x8 must stay under 8 x 1.25.
 | alternation of k 8-byte literals, `a{k}`, `[\p{L}\p{N}]{1,k}` over 64 KiB | m (k = 8 to 64) | m·(c + 1)·(n + 1) | 4 | 7.86, 1.19, 1.01 |
 | `x{64}` + k empty groups, padded so m is identical | c (k = 8 to 64) | m·c·(L + 1) | 2 | 6.86, and more than 3 (slot copies are charged) |
 | `(a\|b)*(c)` on the backtracker | L = 16 to 128 | 2·m·(L + 1) + c + n | 1 | |
+
+`spec/regex/accelerated_complexity_spec.cr` adds the R3 families (roadmap
+6.8), on the default path:
+
+| Family | Varies | Bound | C | Checked |
+|---|---|---|---|---|
+| Each prefilter on a candidate-dense haystack: rare byte `ab[0-9]{3}x` and first bytes `(?:ab\|ba\|ca)[0-9]` over `"abz"`·k, packed `(?:ab\|bc\|cd\|de\|ef)[0-9]` over `"abzbczcdzdezefz"`·k, the literal search `aaab\|aaac\|aaad` over `"a"`·n | n = 4,000 to 32,000 bytes | m·(n + 1) | 16 | linear growth; the guard turns a dense prefilter off and leaves a sparse one on |
+| Cache thrash: `(a\|b)*a(a\|b){20}c` over random `a`/`b` with a 96 KiB cache | n = 8,000 to 64,000 | m·(n + 1) | 8 | the DFA gives up and the Pike VM keeps growth linear |
+| Iteration: `\w+` over words, one searcher for the whole scan | n = 5,000 to 40,000 | m·(n + 1) | 4 | linear growth over the whole call |
+| Iteration: `[a-z]+X\|[a-z]` over `"a"`·20,000 with a 10^7 ceiling | | | | the call's cumulative budget trips with `SearchLimitError` naming `max_work` |
 
 Set `MICA_COMPLEXITY_REPORT=path` to write every measurement.
 
@@ -413,8 +553,10 @@ dialect's meaning, not a Mica defect (`divergences.tsv`; PCRE2's results
 come from `spec/regex/differential/pcre2_search_oracle.cr`, a standalone
 program run by hand, recorded in
 `spec/regex/fixtures/pcre2_search_verdicts.json`). Every other case is
-**eligible** and must pass, on every engine path that applies (two-phase,
-Pike VM, and the backtracker when the haystack fits). The lists must
+**eligible** and must pass, on every engine path that applies: the
+default path (literal search, prefilters, lazy DFAs, one-pass DFA), the
+same without the literal accelerators, R2's two phases, the Pike VM, and
+the backtracker when the haystack fits. The lists must
 partition the corpus and match the files exactly, and `denominator.json`
 pins the counts. `MICA_REGEX_CONFORMANCE_WRITE=1` rewrites the files from
 a run, so any change shows in review.
@@ -423,6 +565,7 @@ a run, so any change shows in review.
 |---|---|---|---|---|---|
 | RE2 search | 7,552 | 3,616 | 0 | 3,936 | 0 |
 | Rust regex | 1,203 | 566 | 0 | 529 | 108 |
+| PCRE2 10.49 testdata subjects (valid UTF-8) | 14,916 | 7,735 | 0 | 7,174 | 7 |
 
 RE2 exclusions: 3,776 leftmost-longest (POSIX) columns and 160 uses of
 `\C`. Rust exclusions: 117 `utf8 = false` and 101 `unicode = false`
@@ -452,20 +595,52 @@ regenerated list keeps the approval of every row that stays and marks a
 new row `pending CODEOWNERS review`. The 108 Rust rows are pending the
 owner's review, so the Rust gate fails until they are approved.
 
+**PCRE2 testdata (milestone R3).** `conformance/regex/pcre2/convert_testdata.rb`
+also writes every subject line of the PCRE2 10.49 testinput files
+(`spec/regex/fixtures/pcre2_search_subjects.json`, escapes decoded as
+pcre2test decodes them; `\=` comment lines skipped, data modifiers kept by
+name). `spec/regex/pcre2_search_replay_spec.cr` pairs each subject with
+its pattern and replays it on every engine path; the expected result is
+PCRE2's own, recorded by `spec/regex/differential/pcre2_testdata_search_oracle.cr`
+(standalone, links PCRE2) with Crystal's compile options: the first match,
+or every match by `String#scan`'s rule when the pattern has `global`.
+Excluded (`search_excluded.tsv`): 3,162 subjects whose pattern uses an
+excluded construct, 1,744 whose pattern needs an option outside the
+dialect, 1,247 with data modifiers and 708 whose pattern has a modifier
+that changes how pcre2test searches (`replace`, `use_offset_limit`,
+`match_invalid_utf` and the like), 147 invalid UTF-8 subjects (milestone
+R4), 122 lines pcre2test itself cannot read, and a few patterns that are
+not valid UTF-8, that both engines reject, or that pass a compile limit. The 7
+divergences (`search_divergences.tsv`, pending the owner's review) are all
+patterns that set their own match, depth or heap limit with
+`(*LIMIT_...)`: PCRE2 stops there, while Mica reads and ignores those
+settings and answers within its own limits. Every engine path agrees on
+all 7,735 eligible subjects.
+
+The replay also found an R2 defect: `\p{Cs}` (surrogates only, which no
+UTF-8 haystack holds) crashed the compiler; it now compiles to a state
+that never matches.
+
 ## Engine differential
 
 `fuzz/regex_engine_differential.cr` generates small patterns (atoms,
 classes, assertions, `\R`, groups, named groups, every quantifier, inline
-flags) and searches each one over every string up to length 6 over the
-alphabet `a`, `b`, `é`, newline (5,461 strings) on every engine path: the
-two-phase search with and without captures, a Pike VM with every slot, the
-bounded backtracker, and `matches?`. All must agree on every case.
+flags, and since R3 multi-character literals and literal alternations, so
+the prefilters and the literal search take part) and searches each one
+over every string up to length 6 over the alphabet `a`, `b`, `é`, newline
+(5,461 strings) on every engine path: the default path with and without
+captures (accelerators on), the same with the literal accelerators off,
+R2's two phases, a Pike VM with every slot, the bounded backtracker,
+`matches?` on the default, unaccelerated and Pike VM paths, and a whole
+`String#scan`-style iteration on one searcher (later searches start inside
+the haystack and reuse the prefilter's progress and the warm caches),
+default path against R2's. All must agree on every case.
 `spec/regex/engine_differential_spec.cr` runs 12 patterns; the release
 campaign runs two million cases:
 
 ```sh
 crystal-alpha build --release fuzz/regex_engine_campaign.cr -o bin/regex_engine_campaign
-bin/regex_engine_campaign 20261118 400   # 2,184,400 cases, 0 disagreements
+for seed in 20261118 7 42 99; do bin/regex_engine_campaign $seed 100; done   # 2,184,400 cases, 0 disagreements
 ```
 
 `spec/regex/differential/pcre2_match_differential.cr` (standalone, links
@@ -517,14 +692,24 @@ exception, within the work budget, deterministically.
 
 ## Open items for later milestones
 
-- The lazy DFA (forward and reverse), the one-pass DFA, guarded literal
-  accelerators and the `CachePool` (R3), which take phase 1 from
-  O(m·n) Pike VM steps to one DFA transition per byte.
+- R3's performance bar is not met yet: see "Benchmarks" for the
+  per-group geometric means against PCRE2-JIT and every losing case. The
+  main gaps: compile time for patterns with large Unicode classes (each
+  class is a UTF-8 automaton; PCRE2 reads static property tables), the
+  per-call cost of short searches, Unicode `\b` on non-ASCII text (the
+  lazy DFA gives up and the Pike VM runs), and DFA blowups such as
+  `[a-q][^u-z]{13}x` (the cache thrashes and the Pike VM runs).
+- The reverse-suffix and reverse-inner literal optimizations (roadmap
+  6.2.2, with the 2·n reverse-byte budget), which would skip to a required
+  literal that is not a prefix.
+- Lazily compiled Unicode classes, or a compile memo keyed by pattern and
+  limits, to bring compile time for `\w`, `\d` and `\p{...}` down to
+  PCRE2's.
 - The invalid-UTF paths (`MatchInvalidUtf`, `NO_UTF_CHECK`) and the stdlib
   adapters with the 6.7 adapter matrix and the PCRE2 differential gate of
   ten million cases (R4).
-- The PCRE2 testdata corpus (`testinput1`/`testoutput1`) as a search
-  corpus, restricted to valid UTF-8 (R3).
+- Code owner approval of the 7 PCRE2 testdata divergence rows (the
+  patterns' own `(*LIMIT_...)` settings).
 - Code owner approval of the 108 Rust divergence rows (the Rust gate
   fails until each row says `approved by @crimson-knight`).
 - Program size under nested nullable unbounded loops: each such loop gets

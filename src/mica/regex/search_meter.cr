@@ -6,13 +6,20 @@ module Mica::Regex
   # When the allowance runs out it raises `SearchLimitError` naming
   # `max_work`; when the call's timeout passes, `Mica::DeadlineExceededError`.
   #
-  # WARNING: A meter belongs to one call and one fiber.
+  # WARNING: A meter belongs to one call and one fiber at a time (`restart`
+  # begins the next call).
   class SearchMeter
     # The underlying meter (its `operations` are the work charged so far).
     getter work_meter : Core::WorkMeter
 
     def initialize(limits : SearchLimits, state_count : Int32, haystack_bytes : Int32, timeout : Time::Span?)
       @work_meter = Core::WorkMeter.new(limits.work_budget(state_count, timeout))
+      @work_meter.add_units(haystack_bytes)
+    end
+
+    # Starts the meter over for a new call (see `Core::WorkMeter#restart`).
+    def restart(limits : SearchLimits, state_count : Int32, haystack_bytes : Int32, timeout : Time::Span?) : Nil
+      @work_meter.restart(limits.work_budget(state_count, timeout))
       @work_meter.add_units(haystack_bytes)
     end
 

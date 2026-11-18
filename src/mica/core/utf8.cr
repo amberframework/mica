@@ -148,11 +148,17 @@ module Mica::Core
     end
 
     # Returns the offset of the first invalid sequence in *bytes*, or nil
-    # when all of it is valid UTF-8. Runs in one pass.
+    # when all of it is valid UTF-8. Runs in one pass, reading runs of ASCII
+    # eight bytes at a time.
     def self.first_invalid_offset(bytes : Bytes) : Int32?
       index = 0
       size = bytes.size
+      pointer = bytes.to_unsafe
       while index < size
+        while index + 8 <= size && (pointer + index).as(UInt64*).value & 0x8080808080808080_u64 == 0
+          index += 8
+        end
+        break if index >= size
         if bytes[index] < 0x80
           index += 1
           next

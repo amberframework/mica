@@ -1,0 +1,310 @@
+module Mica::Regex
+  # The states and transitions one `LazyDFA` has built so far, leased to one
+  # search at a time (roadmap 6.2.4). Its memory is reserved from a
+  # `CachePool` before it is used, it never holds more than the pool's
+  # `max_cache_bytes`, and it clears itself when it would.
+  #
+  # The table holds `stride` entries per state: the next state's entry
+  # (`entry_of`), or -1 when that transition has not been built yet. State 0 is the dead
+  # state and state 1 the dead state that reports a match first; both stay
+  # in every generation of the cache.
+  #
+  # WARNING: A cache belongs to one search at a time.
+  class DFACache
+    # The transition table (see the class description).
+    getter transition_table : Array(Int32)
+    # One byte of `LazyDFA::MARK_*` bits per state.
+    getter list_of_marks : Array(UInt8)
+    # How many times the cache has been cleared.
+    getter clears = 0
+    getter dfa : LazyDFA
+    @list_of_keys : Array(Array(Int32))
+    @state_ids : Hash(Array(Int32), Int32)
+    @start_states : Array(Int32)
+    @builder : DFABuilder
+    @bytes_used = 0_i64
+    @reservation : CacheReservation
+    @bytes_since_clear = 0_i64
+    @states_since_clear = 0
+    @generation = 0
+    # IDLE, BUSY or EVICTING (see `acquire`, `evict_if_idle`).
+    @use = Atomic(Int32).new(BUSY)
+
+    private IDLE     = 0
+    private BUSY     = 1
+    private EVICTING = 2
+
+    def initialize(@dfa : LazyDFA, @pool : CachePool)
+      @reservation = CacheReservation.new(@pool)
+      @transition_table = [] of Int32
+      @list_of_marks = [] of UInt8
+      @list_of_keys = [] of Array(Int32)
+      @state_ids = {} of Array(Int32) => Int32
+      @start_states = Array(Int32).new(LazyDFA::MATCH_BEHIND * 2, -1)
+      @builder = DFABuilder.new(@dfa.program.state_count)
+      reset_states
+      @pool.register(self)
+    end
+
+    # Takes the cache for a search, waiting while the pool evicts it.
+    def acquire : Nil
+      until @use.compare_and_set(IDLE, BUSY)[1]
+        Fiber.yield
+      end
+    end
+
+    # Hands the cache back; the pool may now evict it.
+    def release_to_pool : Nil
+      @use.set(IDLE)
+    end
+
+    # Evicts the cache when no search holds it (see `evict`). Returns true
+    # when it did.
+    def evict_if_idle : Bool
+      return false unless @use.compare_and_set(IDLE, EVICTING)[1]
+      evict
+      @use.set(IDLE)
+      true
+    end
+
+    # Bytes the builder's scratch space and the cache's fixed parts take.
+    private def fixed_bytes : Int64
+      16_i64 * @dfa.program.state_count + 4_i64 * @start_states.size + 256
+    end
+
+    # Records *count* bytes read by the search, for the thrash rule.
+    @[AlwaysInline]
+    def note_bytes(count : Int32) : Nil
+      @bytes_since_clear += count
+    end
+
+    # Drops every state and gives the memory back to the pool.
+    private def evict : Nil
+      @transition_table = [] of Int32
+      @list_of_marks = [] of UInt8
+      @list_of_keys = [] of Array(Int32)
+      @state_ids = {} of Array(Int32) => Int32
+      reset_states
+      @reservation.release_all
+    end
+
+    # Returns the start state for *flags*, building it when needed, or
+    # `LazyDFA::GAVE_UP`.
+    def start_state(dfa : LazyDFA, flags : Int32, meter : SearchMeter) : Int32
+      cached = @start_states.unsafe_fetch(flags)
+      return cached if cached >= 0
+      id = intern(dfa.start_key(flags), meter)
+      @start_states[flags] = id if id >= 0
+      id
+    end
+
+    # Builds the transition of *state* on *symbol*, records it, and returns
+    # the next state (or `LazyDFA::GAVE_UP`). Building may clear the cache;
+    # the transition is then not recorded, as *state* no longer exists.
+    def transition(dfa : LazyDFA, state : Int32, symbol : Int32, meter : SearchMeter) : Int32
+      key = dfa.next_key(@list_of_keys[state], symbol, @builder, meter)
+      return LazyDFA::GAVE_UP unless key
+      generation = @generation
+      id = intern(key, meter)
+      return id if id < 0
+      @transition_table[state * dfa.stride + symbol] = entry_of(id) if generation == @generation
+      id
+    end
+
+    # The table entry for state *id*: its row offset (`id * stride`), with
+    # `LazyDFA::SPECIAL` set for a match or dead state and
+    # `LazyDFA::START_ENTRY` for a start state.
+    @[AlwaysInline]
+    def entry_of(id : Int32) : Int32
+      offset = id &* @dfa.stride
+      marks = @list_of_marks.unsafe_fetch(id)
+      offset |= LazyDFA::SPECIAL if marks & (LazyDFA::MARK_MATCH | LazyDFA::MARK_DEAD) != 0
+      offset |= LazyDFA::START_ENTRY if marks & LazyDFA::MARK_START != 0
+      offset
+    end
+
+    private def intern(key : Array(Int32), meter : SearchMeter) : Int32
+      if id = @state_ids[key]?
+        return id
+      end
+      cost = state_bytes(key.size)
+      if @bytes_used + cost > @pool.max_cache_bytes
+        return LazyDFA::GAVE_UP unless clear(meter)
+        return LazyDFA::GAVE_UP if @bytes_used + cost > @pool.max_cache_bytes
+      end
+      return LazyDFA::GAVE_UP unless reserve(@bytes_used + cost)
+      add_state(key.dup, cost)
+    end
+
+    private def add_state(key : Array(Int32), cost : Int64) : Int32
+      id = @list_of_keys.size
+      @list_of_keys << key
+      @state_ids[key] = id
+      stride = @dfa.stride
+      # The dead states lead only to the dead state (entry 0 | SPECIAL).
+      fill = id <= LazyDFA::DEAD_MATCH ? LazyDFA::SPECIAL : -1
+      stride.times { @transition_table << fill }
+      mark = 0_u8
+      mark |= LazyDFA::MARK_MATCH if key.unsafe_fetch(0) & LazyDFA::MATCH_BEHIND != 0
+      mark |= LazyDFA::MARK_DEAD if id <= LazyDFA::DEAD_MATCH
+      mark |= LazyDFA::MARK_START if @dfa.start_like?(key)
+      @list_of_marks << mark
+      @bytes_used += cost
+      @states_since_clear += 1
+      id
+    end
+
+    private def reserve(bytes : Int64) : Bool
+      @reservation.cover(bytes)
+    end
+
+    # Clears the cache, charging one operation per state discarded. Returns
+    # false when the cache is thrashing (see `LazyDFA`).
+    private def clear(meter : SearchMeter) : Bool
+      meter.charge(@list_of_keys.size, 0)
+      @clears += 1
+      thrashing = @clears > LazyDFA::MAX_CLEARS &&
+                  @bytes_since_clear < LazyDFA::MINIMUM_BYTES_PER_STATE.to_i64 * @states_since_clear
+      @transition_table.clear
+      @list_of_marks.clear
+      @list_of_keys.clear
+      @state_ids.clear
+      reset_states
+      !thrashing
+    end
+
+    private def reset_states : Nil
+      @generation += 1
+      @bytes_used = fixed_bytes
+      @bytes_since_clear = 0_i64
+      @start_states.fill(-1)
+      if @list_of_keys.empty?
+        add_state(LazyDFA::DEAD_KEY.dup, state_bytes(1))
+        add_state(LazyDFA::DEAD_MATCH_KEY.dup, state_bytes(1))
+      end
+      @states_since_clear = 0
+    end
+
+    private def state_bytes(key_size : Int32) : Int64
+      # Table row, mark, key array (header and elements), hash entry and the
+      # key list slot.
+      4_i64 * @dfa.stride + 1 + 32 + 4_i64 * key_size + 48 + 8
+    end
+  end
+
+  # :nodoc:
+  # The bytes one `DFACache` has reserved from its pool. It is a separate
+  # object, referring to nothing but the pool, so its finalizer can give
+  # the bytes back when the cache is collected without a finalization
+  # cycle (the cache itself is reachable from its own program).
+  class CacheReservation
+    getter bytes = 0_i64
+
+    def initialize(@pool : CachePool)
+    end
+
+    # Reserves enough to hold *total* bytes in all, in steps of
+    # `CachePool::RESERVATION_BYTES`; false when the pool refuses.
+    def cover(total : Int64) : Bool
+      return true if total <= @bytes
+      step = Math.max(CachePool::RESERVATION_BYTES, total - @bytes)
+      return false unless @pool.reserve(step)
+      @bytes += step
+      true
+    end
+
+    def release_all : Nil
+      @pool.release(@bytes)
+      @bytes = 0_i64
+    end
+
+    def finalize
+      @pool.release(@bytes)
+    end
+  end
+
+  # :nodoc:
+  # Scratch space for building DFA states: a sparse set of visited NFA
+  # states, the closure stack, the consuming states in priority order, and
+  # the key being built with its own sparse set.
+  class DFABuilder
+    @visited_dense : Array(Int32)
+    @visited_sparse : Array(Int32)
+    @visited_size = 0
+    @target_dense : Array(Int32)
+    @target_sparse : Array(Int32)
+    @target_size = 0
+    @stack = [] of Int32
+    @outputs = [] of Int32
+    @key = [] of Int32
+
+    def initialize(state_count : Int32)
+      @visited_dense = Array(Int32).new(state_count, 0)
+      @visited_sparse = Array(Int32).new(state_count, 0)
+      @target_dense = Array(Int32).new(state_count, 0)
+      @target_sparse = Array(Int32).new(state_count, 0)
+    end
+
+    def reset : Nil
+      @visited_size = 0
+      @stack.clear
+      @outputs.clear
+    end
+
+    def push(state : Int32) : Nil
+      @stack << state
+    end
+
+    def pop? : Int32?
+      @stack.pop?
+    end
+
+    def clear_stack : Nil
+      @stack.clear
+    end
+
+    # Marks *state* visited; false when it already was.
+    def visit(state : Int32) : Bool
+      member = @visited_sparse.unsafe_fetch(state)
+      return false if member < @visited_size && @visited_dense.unsafe_fetch(member) == state
+      @visited_sparse[state] = @visited_size
+      @visited_dense[@visited_size] = state
+      @visited_size += 1
+      true
+    end
+
+    def output(state : Int32) : Nil
+      @outputs << state
+    end
+
+    def each_output(& : Int32 ->) : Nil
+      @outputs.each { |state| yield state }
+    end
+
+    def begin_targets(flags : Int32) : Nil
+      @key.clear
+      @key << flags
+      @target_size = 0
+    end
+
+    def add_target(state : Int32) : Nil
+      member = @target_sparse.unsafe_fetch(state)
+      return if member < @target_size && @target_dense.unsafe_fetch(member) == state
+      @target_sparse[state] = @target_size
+      @target_dense[@target_size] = state
+      @target_size += 1
+      @key << state
+    end
+
+    # The key built so far: the flags, then the targets in the order added.
+    def targets : Array(Int32)
+      @key
+    end
+
+    # The key with its targets sorted (reverse states have no priority).
+    def sorted_targets : Array(Int32)
+      @key[1..].sort!.each_with_index { |state, index| @key[index + 1] = state }
+      @key
+    end
+  end
+end

@@ -48,7 +48,8 @@ module Mica::Regex
     # `UnsupportedConstructError`) for a pattern the dialect rejects or
     # leaves out, and `CompileLimitError` when a limit trips.
     def initialize(@source : String, @options : CompileOptions = CompileOptions::None, *,
-                   compile_limits : CompileLimits, @dialect : Dialect = Dialect::Crystal)
+                   compile_limits : CompileLimits, @dialect : Dialect = Dialect::Crystal,
+                   @cache_pool : CachePool = CachePool.default)
       if @options.match_invalid_utf?
         raise ArgumentError.new("CompileOptions::MatchInvalidUtf arrives in Mica::Regex milestone R4")
       end
@@ -105,9 +106,19 @@ module Mica::Regex
     # when *byte_index* is negative or inside a character.
     def match_at_byte_index(string : String, byte_index : Int32 = 0, options : MatchOptions = MatchOptions::None, *,
                             limits : SearchLimits, timeout : Time::Span? = nil) : MatchData?
-      searcher = Searcher.new(@program, string, limits, timeout)
+      searcher = Searcher.open(@program, string, limits, timeout, @cache_pool)
       found = searcher.find(byte_index, options, true)
       found ? MatchData.new(self, string, byte_index, found) : nil
+    ensure
+      searcher.try(&.finish)
+    end
+
+    # Returns the first match in *haystack* at or after byte *byte_offset*,
+    # or nil: `match_at_byte_index` under the name the native API design
+    # gives it (roadmap 6.2.6), with *deadline* as the timeout.
+    def search(haystack : String, byte_offset : Int32 = 0, options : MatchOptions = MatchOptions::None, *,
+               limits : SearchLimits, deadline : Time::Span? = nil) : MatchData?
+      match_at_byte_index(haystack, byte_offset, options, limits: limits, timeout: deadline)
     end
 
     # Returns true when *string* has a match at or after character index
@@ -122,7 +133,10 @@ module Mica::Regex
     # Returns true when *string* has a match at or after byte *byte_index*.
     def matches_at_byte_index?(string : String, byte_index : Int32 = 0, options : MatchOptions = MatchOptions::None, *,
                                limits : SearchLimits, timeout : Time::Span? = nil) : Bool
-      Searcher.new(@program, string, limits, timeout).matches?(byte_index, options)
+      searcher = Searcher.open(@program, string, limits, timeout, @cache_pool)
+      searcher.matches?(byte_index, options)
+    ensure
+      searcher.try(&.finish)
     end
 
     # Yields each successive match in *string*, as `String#scan` finds
@@ -130,7 +144,7 @@ module Mica::Regex
     # later. All searches share the call's work allowance.
     def each_match(string : String, options : MatchOptions = MatchOptions::None, *, limits : SearchLimits,
                    timeout : Time::Span? = nil, & : MatchData ->) : Nil
-      searcher = Searcher.new(@program, string, limits, timeout)
+      searcher = Searcher.open(@program, string, limits, timeout, @cache_pool)
       byte_offset = 0
       while found = searcher.find(byte_offset, options, true)
         match = MatchData.new(self, string, byte_offset, found)
@@ -140,6 +154,8 @@ module Mica::Regex
         match_bytesize += char_bytesize_at(string, index) if match_bytesize == 0
         byte_offset = index + match_bytesize
       end
+    ensure
+      searcher.try(&.finish)
     end
 
     # Yields each successive match in *string* (as `each_match`) and
@@ -233,7 +249,7 @@ module Mica::Regex
               timeout : Time::Span? = nil, & : String ->) : Nil
       # The searcher validates and charges the haystack and reads the
       # deadline before any shortcut below.
-      searcher = Searcher.new(@program, string, limits, timeout)
+      searcher = Searcher.open(@program, string, limits, timeout, @cache_pool)
       output = OutputMeter.new(limits.max_output_bytes)
       if string.empty?
         yield "" unless remove_empty
@@ -278,6 +294,8 @@ module Mica::Regex
         output.add(string.bytesize - slice_offset)
         yield string.byte_slice(slice_offset)
       end
+    ensure
+      searcher.try(&.finish)
     end
 
     # Splits *string* into its characters (the empty pattern), charging one
@@ -305,7 +323,7 @@ module Mica::Regex
     # replaced by what the block writes.
     private def replace(string : String, options : MatchOptions, limits : SearchLimits, timeout : Time::Span?,
                         every : Bool, & : String, MatchData, IO, OutputMeter ->) : String
-      searcher = Searcher.new(@program, string, limits, timeout)
+      searcher = Searcher.open(@program, string, limits, timeout, @cache_pool)
       byte_offset = 0
       found = searcher.find(byte_offset, options, true)
       return string unless found
@@ -336,6 +354,8 @@ module Mica::Regex
           buffer.write(string.to_slice[last_byte_offset..])
         end
       end
+    ensure
+      searcher.try(&.finish)
     end
 
     # Writes the `to_s` of a replacement block's *value*, charging its size

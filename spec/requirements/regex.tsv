@@ -1,5 +1,6 @@
-# Requirements for Mica::Regex milestones R1 (the Crystal-dialect front end)
-# and R2 (the Pike VM, the bounded backtracker and the native search API):
+# Requirements for Mica::Regex milestones R1 (the Crystal-dialect front end),
+# R2 (the Pike VM, the bounded backtracker and the native search API) and
+# R3 (the lazy DFAs, the one-pass DFA, literal acceleration and the cache pool):
 # the PCRE2 10.49 pattern syntax subset it accepts, the constructs it
 # refuses by name, its compile limits and allocation ledger, Unicode tables
 # and case folding, and the complexity of compiling. The PCRE2 testinput
@@ -32,3 +33,11 @@ REGEX-R2-limits	docs/regex.md Search limits	Every search takes required SearchLi
 REGEX-R2-complexity	docs/regex.md Search complexity	The n, m and c families stay within their stated bounds and grow linearly
 REGEX-R2-conformance	docs/regex.md Conformance	The RE2 search tests and the Rust regex tests pass under fixed denominators, every eligible case on every engine path
 REGEX-R2-differential	docs/regex.md Engine differential	The Pike VM, the bounded backtracker and the two-phase search agree on generated patterns over every short string
+REGEX-R3-dfa	docs/regex.md Engines	The forward and reverse lazy DFAs find the leftmost-first span with the Crystal dialect's assertions, build states on demand, charge every byte, state and clear, and give up to the Pike VM when the cache thrashes
+REGEX-R3-one-pass	docs/regex.md Engines	A one-pass DFA extracts captures in one pass for one-pass patterns and agrees with the other engines
+REGEX-R3-accelerators	docs/regex.md Literal acceleration	Prefix literals are extracted at compile time; memchr-style, rare-byte and packed (Teddy-style) prefilters skip ahead only while the forward DFA is in its start state, verify every candidate, and turn themselves off when candidates come densely
+REGEX-R3-cache-pool	docs/regex.md Cache memory	Lazy-DFA caches are leased from a CachePool with a process-wide cap and a per-cache ceiling; idle caches are evicted, and a search that cannot get memory runs on the Pike VM
+REGEX-R3-selection	docs/regex.md Engine selection	Each search takes the fastest correct path (literal search, lazy DFAs with prefilter, Pike VM) and every path enforces the work budget and the deadline
+REGEX-R3-complexity	docs/regex.md Search complexity	The accelerator, cache-thrash and iteration families stay within their envelopes and grow linearly
+REGEX-R3-conformance	docs/regex.md Conformance	The RE2, Rust and PCRE2 (valid UTF-8) corpora give identical results on every engine path
+REGEX-R3-differential	docs/regex.md Engine differential	Every engine path, accelerators on and off, agrees on generated patterns over every short string

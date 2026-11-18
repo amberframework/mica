@@ -75,6 +75,11 @@ module Mica::Regex
     # sequences, or 1 for an empty set.
     def self.set_states(set : CodePointSet) : Int64
       return 1_i64 if set.empty?
+      return ClassMemo.state_bound(set) { count_set_states(set) } if ClassMemo.memoized?(set)
+      count_set_states(set)
+    end
+
+    private def self.count_set_states(set : CodePointSet) : Int64
       sequences = 0_i64
       byte_ranges = 0_i64
       set.each_range do |first, last|

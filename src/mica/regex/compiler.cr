@@ -104,9 +104,17 @@ module Mica::Regex
       start = emit_save(0, body)
       workspace_charge = check_pike_bytes
       group_names = @pattern.list_of_group_names
+      literal_set = LiteralSet.extract(@pattern, @meter)
+      charge_literal_set(literal_set) if literal_set
       @ledger.charge_object(instance_sizeof(Program), "the program", 0)
       Program.new(@list_of_states, @list_of_transitions, start, @pattern.capture_count, group_names,
-        @pattern.options, @limits.max_pike_bytes - workspace_charge, @pattern.source_end)
+        @pattern.options, @limits.max_pike_bytes - workspace_charge, @pattern.source_end, literal_set)
+    end
+
+    private def charge_literal_set(literal_set : LiteralSet) : Nil
+      @ledger.charge_object(instance_sizeof(LiteralSet), "the literal set", 0)
+      @ledger.charge_array(literal_set.list_of_literals.size, sizeof(Bytes), "the literal set", 0)
+      literal_set.list_of_literals.each { |literal| @ledger.charge_string(literal.size, "a literal", 0) }
     end
 
     private def run_tasks : Nil
@@ -356,7 +364,59 @@ module Mica::Regex
     # *next_state*.
     private def compile_class(set : CodePointSet, next_state : Int32) : Int32
       return emit(Program::StateKind::Fail) if set.empty?
+      return compile_class_from_trie(set, next_state) unless ClassMemo.memoized?(set)
+      if block = ClassMemo.block(set)
+        return instantiate(block, next_state)
+      end
+      first_state = @list_of_states.size
+      first_transition = @list_of_transitions.size
+      entry = compile_class_from_trie(set, next_state)
+      ClassMemo.store(set, ClassMemo::Block.new(
+        @list_of_states[first_state..].map { |state| relative_state(state, first_state, first_transition, next_state) },
+        @list_of_transitions[first_transition..].map do |transition|
+          transition.copy_with(target: relative_target(transition.target, first_state, next_state))
+        end,
+        entry - first_state))
+      entry
+    end
+
+    # Emits a memoized class block after the current states, its exit
+    # leading to *next_state*, and returns its entry state.
+    private def instantiate(block : ClassMemo::Block, next_state : Int32) : Int32
+      first_state = @list_of_states.size
+      first_transition = @list_of_transitions.size
+      block.list_of_transitions.each do |transition|
+        @ledger.charge_append(sizeof(Program::Transition), "a class transition", 0)
+        @list_of_transitions << transition.copy_with(target: absolute_target(transition.target, first_state, next_state))
+      end
+      block.list_of_states.each do |state|
+        add_state(state.copy_with(next_state: absolute_target(state.next_state, first_state, next_state),
+          argument: state.kind.sparse? ? state.argument + first_transition : state.argument))
+      end
+      block.entry + first_state
+    end
+
+    private def relative_state(state : Program::State, first_state : Int32, first_transition : Int32,
+                               next_state : Int32) : Program::State
+      state.copy_with(next_state: relative_target(state.next_state, first_state, next_state),
+        argument: state.kind.sparse? ? state.argument - first_transition : state.argument)
+    end
+
+    private def relative_target(target : Int32, first_state : Int32, next_state : Int32) : Int32
+      return target if target == NONE
+      target == next_state ? ClassMemo::EXIT : target - first_state
+    end
+
+    private def absolute_target(target : Int32, first_state : Int32, next_state : Int32) : Int32
+      return target if target == NONE
+      target == ClassMemo::EXIT ? next_state : target + first_state
+    end
+
+    private def compile_class_from_trie(set : CodePointSet, next_state : Int32) : Int32
       build_trie(set)
+      # A set of surrogates only (`\p{Cs}`) has no UTF-8 sequences: like an
+      # empty class, it never matches.
+      return emit(Program::StateKind::Fail) if @list_of_trie_nodes[0][0] == NONE
       states = @list_of_trie_states
       states.clear
       grow(GrowingList::TrieStates, @list_of_trie_nodes.size, sizeof(Int32))

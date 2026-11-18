@@ -4,12 +4,19 @@
 # 5,461 strings, multibyte and line-break positions included), on every
 # engine path:
 #
-# - the two-phase search with captures (Pike VM span, then the
-#   backtracker or a Pike VM over the span);
-# - the two-phase search without captures (span only);
+# - the default path with captures and without (literal search or the
+#   lazy DFAs with the prefilter, then the one-pass DFA, the backtracker
+#   or a Pike VM over the span), accelerators on;
+# - the same with the literal accelerators off (`Engine::NoAccelerators`);
+# - R2's two-phase search (Pike VM span, then the backtracker or a Pike
+#   VM over the span);
 # - one Pike VM pass with every slot;
 # - one bounded backtracker pass with every slot;
-# - `matches?` (the Pike VM stopping at the first match state).
+# - `matches?` on the default path (the forward DFA or the literal search
+#   stopping at the first match) and on the R2 path (the Pike VM);
+# - iteration as `String#scan` does it, one searcher for the whole call
+#   (so later searches start inside the haystack, reuse the prefilter's
+#   progress and the warm DFA caches), default path against R2's.
 #
 # Every path must report the same match (span and captures) for every
 # case. Shared by spec/regex/engine_differential_spec.cr and
@@ -23,7 +30,7 @@ module EngineDifferential
   SEARCH_LIMITS  = Mica::Regex::SearchLimits::TRUSTED_INPUT
 
   ATOMS = ["a", "b", "é", ".", "[ab]", "[^a]", "\\n", "(?:)", "^", "$", "\\b", "\\B", "\\A", "\\z", "\\Z", "\\w",
-           "\\W", "\\s", "\\R", "\\N", "(?i:A)", "[[:alpha:]]", "\\p{L}"]
+           "\\W", "\\s", "\\R", "\\N", "(?i:A)", "[[:alpha:]]", "\\p{L}", "ab", "bé", "(?:aa|ba|é\\n)", "(?i:ab)"]
   QUANTIFIERS = ["*", "+", "?", "*?", "+?", "??", "{2}", "{0,2}", "{1,3}?", "{2,}", "{0,}?"]
   FLAGS       = ["", "", "", "", "(?m)", "(?s)", "(?i)", "(?ms)", "(?U)"]
 
@@ -95,16 +102,50 @@ module EngineDifferential
   # Returns how the engine paths disagree on *haystack*, or nil.
   def self.check(expression : Mica::Regex::Expression, haystack : String) : String?
     program = expression.program
-    two_phase = find(program, haystack, Mica::Regex::Engine::Auto, true)
+    default = find(program, haystack, Mica::Regex::Engine::Auto, true)
     span_only = find(program, haystack, Mica::Regex::Engine::Auto, false)
+    unaccelerated = find(program, haystack, Mica::Regex::Engine::NoAccelerators, true)
+    unaccelerated_span = find(program, haystack, Mica::Regex::Engine::NoAccelerators, false)
+    two_phase = find(program, haystack, Mica::Regex::Engine::TwoPhase, true)
     pike = find(program, haystack, Mica::Regex::Engine::PikeVM, true)
     backtracker = find(program, haystack, Mica::Regex::Engine::Backtracker, true)
-    matches = Mica::Regex::Searcher.new(program, haystack, SEARCH_LIMITS, nil).matches?(0, Mica::Regex::MatchOptions::None)
+    matches = matches?(program, haystack, Mica::Regex::Engine::Auto)
+    unaccelerated_matches = matches?(program, haystack, Mica::Regex::Engine::NoAccelerators)
+    pike_matches = matches?(program, haystack, Mica::Regex::Engine::TwoPhase)
     return "Pike VM #{pike} vs two-phase #{two_phase}" unless pike == two_phase
     return "backtracker #{backtracker} vs Pike VM #{pike}" unless backtracker == pike
+    return "default path #{default} vs two-phase #{two_phase}" unless default == two_phase
+    return "no accelerators #{unaccelerated} vs two-phase #{two_phase}" unless unaccelerated == two_phase
     return "span-only #{span_only} vs two-phase #{two_phase}" unless span_only == two_phase.try(&.first(2))
+    unless unaccelerated_span == two_phase.try(&.first(2))
+      return "span-only without accelerators #{unaccelerated_span} vs two-phase #{two_phase}"
+    end
     return "matches? #{matches} vs #{two_phase}" unless matches == !two_phase.nil?
+    return "matches? without accelerators #{unaccelerated_matches} vs #{two_phase}" unless unaccelerated_matches == !two_phase.nil?
+    return "Pike VM matches? #{pike_matches} vs #{two_phase}" unless pike_matches == !two_phase.nil?
+    iterated = scan(program, haystack, Mica::Regex::Engine::Auto)
+    iterated_two_phase = scan(program, haystack, Mica::Regex::Engine::TwoPhase)
+    return "scan #{iterated} vs two-phase scan #{iterated_two_phase}" unless iterated == iterated_two_phase
     nil
+  end
+
+  # Every match of a `String#scan`-style iteration, with captures.
+  private def self.scan(program : Mica::Regex::Program, haystack : String, engine : Mica::Regex::Engine) : Array(Array(Int64))
+    searcher = Mica::Regex::Searcher.new(program, haystack, SEARCH_LIMITS, nil, engine)
+    list_of_matches = [] of Array(Int64)
+    offset = 0
+    while slots = searcher.find(offset, Mica::Regex::MatchOptions::None, true)
+      list_of_matches << slots.to_a
+      first = slots[0].to_i32
+      last = slots[1].to_i32
+      offset = last > first ? last : first + (first < haystack.bytesize ? Char::Reader.new(haystack, first).current_char.bytesize : 1)
+    end
+    searcher.finish
+    list_of_matches
+  end
+
+  private def self.matches?(program : Mica::Regex::Program, haystack : String, engine : Mica::Regex::Engine) : Bool
+    Mica::Regex::Searcher.new(program, haystack, SEARCH_LIMITS, nil, engine).matches?(0, Mica::Regex::MatchOptions::None)
   end
 
   private def self.find(program : Mica::Regex::Program, haystack : String, engine : Mica::Regex::Engine,

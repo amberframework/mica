@@ -106,6 +106,17 @@ module Mica::Core
       @checkpoint = next_checkpoint
     end
 
+    # Starts the meter over under *budget*, as a new meter would: no
+    # operations, no units, and the clock started now. Lets a caller that
+    # runs many short operations reuse one meter.
+    def restart(@budget : WorkBudget) : Nil
+      @operations = 0_i64
+      @units = 0_i64
+      @started = Time.instant
+      @checkpoint = 0_i64
+      @checkpoint = next_checkpoint
+    end
+
     # Adds *count* operations (saturating at `Int64::MAX`). Returns true
     # when the caller must call `enforce` or `verdict` (the budget may be
     # exhausted or the clock is due). Raises `ArgumentError` for a negative

@@ -11,12 +11,14 @@ format parsers on one shared core:
   XPath 1.0.
 - `Mica::Regex`: a pure-Crystal regular expression engine whose searches
   run in time linear in the haystack (the RE2 and Rust regex family).
-  Milestones R1 and R2 are in: the Crystal-dialect parser (PCRE2 syntax,
+  Milestones R1 to R3 are in: the Crystal-dialect parser (PCRE2 syntax,
   with backreferences, lookaround and the other backtracking-only
   constructs refused by name), compile limits, Unicode 17 classes and case
-  folding, the Pike VM and bounded backtracker, and
-  `Mica::Regex::Expression`, whose methods follow Crystal's `Regex` with
-  required compile and search limits. See [docs/regex.md](docs/regex.md).
+  folding, the Pike VM and bounded backtracker, the forward and reverse
+  lazy DFAs, the one-pass DFA, literal prefilters, a process-wide DFA
+  cache pool, and `Mica::Regex::Expression`, whose methods follow
+  Crystal's `Regex` with required compile and search limits. See
+  [docs/regex.md](docs/regex.md).
 - `Mica::Testing` (opt-in, `require "mica/testing"`): the complexity,
   fuzzing and requirement-traceability harnesses every format uses.
 

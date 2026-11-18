@@ -1,30 +1,52 @@
 module Mica::Regex
   # :nodoc:
-  # Which engine a `Searcher` runs. `Auto` is what the public API uses;
-  # the others let specs and the engine differential force one path.
+  # Which engines a `Searcher` may run. `Auto` is what the public API uses;
+  # the others let specs, the fuzzers and the benchmarks force one path.
   enum Engine
-    # A capture-free Pike VM pass finds the match span; when captures are
-    # wanted, the bounded backtracker (when the span fits its bitset) or a
-    # Pike VM with every slot runs again over the span alone.
+    # Every engine (see `SearchPlan`): literal search and the prefilter,
+    # the lazy DFAs, the one-pass DFA, with the R2 engines as fallbacks.
     Auto
+    # As `Auto` with the literal accelerators off: the lazy DFAs and the
+    # one-pass DFA, with the R2 engines as fallbacks.
+    NoAccelerators
+    # Milestone R2's two phases: a capture-free Pike VM pass finds the
+    # span; when captures are wanted, the bounded backtracker (when the
+    # span fits its bitset) or a Pike VM with every slot runs again over
+    # the span alone.
+    TwoPhase
     # One Pike VM pass with every capture slot.
     PikeVM
     # One bounded backtracker pass over the whole haystack (it must fit).
     Backtracker
+
+    # True when the engine may use the lazy DFAs and the one-pass DFA.
+    def automata? : Bool
+      auto? || no_accelerators?
+    end
   end
 
   # :nodoc:
   # Runs the searches of one call over one haystack: it validates the
-  # haystack once, holds the call's `SearchMeter`, and keeps its engine
-  # workspaces for the searches that follow (as `scan` and `gsub` make).
+  # haystack once, holds the call's `SearchMeter`, leases the program's
+  # lazy-DFA caches for the call, and keeps its engine workspaces for the
+  # searches that follow (as `scan` and `gsub` make).
   #
-  # **Two phases**, as roadmap 6.2.1 lays out. Phase 1 finds the
-  # leftmost-first span `[s, e)` with a Pike VM tracking only group 0, in
-  # O(m·(n + 1)). Phase 2 runs only when captures are asked for, anchored
-  # at s and reading no byte at or after e: the highest-priority match that
-  # starts at s still ends at e when bytes past e are cut off, because
-  # cutting bytes only removes matches. It costs O(m·(L + 1) + c) in the
-  # backtracker or O(m·c·(L + 1)) in the Pike VM, for L = e − s.
+  # **Phase 1** finds the leftmost-first span `[s, e)` on the fastest path
+  # `SearchPlan` allows: a literal search, or the forward lazy DFA (with
+  # the prefilter skipping ahead in its start state) for `e` and the
+  # reverse lazy DFA for `s`; or, when the DFAs do not apply or give up, a
+  # Pike VM tracking only group 0, in O(m·(n + 1)). Once a DFA gives up in
+  # a call, the call's later searches go straight to the Pike VM, so a
+  # thrashing cache costs its bounded work once. Once the prefilter has
+  # proved ineffective (`PrefilterScan#ineffective?`), the call stops
+  # using it.
+  #
+  # **Phase 2** runs only when captures are asked for, anchored at s and
+  # reading no byte at or after e: the highest-priority match that starts
+  # at s still ends at e when bytes past e are cut off, because cutting
+  # bytes only removes matches. The one-pass DFA reads it in O(L + c) when
+  # the pattern is one-pass; otherwise the backtracker costs
+  # O(m·(L + 1) + c) and the Pike VM O(m·c·(L + 1)), for L = e − s.
   #
   # **First line.** Under `CompileOptions::FirstLine` an unanchored search
   # starts no match after the first line feed at or after its offset. The
@@ -37,12 +59,30 @@ module Mica::Regex
   # (which also runs span searches) once captures are, releasing the span
   # workspace first. Beside it lives at most one `BoundedBacktracker`, sized
   # within `Program#backtracker_allowance`, so everything a search holds
-  # stays within `CompileLimits#max_pike_bytes`.
+  # stays within `CompileLimits#max_pike_bytes`. The lazy-DFA caches are
+  # bounded by their `CachePool`.
+  #
+  # Call `finish` when the call is done, so the next call reuses the warm
+  # caches and workspaces; a searcher that is never finished only loses
+  # that reuse.
   #
   # WARNING: A searcher belongs to one call and one fiber.
   class Searcher
     # The call's meter.
     getter meter : SearchMeter
+    # True once a lazy DFA gave up in this call (for specs).
+    getter? dfa_gave_up = false
+    # Which path found the last span (for specs and the benchmarks).
+    getter last_path : Path = Path::None
+
+    # The phase-1 paths.
+    enum Path
+      None
+      Literal
+      LazyDFA
+      PikeVM
+      Backtracker
+    end
 
     @pike : PikeVM? = nil
     @backtracker : BoundedBacktracker? = nil
@@ -52,21 +92,91 @@ module Mica::Regex
     # the line feed (or the haystack end) at @line_feed_at.
     @line_scan_start = -1
     @line_feed_at = -1
+    @plan : SearchPlan?
+    @lease : SearchLease?
+    @scan : PrefilterScan?
+    @prefilter_off = false
 
     def initialize(@program : Program, @haystack : String, limits : SearchLimits, timeout : Time::Span?,
-                   @engine : Engine = Engine::Auto)
-      bytes = @haystack.to_slice
-      @meter = SearchMeter.new(limits, @program.state_count, bytes.size, timeout)
+                   @engine : Engine = Engine::Auto, cache_pool : CachePool = CachePool.default,
+                   lease : SearchLease? = nil)
+      @meter = SearchMeter.new(limits, @program.state_count, @haystack.bytesize, timeout)
       @capture_slots = Slice(Int64).new(@program.slot_count, PikeVM::UNSET)
-      # Validation reads every byte once: one operation per byte.
-      @meter.charge(bytes.size, 0)
-      if offset = Core::UTF8.first_invalid_offset(bytes)
-        raise Mica::EncodingError.new("The haystack is not valid UTF-8", Core::Position.new(offset.to_i64))
+      if @engine.automata?
+        plan = @plan = @program.plan
+        attach(lease || plan.lease(cache_pool))
+      end
+      begin_call
+    end
+
+    # Returns a searcher for one call of the default path over *haystack*:
+    # the one the program's lease kept from an earlier call, started over,
+    # or a new one. Pair it with `finish`.
+    def self.open(program : Program, haystack : String, limits : SearchLimits, timeout : Time::Span?,
+                  cache_pool : CachePool) : Searcher
+      lease = program.plan.lease(cache_pool)
+      if searcher = lease.take_searcher
+        searcher.resume(lease, haystack, limits, timeout)
+        searcher
+      else
+        new(program, haystack, limits, timeout, Engine::Auto, cache_pool, lease)
+      end
+    end
+
+    # Starts this (finished) searcher over for a new call on *lease*.
+    protected def resume(lease : SearchLease, @haystack : String, limits : SearchLimits, timeout : Time::Span?) : Nil
+      @meter.restart(limits, @program.state_count, @haystack.bytesize, timeout)
+      @line_scan_start = -1
+      @line_feed_at = -1
+      @scan = nil
+      @prefilter_off = false
+      @dfa_gave_up = false
+      @last_path = Path::None
+      attach(lease)
+      begin_call
+    end
+
+    private def attach(lease : SearchLease) : Nil
+      @lease = lease
+      @pike = lease.take_pike
+      @backtracker = lease.take_backtracker
+    end
+
+    # Validates the haystack (unless the lease validated this very string)
+    # and reads the deadline.
+    private def begin_call : Nil
+      lease = @lease
+      unless lease && lease.validated?(@haystack)
+        # Validation reads every byte once: one operation per byte. A lease
+        # remembers the last `String` it validated, so an iteration of
+        # separate calls over one haystack validates it once.
+        bytes = @haystack.to_slice
+        @meter.charge(bytes.size, 0)
+        if offset = Core::UTF8.first_invalid_offset(bytes)
+          raise Mica::EncodingError.new("The haystack is not valid UTF-8", Core::Position.new(offset.to_i64))
+        end
+        lease.try(&.remember_validated(@haystack))
       end
       # The deadline is read at the start of every call, so a timeout that
       # has already passed fails even a search too short to reach a clock
       # checkpoint.
       @meter.enforce_deadline(0)
+    end
+
+    # True once the prefilter proved ineffective in this call (for specs).
+    def prefilter_off? : Bool
+      @prefilter_off || !!@scan.try(&.ineffective?)
+    end
+
+    # Hands the leased caches back to the program for later calls.
+    def finish : Nil
+      if (lease = @lease) && (plan = @plan)
+        @lease = nil
+        lease.keep(@pike, @backtracker, @engine.auto? ? self : nil)
+        @pike = nil
+        @backtracker = nil
+        plan.give_back(lease)
+      end
     end
 
     # Returns the slots of the leftmost-first match at or after
@@ -82,27 +192,39 @@ module Mica::Regex
       in .pike_vm?
         slots = @capture_slots
         want_captures = @program.slot_count > 2
+        @last_path = Path::PikeVM
         found = pike(want_captures).search(bytes, byte_index, bytes.size, byte_index, anchored, end_anchored, false,
           @meter, slots, first_line_end(bytes, byte_index, anchored), want_captures)
         found ? slots : nil
       in .backtracker?
         slots = @capture_slots
+        @last_path = Path::Backtracker
         found = backtracker.search(bytes, byte_index, bytes.size, byte_index, anchored, end_anchored, @meter, slots,
           first_line_end(bytes, byte_index, anchored))
         found ? slots : nil
-      in .auto?
+      in .auto?, .no_accelerators?, .two_phase?
         find_in_two_phases(bytes, byte_index, anchored, end_anchored, captures)
       end
     end
 
     # Returns true when anything matches at or after *byte_index*; stops at
-    # the first match state reached.
+    # the first match it reaches.
     def matches?(byte_index : Int32, options : MatchOptions) : Bool
       bytes = @haystack.to_slice
       return false if byte_index > bytes.size
       check_start(bytes, byte_index)
       anchored = @program.options.anchored? || options.anchored?
       end_anchored = @program.options.end_anchored? || options.end_anchored?
+      if dfa = automaton(end_anchored)
+        if literal_search?(anchored)
+          return literal_span(bytes, byte_index)
+        end
+        lease = @lease || raise Mica::Error.new("internal error: no lease")
+        found = dfa.find_end(lease.forward_cache(dfa), bytes, byte_index, anchored, true,
+          prefilter_scan(bytes, anchored), @meter)
+        return found >= 0 unless found == LazyDFA::GAVE_UP
+        @dfa_gave_up = true
+      end
       pike(false).search(bytes, byte_index, bytes.size, byte_index, anchored, end_anchored, true, @meter, @span_slots,
         first_line_end(bytes, byte_index, anchored), false)
     end
@@ -111,22 +233,107 @@ module Mica::Regex
                                    captures : Bool) : Slice(Int64)?
       span = @span_slots
       want_captures = captures && @program.slot_count > 2
-      return nil unless pike(want_captures).search(bytes, byte_index, bytes.size, byte_index, anchored, end_anchored,
-                          false, @meter, span, first_line_end(bytes, byte_index, anchored), false)
+      return nil unless find_span(bytes, byte_index, anchored, end_anchored, span, want_captures)
       return span unless want_captures
       start = span[0].to_i32
       finish = span[1].to_i32
       slots = @capture_slots
-      found = if BoundedBacktracker.fits?(@program, finish - start)
-                backtracker.search(bytes, start, finish, byte_index, true, end_anchored, @meter, slots, Int32::MAX)
-              else
-                pike(true).search(bytes, start, finish, byte_index, true, end_anchored, false, @meter, slots, Int32::MAX,
-                  true)
-              end
+      found = false
+      if @engine.automata? && (one_pass = @program.plan.one_pass)
+        found = one_pass.captures(bytes, start, finish, byte_index, slots, @meter)
+      end
+      unless found
+        found = if BoundedBacktracker.fits?(@program, finish - start)
+                  backtracker.search(bytes, start, finish, byte_index, true, end_anchored, @meter, slots, Int32::MAX)
+                else
+                  pike(true).search(bytes, start, finish, byte_index, true, end_anchored, false, @meter, slots,
+                    Int32::MAX, true)
+                end
+      end
       unless found && slots[0] == span[0] && slots[1] == span[1]
         raise Mica::Error.new("internal error: the capture pass did not find the span #{start}...#{finish}")
       end
       slots
+    end
+
+    # Finds the span of the leftmost-first match into *span*; returns
+    # false when there is none.
+    # A Pike VM span pass runs in the capture layout when *capture_layout*
+    # (the capture pass will need it), so only one workspace is ever made.
+    private def find_span(bytes : Bytes, byte_index : Int32, anchored : Bool, end_anchored : Bool,
+                          span : Slice(Int64), capture_layout : Bool) : Bool
+      if dfa = automaton(end_anchored)
+        if literal_search?(anchored)
+          @last_path = Path::Literal
+          return literal_span(bytes, byte_index)
+        end
+        lease = @lease || raise Mica::Error.new("internal error: no lease")
+        finish = dfa.find_end(lease.forward_cache(dfa), bytes, byte_index, anchored, false,
+          prefilter_scan(bytes, anchored), @meter)
+        return false if finish == LazyDFA::NO_MATCH
+        if finish >= 0
+          start = anchored ? byte_index : reverse_start(lease, bytes, finish, byte_index)
+          if start >= 0
+            @last_path = Path::LazyDFA
+            span[0] = start.to_i64
+            span[1] = finish.to_i64
+            return true
+          end
+        end
+        @dfa_gave_up = true
+      end
+      @last_path = Path::PikeVM
+      pike(capture_layout).search(bytes, byte_index, bytes.size, byte_index, anchored, end_anchored, false, @meter, span,
+        first_line_end(bytes, byte_index, anchored), false)
+    end
+
+    private def reverse_start(lease : SearchLease, bytes : Bytes, finish : Int32, lower_bound : Int32) : Int32
+      reverse = @program.plan.reverse || return LazyDFA::GAVE_UP
+      start = reverse.find_start(lease.reverse_cache(reverse), bytes, finish, lower_bound, @meter)
+      if start == LazyDFA::NO_MATCH
+        raise Mica::Error.new("internal error: the reverse DFA found no start for the match ending at #{finish}")
+      end
+      start
+    end
+
+    # The forward lazy DFA when this search may use it, or nil.
+    private def automaton(end_anchored : Bool) : LazyDFA?
+      return nil unless @engine.automata?
+      return nil if @dfa_gave_up || end_anchored || @program.options.first_line?
+      @plan.try(&.forward)
+    end
+
+    private def literal_search?(anchored : Bool) : Bool
+      return false unless @engine.auto? && !anchored
+      plan = @plan
+      !!plan && plan.literal_search?
+    end
+
+    # The literal search: the prefilter's next candidate is the match, and
+    # the first literal (in priority order) found there is its text.
+    private def literal_span(bytes : Bytes, byte_index : Int32) : Bool
+      prefilter = @plan.try(&.prefilter) || raise Mica::Error.new("internal error: no prefilter")
+      scan = @scan ||= PrefilterScan.new(prefilter, bytes, verified_only: true)
+      start = scan.find(byte_index, @meter)
+      return false if start < 0
+      literal = prefilter.literal_at(bytes, start, @meter)
+      @span_slots[0] = start.to_i64
+      @span_slots[1] = (start + prefilter.literal_size(literal)).to_i64
+      true
+    end
+
+    # The prefilter scan for this call, or nil when the engine, the search
+    # or the call's experience so far rules it out.
+    private def prefilter_scan(bytes : Bytes, anchored : Bool) : PrefilterScan?
+      return nil if anchored || @prefilter_off || !@engine.auto?
+      prefilter = @plan.try(&.prefilter)
+      return nil unless prefilter
+      scan = @scan ||= PrefilterScan.new(prefilter, bytes)
+      if scan.ineffective?
+        @prefilter_off = true
+        return nil
+      end
+      scan
     end
 
     # Returns the last position where an unanchored search from *start*

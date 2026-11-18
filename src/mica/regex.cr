@@ -9,9 +9,11 @@ require "./core"
 # structures they guard are built, an allocation ledger, the size preflight,
 # the high-level intermediate representation (`Hir`) with Unicode classes
 # and per-dialect case folding, and `Syntax.check`, which validates a
-# pattern without compiling it to a program. The matching engines arrive in
-# R2 and R3. See docs/regex.md for the dialect, the excluded constructs and
-# their rewrites.
+# pattern without compiling it to a program. R2 adds the Pike VM, the
+# bounded backtracker and `Expression`; R3 the lazy DFAs, the one-pass DFA,
+# literal prefilters and the `CachePool` (see `SearchPlan`). See
+# docs/regex.md for the dialect, the excluded constructs and their
+# rewrites.
 #
 # ```
 # limits = Mica::Regex::CompileLimits::UNTRUSTED_PATTERN
@@ -83,9 +85,11 @@ require "./regex/ast"
 require "./regex/parser"
 require "./regex/hir"
 require "./regex/class_lowering"
+require "./regex/class_memo"
 require "./regex/preflight"
 require "./regex/translator"
 require "./regex/syntax"
+require "./regex/literal_set"
 require "./regex/program"
 require "./regex/look"
 require "./regex/compiler"
@@ -94,6 +98,14 @@ require "./regex/search_limits"
 require "./regex/search_meter"
 require "./regex/pike_vm"
 require "./regex/bounded_backtracker"
+require "./regex/prefilter"
+require "./regex/byte_classes"
+require "./regex/reverse_nfa"
+require "./regex/cache_pool"
+require "./regex/lazy_dfa"
+require "./regex/dfa_cache"
+require "./regex/one_pass_dfa"
+require "./regex/search_plan"
 require "./regex/searcher"
 require "./regex/expression"
 require "./regex/match_data"

@@ -3,7 +3,8 @@ module Mica::Regex
   # simple case folding orbits of one pinned Unicode Character Database
   # version (`Tables::VERSION`), generated into `unicode/tables.cr` by
   # scripts/unicode/generate_tables.rb. The tables are static table_bytes in the
-  # binary; reading them allocates nothing.
+  # binary; a set's ranges are decoded into integers once per process, the
+  # first time a class uses the set.
   module Unicode
     # What a property name refers to, following PCRE2's property types.
     enum PropertyKind
@@ -99,11 +100,33 @@ module Mica::Regex
 
     # Returns range *index* of static set *set_id* as `{first, last}`.
     def self.range_at(set_id : Int32, index : Int32) : {Int32, Int32}
-      first_index, count = Tables::SETS[set_id]
-      raise IndexError.new unless 0 <= index < count
-      table_bytes = Tables::RANGES.to_slice
-      offset = (first_index + index) * 12
-      {hex6(table_bytes, offset), hex6(table_bytes, offset + 6)}
+      bounds = decoded_bounds(set_id)
+      raise IndexError.new unless 0 <= index && index * 2 < bounds.size
+      {bounds.unsafe_fetch(index * 2), bounds.unsafe_fetch(index * 2 + 1)}
+    end
+
+    @@decoded_bounds = Array(Slice(Int32)?).new(Tables::SETS.size, nil)
+    @@decoded_mutex = Mutex.new
+
+    # The ranges of static set *set_id* as `first, last` pairs, decoded
+    # from the hex table once per process on first use (a set's classes are
+    # lowered from it every time a pattern uses it).
+    private def self.decoded_bounds(set_id : Int32) : Slice(Int32)
+      if bounds = @@decoded_bounds[set_id]
+        return bounds
+      end
+      @@decoded_mutex.synchronize do
+        @@decoded_bounds[set_id] ||= begin
+          bounds = Slice(Int32).new(range_count(set_id) * 2)
+          index = 0
+          each_range(set_id) do |first, last|
+            bounds[index] = first
+            bounds[index + 1] = last
+            index += 2
+          end
+          bounds
+        end
+      end
     end
 
     # Returns true when *code_point* is in static set *set_id* (a binary
@@ -185,12 +208,17 @@ module Mica::Regex
       low
     end
 
+    # Reads six upper-case hex digits at *offset*. Callers index entries
+    # of the generated tables, so the bounds are checked once here and the
+    # digits are read without per-byte checks.
     @[AlwaysInline]
     private def self.hex6(table_bytes : Bytes, offset : Int32) : Int32
+      raise IndexError.new unless 0 <= offset && offset + 6 <= table_bytes.size
+      digits = table_bytes.to_unsafe + offset
       value = 0
       6.times do |index|
-        byte = table_bytes[offset + index]
-        digit = byte <= '9'.ord ? byte - '0'.ord : byte - 'A'.ord + 10
+        byte = digits[index].to_i32
+        digit = byte <= 0x39 ? byte &- 0x30 : byte &- 0x37
         value = (value << 4) | digit
       end
       value

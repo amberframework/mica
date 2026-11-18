@@ -16,7 +16,9 @@ require "./support/conformance_approval"
 #   gives exactly Mica's result, so the difference is the Crystal dialect's
 #   meaning, not a Mica defect;
 # - **eligible**: every other case, and every eligible case must pass, on
-#   every engine path that applies (two-phase, Pike VM, backtracker).
+#   every engine path that applies: the default path (literal search,
+#   prefilter, lazy DFAs, one-pass DFA), the same without the literal
+#   accelerators, R2's two phases, the Pike VM, and the backtracker.
 #
 # Every divergence row must name its approver, a code owner of
 # /conformance/regex/ (see `ConformanceApproval`); an unapproved row fails
@@ -30,7 +32,8 @@ require "./support/conformance_approval"
 module SearchConformance
   record Classified, id : String, pattern : String, category : String, reason : String
 
-  ENGINES = [Mica::Regex::Engine::Auto, Mica::Regex::Engine::PikeVM, Mica::Regex::Engine::Backtracker]
+  ENGINES = [Mica::Regex::Engine::Auto, Mica::Regex::Engine::NoAccelerators, Mica::Regex::Engine::TwoPhase,
+             Mica::Regex::Engine::PikeVM, Mica::Regex::Engine::Backtracker]
 
   def self.classify(corpus : SearchCorpus::Corpus, verdicts : Hash(String, SearchCorpus::Outcome)) : Array(Classified)
     SearchCorpus.scoped(corpus).map do |id, pattern, scoped|
@@ -77,7 +80,9 @@ module SearchConformance
       next if engine.auto?
       next unless SearchCorpus.engine_applies?(job, expression.program, engine)
       other = SearchCorpus.run_mica(job, engine)
-      return "#{engine} gives #{other.describe}, two-phase gives #{mica.describe}" unless other.same_result?(mica)
+      # A path that runs out of its work allowance gives no answer to compare.
+      next if other.error_kind == "search-limit"
+      return "#{engine} gives #{other.describe}, the default path gives #{mica.describe}" unless other.same_result?(mica)
     end
     nil
   end

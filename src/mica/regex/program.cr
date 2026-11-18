@@ -83,10 +83,23 @@ module Mica::Regex
     getter backtracker_allowance : Int64
     # How the source text ends (see `Ast::SourceEnd`), for `Expression#to_s`.
     getter source_end : Ast::SourceEnd
+    # The literals every match starts with (see `LiteralSet`), or nil.
+    getter literal_set : LiteralSet?
 
     def initialize(@list_of_states : Array(State), @list_of_transitions : Array(Transition), @start_state : Int32,
                    @capture_count : Int32, @list_of_group_names : Array(Ast::GroupName), @options : CompileOptions,
-                   @backtracker_allowance : Int64, @source_end : Ast::SourceEnd = Ast::SourceEnd::Closed)
+                   @backtracker_allowance : Int64, @source_end : Ast::SourceEnd = Ast::SourceEnd::Closed,
+                   @literal_set : LiteralSet? = nil)
+    end
+
+    @plan : SearchPlan?
+    @plan_mutex = Mutex.new
+
+    # :nodoc:
+    # The engines and caches of this program's searches (built on the first
+    # search, see `SearchPlan`).
+    def plan : SearchPlan
+      @plan || @plan_mutex.synchronize { @plan ||= SearchPlan.new(self) }
     end
 
     # Returns the number of states (m in the bounds).

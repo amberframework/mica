@@ -259,6 +259,10 @@ module SearchCorpus
       offset = next_offset(job.haystack, slots[0].to_i32, slots[1].to_i32)
     end
     Outcome.new(job.id, true, "", "", list_of_matches)
+  rescue error : Mica::Regex::SearchLimitError
+    # An engine path can need more work than the corpus limits allow (the
+    # Pike VM with every slot, on a large program); the caller decides.
+    Outcome.compile_error(job.id, "search-limit", error.limit_name)
   end
 
   # Returns true when *engine* can run *job* (the backtracker only when

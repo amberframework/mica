@@ -85,7 +85,12 @@ describe "Mica::Regex R2 review round 3" do
     it_satisfies "REGEX-R2-limits", "keeps one capture match within max_pike_bytes" do
       expression = Mica::Regex::Expression.new("\\A(a){14000}", compile_limits: UNTRUSTED)
       haystack = "a" * 14_000
-      bytes = allocated_bytes { expression.match(haystack, limits: LIMITS).should_not be_nil }
+      # The R2 path (Pike VM span pass, then the capture pass); the lazy-DFA
+      # caches R3 adds are bounded by their CachePool (cache_pool_spec.cr).
+      bytes = allocated_bytes do
+        Mica::Regex::Searcher.new(expression.program, haystack, LIMITS, nil, Mica::Regex::Engine::TwoPhase)
+          .find(0, Mica::Regex::MatchOptions::None, true).should_not be_nil
+      end
       bytes.should be <= UNTRUSTED.max_pike_bytes
     end
 
@@ -97,7 +102,10 @@ describe "Mica::Regex R2 review round 3" do
                  Mica::Regex::AllocationLedger.granules(instance_sizeof(Mica::Regex::PikeVM))
       Mica::Regex::PikeVM.workspace_charge(program, captures: false).should eq(expected)
       haystack = "a" * 90_000
-      bytes = allocated_bytes { expression.matches?(haystack, limits: LIMITS).should be_true }
+      bytes = allocated_bytes do
+        Mica::Regex::Searcher.new(program, haystack, LIMITS, nil, Mica::Regex::Engine::TwoPhase)
+          .matches?(0, Mica::Regex::MatchOptions::None).should be_true
+      end
       bytes.should be <= UNTRUSTED.max_pike_bytes
     end
 

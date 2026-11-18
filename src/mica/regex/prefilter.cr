@@ -1,0 +1,242 @@
+module Mica::Regex
+  # A literal accelerator (roadmap 6.2.2): finds the next position at or
+  # after a given one where one of a `LiteralSet`'s literals occurs, so the
+  # lazy DFA can skip the bytes in between while it sits in its start
+  # state. Three searchers, chosen when the expression is first searched:
+  #
+  # - **first bytes** (memchr style): the literals start with at most three
+  #   distinct bytes; each is found with `memchr`, which libc vectorizes;
+  # - **rare byte**: one literal; its least common byte (by a fixed
+  #   frequency rank) is found with `memchr` and the literal is checked
+  #   around it;
+  # - **packed** (Teddy style): up to 64 literals; three 256-entry masks,
+  #   one per leading byte position, say which literals can have that byte
+  #   there, and a position is a candidate when the three masks share a bit.
+  #
+  # Every candidate is verified against the literals before it is returned,
+  # so a returned position is where a literal really starts.
+  #
+  # **Progress.** A `PrefilterScan` belongs to one search call and only moves
+  # forward: it remembers where each byte was last found, so a `memchr` never
+  # rescans bytes, and every byte it reads, and every literal byte it
+  # compares, is charged to the call's `SearchMeter`. Total work is O(n·k·l)
+  # for k literals of at most l bytes (both bounded by `LiteralSet`).
+  class Prefilter
+    enum Kind
+      FirstBytes
+      RareByte
+      Packed
+    end
+
+    getter kind : Kind
+    getter literal_set : LiteralSet
+    # The distinct first bytes (`FirstBytes`) or the rare byte (`RareByte`).
+    getter list_of_needles : Array(UInt8)
+    # For `RareByte`, where the rare byte sits in the literal.
+    getter needle_offset : Int32
+    # For `Packed`, how many leading bytes the masks cover (1 to 3).
+    getter mask_width : Int32
+    @masks : Slice(UInt64)
+    @literals : Array(Bytes)
+    # For each byte, the literals that start with it (bit per literal).
+    @starting_with : StaticArray(UInt64, 256)
+
+    def initialize(@literal_set : LiteralSet)
+      @literals = @literal_set.list_of_literals
+      @starting_with = StaticArray(UInt64, 256).new(0_u64)
+      @literals.each_with_index { |literal, index| @starting_with[literal[0]] |= 1_u64 << index }
+      @needle_offset = 0
+      @mask_width = 0
+      @masks = Slice(UInt64).empty
+      first_bytes = @literals.map(&.[0]).uniq!
+      if @literals.size == 1
+        @kind = Kind::RareByte
+        literal = @literals[0]
+        @needle_offset = (0...literal.size).min_by { |index| Prefilter.rank(literal[index]) }
+        @list_of_needles = [literal[@needle_offset]]
+      elsif first_bytes.size <= 3
+        @kind = Kind::FirstBytes
+        @list_of_needles = first_bytes
+      else
+        @kind = Kind::Packed
+        @list_of_needles = [] of UInt8
+        @mask_width = Math.min(3, @literal_set.minimum_length)
+        @masks = Slice(UInt64).new(256 * @mask_width, 0_u64)
+        @literals.each_with_index do |literal, index|
+          bit = 1_u64 << index
+          @mask_width.times { |column| @masks[column * 256 + literal[column]] |= bit }
+        end
+      end
+    end
+
+    # Returns the index of the highest-priority literal that occurs at
+    # *at*, or -1, trying only the literals whose first byte is the byte at
+    # *at* (and, for `Packed`, only those in *candidates*). Charges the
+    # bytes compared.
+    def literal_at(haystack : Bytes, at : Int32, meter : SearchMeter, candidates : UInt64 = UInt64::MAX) : Int32
+      return -1 if at >= haystack.size
+      bits = candidates & @starting_with.unsafe_fetch(haystack.unsafe_fetch(at))
+      while bits != 0
+        index = bits.trailing_zeros_count.to_i32
+        bits &= bits - 1
+        literal = @literals.unsafe_fetch(index)
+        meter.charge(literal.size, at)
+        return index if at + literal.size <= haystack.size && haystack[at, literal.size] == literal
+      end
+      -1
+    end
+
+    # :nodoc:
+    # The `Packed` masks: 256 entries per covered leading byte position.
+    def masks : Slice(UInt64)
+      @masks
+    end
+
+    # Returns the length of literal *index*.
+    def literal_size(index : Int32) : Int32
+      @literals[index].size
+    end
+
+    # A frequency rank for *byte* in typical text (higher is more common),
+    # for choosing the rare byte. Letters and spaces rank high, control
+    # bytes and non-ASCII lead bytes low.
+    def self.rank(byte : UInt8) : Int32
+      return 160 if byte >= 0xC0 # a lead byte: one per non-ASCII character
+      return 96 if byte >= 0x80  # a continuation byte: spread over many values
+      COMMON_BYTES.index(byte.unsafe_chr).try { |index| 255 - index } || 64
+    end
+
+    # Bytes in descending order of how often they occur in English text and
+    # source code.
+    COMMON_BYTES = " etaoinsrhldcumfpgwybvkxjqzETAOINSRHLDCUMFPGWYBVKXJQZ0123456789\n.,;:-_'\"()/=<>{}[]*#\t"
+  end
+
+  # :nodoc:
+  # The forward-only state of a prefilter over one haystack, owned by one
+  # search call (see `Prefilter`, "Progress").
+  #
+  # **The guard.** Every candidate verified counts, matching or not. Once
+  # `GUARD_CANDIDATES` have been verified and they came closer together
+  # than `MINIMUM_SKIP` bytes on average, the scan is `ineffective?`: a
+  # scan that is only an accelerator (not the literal search itself) then
+  # stops at the candidate it holds and returns it unverified, which is
+  # safe (no match starts before it), and the caller stops using it.
+  class PrefilterScan
+    GUARD_CANDIDATES = 32
+    MINIMUM_SKIP     =  8
+
+    getter prefilter : Prefilter
+    # How many candidates the scan has verified.
+    getter candidates = 0
+    # How many bytes the scan has moved past in all.
+    getter skipped = 0_i64
+    @guard_from = 0
+    # The positions where each needle was last found (-1: not yet looked;
+    # Int32::MAX: absent from there on).
+    @found_at : StaticArray(Int32, 3)
+    @scanned_from : StaticArray(Int32, 3)
+    @packed_from = 0
+
+    # With *verified_only* (the literal search), the scan never stops early:
+    # every position it returns starts a literal.
+    def initialize(@prefilter : Prefilter, @haystack : Bytes, @verified_only : Bool = false)
+      @found_at = StaticArray(Int32, 3).new(-1)
+      @scanned_from = StaticArray(Int32, 3).new(0)
+    end
+
+    # True when candidates have been too dense for the scan to pay off
+    # (`GUARD_CANDIDATES`, `MINIMUM_SKIP`); the caller then stops using it
+    # for the rest of the call.
+    def ineffective? : Bool
+      @candidates >= GUARD_CANDIDATES && @skipped < @candidates.to_i64 * MINIMUM_SKIP
+    end
+
+    # Returns the first position at or after *from* where a literal starts,
+    # or -1.
+    def find(from : Int32, meter : SearchMeter) : Int32
+      @guard_from = from
+      case @prefilter.kind
+      in .first_bytes? then find_first_bytes(from, meter)
+      in .rare_byte?   then find_rare_byte(from, meter)
+      in .packed?      then find_packed(from, meter)
+      end
+    end
+
+    # Verifies *candidate*, counting it for the guard. Returns true when a
+    # literal starts there, or when the scan should stop at it (see the
+    # class description).
+    private def accept?(candidate : Int32, meter : SearchMeter, bits : UInt64 = UInt64::MAX) : Bool
+      @candidates += 1
+      @skipped += candidate - @guard_from if candidate > @guard_from
+      @guard_from = candidate + 1
+      return true if @prefilter.literal_at(@haystack, candidate, meter, bits) >= 0
+      !@verified_only && ineffective?
+    end
+
+    private def find_first_bytes(from : Int32, meter : SearchMeter) : Int32
+      at = from
+      while at < @haystack.size
+        candidate = Int32::MAX
+        @prefilter.list_of_needles.size.times do |needle|
+          candidate = Math.min(candidate, next_needle(needle, @prefilter.list_of_needles[needle], at, meter))
+        end
+        return -1 if candidate == Int32::MAX
+        return candidate if accept?(candidate, meter)
+        at = candidate + 1
+      end
+      -1
+    end
+
+    private def find_rare_byte(from : Int32, meter : SearchMeter) : Int32
+      offset = @prefilter.needle_offset
+      needle = @prefilter.list_of_needles[0]
+      at = from
+      while at < @haystack.size
+        position = next_needle(0, needle, at + offset, meter)
+        return -1 if position == Int32::MAX
+        candidate = position - offset
+        return candidate if accept?(candidate, meter)
+        at = candidate + 1
+      end
+      -1
+    end
+
+    # Returns the first position at or after *from* holding *needle*
+    # (`Int32::MAX` when none), reusing the last result while it is still
+    # ahead, and charging each byte `memchr` reads once.
+    private def next_needle(slot : Int32, needle : UInt8, from : Int32, meter : SearchMeter) : Int32
+      found_at = @found_at[slot]
+      return found_at if from >= @scanned_from[slot] && found_at >= from
+      return Int32::MAX if from >= @haystack.size
+      index = @haystack.index(needle, from)
+      meter.charge((index || @haystack.size) - from + 1, from)
+      @scanned_from[slot] = from
+      @found_at[slot] = index || Int32::MAX
+    end
+
+    private def find_packed(from : Int32, meter : SearchMeter) : Int32
+      width = @prefilter.mask_width
+      masks = @prefilter.masks
+      last = @haystack.size - width
+      at = Math.max(from, 0)
+      bytes = @haystack.to_unsafe
+      table = masks.to_unsafe
+      checked = 0
+      while at <= last
+        bits = table[bytes[at]]
+        if width > 1
+          bits &= table[256 + bytes[at + 1]]
+          bits &= table[512 + bytes[at + 2]] if width > 2
+        end
+        if bits != 0
+          meter.charge(at - from - checked + 1, at)
+          checked = at - from + 1
+          return at if accept?(at, meter, bits)
+        end
+        at += 1
+      end
+      meter.charge(Math.max(0, @haystack.size - from - checked), from)
+      -1
+    end
+  end
+end
