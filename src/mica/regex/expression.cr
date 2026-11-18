@@ -54,14 +54,14 @@ module Mica::Regex
       end
       @program = Syntax.compile(@source, dialect: @dialect, compile_limits: compile_limits, options: @options)
       @list_of_name_entries = Expression.name_entries(@program.list_of_group_names)
+      @names_by_group = {} of Int32 => String
+      @list_of_name_entries.each { |entry| @names_by_group[entry.capture_index] = entry.group_name }
     end
 
     # The name table entries of *list_of_group_names*, in PCRE2 order.
     protected def self.name_entries(list_of_group_names : Array(Ast::GroupName)) : Array(Ast::GroupName)
-      unique = [] of Ast::GroupName
-      list_of_group_names.each do |entry|
-        unique << entry unless unique.any? { |seen| seen.group_name == entry.group_name && seen.capture_index == entry.capture_index }
-      end
+      seen = Set({String, Int32}).new
+      unique = list_of_group_names.select { |entry| seen.add?({entry.group_name, entry.capture_index}) }
       unique.each_with_index.to_a.sort! do |(left, left_index), (right, right_index)|
         order = left.group_name.to_slice <=> right.group_name.to_slice
         order == 0 ? left_index <=> right_index : order
@@ -73,11 +73,16 @@ module Mica::Regex
       @program.capture_count
     end
 
-    # Returns a hash from group number to name for every named group.
+    # Returns a hash from group number to name for every named group (a
+    # new hash each call, as `Regex#name_table` returns).
     def name_table : Hash(Int32, String)
-      table = {} of Int32 => String
-      @list_of_name_entries.each { |entry| table[entry.capture_index] = entry.group_name }
-      table
+      @names_by_group.dup
+    end
+
+    # :nodoc:
+    # The name table without the copy, for `MatchData`.
+    protected def names_by_group : Hash(Int32, String)
+      @names_by_group
     end
 
     # Returns the first match in *string* at or after character index

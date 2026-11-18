@@ -138,7 +138,7 @@ module Mica::Regex
 
     # Returns the unnamed groups (group 0 excluded).
     def captures : Array(String?)
-      names = @regex.name_table
+      names = @regex.names_by_group
       list_of_captures = [] of String?
       (1...size).each do |group|
         list_of_captures << self[group]? unless names.has_key?(group)
@@ -148,7 +148,7 @@ module Mica::Regex
 
     # Returns the named groups by name.
     def named_captures : Hash(String, String?)
-      names = @regex.name_table
+      names = @regex.names_by_group
       captures_by_name = {} of String => String?
       (1...size).each do |group|
         if (name = names[group]?) && !captures_by_name.has_key?(name)
@@ -165,7 +165,7 @@ module Mica::Regex
 
     # Returns every group by name, or by number when unnamed.
     def to_h : Hash(Int32 | String, String?)
-      names = @regex.name_table
+      names = @regex.names_by_group
       groups = {} of (String | Int32) => String?
       (0...size).each do |group|
         if name = names[group]?
@@ -178,7 +178,7 @@ module Mica::Regex
     end
 
     def inspect(io : IO) : Nil
-      names = @regex.name_table
+      names = @regex.names_by_group
       io << "Mica::Regex::MatchData("
       size.times do |group|
         io << ' ' << names.fetch(group, group) << ':' if group > 0
