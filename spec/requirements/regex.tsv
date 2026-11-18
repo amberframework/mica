@@ -29,4 +29,6 @@ REGEX-R2-semantics	docs/regex.md Engines	Searches report the leftmost-first matc
 REGEX-R2-api	docs/regex.md Native API	Expression and MatchData mirror Regex and Regex::MatchData (match, match!, match_at_byte_index, matches?, captures, named groups, name table, escape, union)
 REGEX-R2-iteration	docs/regex.md Native API	each_match, scan, gsub, sub and split follow String#scan, #gsub, #sub and #split, with one work allowance per call
 REGEX-R2-limits	docs/regex.md Search limits	Every search takes required SearchLimits; running out of work or output raises SearchLimitError naming the limit, and a timeout raises DeadlineExceededError
+REGEX-R2-complexity	docs/regex.md Search complexity	The n, m and c families stay within their stated bounds and grow linearly
 REGEX-R2-conformance	docs/regex.md Conformance	The RE2 search tests and the Rust regex tests pass under fixed denominators, every eligible case on every engine path
+REGEX-R2-differential	docs/regex.md Engine differential	The Pike VM, the bounded backtracker and the two-phase search agree on generated patterns over every short string

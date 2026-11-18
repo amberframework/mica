@@ -93,6 +93,7 @@ module RegexFuzz
       outcome = "ok captures=#{report.capture_count} states=#{report.state_estimate}"
       failures << "compile bytes #{report.compile_bytes} over the limit" if report.compile_bytes > LIMITS.max_compile_bytes
       failures << "state estimate #{report.state_estimate} over the limit" if report.state_estimate > LIMITS.max_program_states
+      outcome += search_outcome(bytes, report, failures)
     rescue failure : Mica::Error
       error = failure
       offset = failure.is_a?(Mica::ParseError) ? failure.byte_offset : 0_i64
@@ -102,5 +103,33 @@ module RegexFuzz
       end
     end
     Mica::Testing::FuzzCampaign::Trial.new(outcome, error, meter, failures)
+  end
+
+  # Haystacks every accepted pattern is searched over (milestone R2).
+  HAYSTACKS = ["", "a", "aé\n Kk_1\r\n", "abcabc xyz 2026-11-18"]
+
+  # Compiles an accepted pattern into the engines and searches each of
+  # HAYSTACKS with captures. A Mica::Error here (a compile or search limit)
+  # is a result; an internal error, or more states than the preflight
+  # bound, is a failure.
+  def self.search_outcome(bytes : Bytes, report : Mica::Regex::Syntax::Report, failures : Array(String)) : String
+    expression = Mica::Regex::Expression.new(String.new(bytes), compile_limits: LIMITS)
+    states = expression.program.state_count
+    failures << "#{states} states over the preflight bound #{report.state_estimate}" if states > report.state_estimate
+    String.build do |io|
+      io << " states=" << states
+      HAYSTACKS.each do |haystack|
+        begin
+          match = expression.match(haystack, limits: Mica::Regex::SearchLimits::REQUEST)
+          io << ' ' << (match ? "#{match.byte_begin}-#{match.byte_end}" : "-")
+        rescue error : Mica::Error
+          failures << "internal error: #{error.message}" if error.message.try(&.includes?("internal error"))
+          io << " !" << error.class
+        end
+      end
+    end
+  rescue error : Mica::Error
+    failures << "internal error: #{error.message}" if error.message.try(&.includes?("internal error"))
+    " compile !#{error.class}"
   end
 end
