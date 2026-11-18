@@ -7,9 +7,11 @@ require "./support/pcre2_corpus"
 # this spec never links PCRE2):
 #
 # - both accept: capture counts and group names must match;
-# - Mica refuses an excluded construct by name, or a named compile limit:
-#   classified, whatever PCRE2 said;
-# - both report a syntax error: classified as invalid in both;
+# - Mica refuses an excluded construct by name: classified, as long as
+#   PCRE2 accepts or rejects at the same or a later byte;
+# - Mica refuses by a named compile limit: classified;
+# - both report a syntax error at the same byte offset: classified as
+#   invalid in both (a different offset is a mismatch);
 # - otherwise the case must be listed in conformance/regex/pcre2/divergences.tsv.
 #
 # Set MICA_REGEX_CENSUS to a path to write the per-case table as TSV.
@@ -68,6 +70,12 @@ module PCRE2Census
                    options : Mica::Regex::CompileOptions) : Row
     if error.is_a?(Mica::Regex::UnsupportedConstructError)
       pcre2_view = verdict.accepted? ? "PCRE2 accepts" : "PCRE2 rejects at #{verdict.error_offset}: #{verdict.error_message}"
+      # An excluded construct must be found no later than the error PCRE2
+      # reports; PCRE2 rejecting earlier means Mica read past a syntax error.
+      if !verdict.accepted? && verdict.error_offset < error.byte_offset
+        return Row.new(test_case, Category::Mismatch,
+          "PCRE2 rejects at #{verdict.error_offset} (#{verdict.error_message}) before Mica's #{error.construct} at byte #{error.byte_offset}")
+      end
       return Row.new(test_case, Category::Excluded, "#{error.construct} at byte #{error.byte_offset}; #{pcre2_view}")
     end
     if error.is_a?(Mica::Regex::CompileLimitError)
@@ -79,9 +87,11 @@ module PCRE2Census
     if error
       unless verdict.accepted?
         mica_offset = error.is_a?(Mica::ParseError) ? error.byte_offset : -1_i64
-        agreement = mica_offset == verdict.error_offset ? "same offset" : "offset differs"
-        return Row.new(test_case, Category::InvalidInBoth,
-          "#{agreement}: PCRE2 #{verdict.error_code} at #{verdict.error_offset} (#{verdict.error_message}); Mica: #{error.message}")
+        detail = "PCRE2 #{verdict.error_code} at #{verdict.error_offset} (#{verdict.error_message}); Mica: #{error.message}"
+        unless mica_offset == verdict.error_offset
+          return Row.new(test_case, Category::Mismatch, "offset differs: #{detail}")
+        end
+        return Row.new(test_case, Category::InvalidInBoth, "same offset: #{detail}")
       end
       return Row.new(test_case, Category::Mismatch, "PCRE2 accepts; Mica: #{error.message}")
     end

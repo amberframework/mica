@@ -57,29 +57,27 @@ module Mica::Regex
         unsupported("\\X (an extended grapheme cluster, until milestone R9)", start)
       in .horizontal_space?, .not_horizontal_space?, .vertical_space?, .not_vertical_space?,
          .digit?, .not_digit?, .space?, .not_space?, .word?, .not_word?
-        append_class([class_escape_item(escape.escape_kind)], false, start)
+        append_class(class_escape_item(escape.escape_kind), start)
       in .property?, .not_property?
-        item = read_property(escape.escape_kind.not_property?, in_class: false)
-        append_class([item], false, start)
+        append_class(read_property(escape.escape_kind.not_property?, in_class: false), start)
       in .not_newline?
-        append(Ast::AnyCharacter.new(start, false))
-        @quantifiable = true
+        add_any_character(start, false)
       in .line_break?
         charge_node(instance_sizeof(Ast::LineBreak), start)
         append(Ast::LineBreak.new(start, @any_crlf_line_breaks))
         @quantifiable = true
       in .start_of_text?
-        append(Ast::Assertion.new(start, Ast::AssertionKind::StartOfText))
+        add_assertion(start, Ast::AssertionKind::StartOfText)
       in .end_of_text?
-        append(Ast::Assertion.new(start, Ast::AssertionKind::EndOfText))
+        add_assertion(start, Ast::AssertionKind::EndOfText)
       in .end_or_final_newline?
-        append(Ast::Assertion.new(start, Ast::AssertionKind::EndOfTextOrFinalNewline))
+        add_assertion(start, Ast::AssertionKind::EndOfTextOrFinalNewline)
       in .word_boundary?
-        append(Ast::Assertion.new(start, Ast::AssertionKind::WordBoundary, @options.ascii_backslash_w?))
+        add_assertion(start, Ast::AssertionKind::WordBoundary, @options.ascii_backslash_w?)
       in .not_word_boundary?
-        append(Ast::Assertion.new(start, Ast::AssertionKind::NotWordBoundary, @options.ascii_backslash_w?))
+        add_assertion(start, Ast::AssertionKind::NotWordBoundary, @options.ascii_backslash_w?)
       in .search_start?
-        append(Ast::Assertion.new(start, Ast::AssertionKind::SearchStart))
+        add_assertion(start, Ast::AssertionKind::SearchStart)
       in .quote?, .end_quote?
         raise_internal("\\Q and \\E reach the escape parser", start)
       end
@@ -92,10 +90,12 @@ module Mica::Regex
       syntax_error("\\k is not followed by a braced, angle-bracketed, or quoted name", @pos)
     end
 
-    private def append_class(items : Array(Ast::ClassItem), negated : Bool, start : Int32) : Nil
+    # Appends a class of the single *class_item* (a class escape outside
+    # brackets).
+    private def append_class(class_item : Ast::ClassItem, start : Int32) : Nil
       charge_node(instance_sizeof(Ast::CharClass), start)
-      @ledger.charge_array(items.size, sizeof(Ast::ClassItem), "class items", start)
-      append(Ast::CharClass.new(start, items, negated, @options))
+      @ledger.charge_array(1, sizeof(Ast::ClassItem), "class items", start)
+      append(Ast::CharClass.new(start, [class_item], false, @options))
       @quantifiable = true
     end
 
@@ -127,6 +127,7 @@ module Mica::Regex
     # `IgnoreCase`, `Lu`, `Ll` and `Lt` become `L&`, as in PCRE2.
     private def read_property(negated : Bool, in_class : Bool) : Ast::ClassItem
       syntax_error("malformed \\P or \\p sequence", @pos) if @pos >= @bytes.size
+      @ledger.charge(PROPERTY_NAME_BYTES, "a property name", @pos)
       c = read_char
       loose = ""
       if c == '{'.ord
@@ -240,12 +241,12 @@ module Mica::Regex
     # `\N`, `\N{U+hhhh}`, or `\N` before a `{n,m}` quantifier.
     private def read_backslash_n(in_class : Bool) : Escape
       return Escape.new(EscapeKind::NotNewline) unless peek_byte == '{'.ord
-      p = @pos + 1
-      while p < @bytes.size && space_or_tab?(@bytes[p])
-        p += 1
+      cursor = @pos + 1
+      while cursor < @bytes.size && space_or_tab?(@bytes[cursor])
+        cursor += 1
       end
-      if @bytes.size - p > 1 && @bytes[p] == 'U'.ord && @bytes[p + 1] == '+'.ord
-        @pos = p + 2
+      if @bytes.size - cursor > 1 && @bytes[cursor] == 'U'.ord && @bytes[cursor + 1] == '+'.ord
+        @pos = cursor + 2
         return Escape.new(EscapeKind::Literal, read_braced_hex_digits)
       end
       if in_class
@@ -282,27 +283,27 @@ module Mica::Regex
     private def read_backslash_digit(first : Int32, in_class : Bool) : Escape
       unless in_class
         digits_start = @pos - 1
-        p = digits_start
+        cursor = digits_start
         value = 0
         too_big = false
-        while p < @bytes.size && digit?(@bytes[p])
-          value = value * 10 + (@bytes[p] - '0'.ord)
-          p += 1
+        while cursor < @bytes.size && digit?(@bytes[cursor])
+          value = value * 10 + (@bytes[cursor] - '0'.ord)
+          cursor += 1
           if value > CompileLimits::MAX_GROUP_NUMBER
             too_big = true
-            while p < @bytes.size && digit?(@bytes[p])
-              p += 1
+            while cursor < @bytes.size && digit?(@bytes[cursor])
+              cursor += 1
             end
             break
           end
         end
         if too_big
           if first >= '8'.ord
-            @pos = p
+            @pos = cursor
             syntax_error("subpattern number is too big", @pos)
           end
         elsif value < 10 || first >= '8'.ord || value <= @group_count
-          @pos = p
+          @pos = cursor
           return Escape.new(EscapeKind::Backreference)
         end
       end

@@ -144,6 +144,11 @@ describe Mica::Regex::Syntax do
       syntax_error("(?<1a>x)").detail.should contain("must start with a non-digit")
       syntax_error("(?<a>x)(?-J:(?<a>y))").detail.should contain("same name")
       error_of("(?<a>x)|(?<a>y)").should be_nil
+      syntax_error("(?|(?<a>x)|(?<b>y))").detail.should contain("different names")
+      error_of("(?|(?<a>a)(?<b>b)|(c)(?<a>d))").should be_nil
+      error_of("(?<a>x)(?<a>y)(?<a>z)").should be_nil
+      Mica::Regex::Syntax.check("(?|(?<a>x)|(?<a>y))(?<a>z)", dialect: :crystal, compile_limits: TRUSTED)
+        .list_of_group_names.map { |entry| {entry.group_name, entry.capture_index} }.should eq([{"a", 1}, {"a", 2}])
       syntax_error("(?z)").detail.should contain("unrecognized character after (?")
     end
   end
@@ -263,6 +268,16 @@ describe Mica::Regex::Syntax do
       limits = Mica::Regex::CompileLimits.custom(max_class_ranges: 10)
       error_of("[a-e]", limits).should be_nil
       error_of("\\p{L}", limits).as(Mica::Regex::CompileLimitError).limit_name.should eq("max_class_ranges")
+    end
+
+    it_satisfies "REGEX-R1-limits", "holds case-folded literals to max_class_ranges like classes" do
+      # (?i)k stands for [Kk\x{212A}]: three ranges.
+      [1, 2].each do |max_class_ranges|
+        limits = Mica::Regex::CompileLimits.custom(max_class_ranges: max_class_ranges)
+        error_of("(?i)k", limits).as(Mica::Regex::CompileLimitError).limit_name.should eq("max_class_ranges")
+        error_of("(?i)[k]", limits).as(Mica::Regex::CompileLimitError).limit_name.should eq("max_class_ranges")
+      end
+      error_of("(?i)k", Mica::Regex::CompileLimits.custom(max_class_ranges: 3)).should be_nil
     end
 
     it_satisfies "REGEX-R1-preflight", "refuses nested counted repetitions before expanding them" do

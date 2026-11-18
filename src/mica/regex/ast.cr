@@ -24,6 +24,11 @@ module Mica::Regex
     class Literal < Node
       getter code_point : Int32
       getter options : CompileOptions
+      # The set a case-folded literal stands for (its code point and its
+      # fold partners), filled in by `Syntax` before the size preflight so
+      # the preflight and the translator share one lowering; nil while
+      # unlowered and for a literal that matches only itself.
+      property folded_set : CodePointSet? = nil
 
       def initialize(offset : Int32, @code_point : Int32, @options : CompileOptions)
         super(offset)
@@ -215,35 +220,46 @@ module Mica::Regex
       end
     end
 
-    # Returns the direct children of *node* (none for a leaf).
-    def self.children_of(node : Node) : Array(Node)
+    # Returns the number of direct children of *node* (0 for a leaf).
+    def self.child_count(node : Node) : Int32
       case node
-      when Concatenation then node.list_of_children
-      when Alternation   then node.list_of_branches
-      when Group         then [node.child] of Node
-      when Repetition    then [node.child] of Node
-      else                    NO_CHILDREN
+      when Concatenation then node.list_of_children.size
+      when Alternation   then node.list_of_branches.size
+      when Group         then 1
+      when Repetition    then 1
+      else                    0
       end
     end
 
-    # The children of every leaf.
-    NO_CHILDREN = [] of Node
+    # Returns the direct child of *node* at *index*.
+    def self.child_at(node : Node, index : Int32) : Node
+      case node
+      when Concatenation then node.list_of_children[index]
+      when Alternation   then node.list_of_branches[index]
+      when Group         then node.child
+      when Repetition    then node.child
+      else                    raise IndexError.new("A #{node.class} has no children")
+      end
+    end
 
     # Visits the tree under *root* in post-order without recursion, yielding
     # each node with its number of children; callers keep their own value
-    # stack and pop that many results. The work stack is charged to
-    # *ledger* before it grows.
-    def self.each_post_order(root : Node, ledger : AllocationLedger, & : Node, Int32 ->) : Nil
-      stack = [{root, false}]
+    # stack and pop that many results. The work stack is allocated once with
+    # room for *node_count* entries (every node is on it at most once), and
+    # charged to *ledger* first.
+    def self.each_post_order(root : Node, node_count : Int32, ledger : AllocationLedger, & : Node, Int32 ->) : Nil
+      capacity = Math.max(node_count, 1)
+      ledger.charge_array(capacity, sizeof({Node, Bool}), "a traversal stack", root.offset)
+      stack = Array({Node, Bool}).new(capacity)
+      stack << {root, false}
       until stack.empty?
         node, expanded = stack.pop
-        children = children_of(node)
+        count = child_count(node)
         if expanded
-          yield node, children.size
+          yield node, count
         else
-          ledger.charge((children.size + 1) * 16, "a traversal stack entry", node.offset)
           stack << {node, true}
-          (children.size - 1).downto(0) { |index| stack << {children[index], false} }
+          (count - 1).downto(0) { |index| stack << {child_at(node, index), false} }
         end
       end
     end

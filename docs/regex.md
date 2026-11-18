@@ -177,10 +177,33 @@ anything is expanded. The compiler (R2) will check its emitted count
 against the same limit.
 
 **The allocation ledger** (`AllocationLedger`) is charged before every
-node, list, class range, case-folding partner and traversal stack entry
-the front half allocates; passing `max_compile_bytes` raises at the
-offending byte offset. Every traversal of the tree uses an explicit stack,
-so nesting never consumes machine stack.
+object, array, string and table entry the front half allocates, with an
+upper bound on what the garbage collector really hands out: objects with
+the collector's extra byte and 16-byte rounding, arrays of known size
+exactly, growing arrays at 7 times the element size per element (stdlib
+growth allocates at most 6.24 times over a run of appends), and hash
+entries with their index. Passing `max_compile_bytes` raises at the
+offending byte offset. The front half keeps no transient lists: each
+case-folded literal is lowered once (to `Ast::Literal#folded_set`) and
+shared by the preflight and the translator, and the traversal and value
+stacks are allocated once, sized by the node count. Every traversal of the
+tree uses an explicit stack, so nesting never consumes machine stack.
+
+`spec/regex/compile_complexity_spec.cr` checks the bound against the
+process: for the worst accepted families at `max_pattern_bytes` under both
+presets (`(?i)k`, `\Q a`, `a`, `a|`, `(?:)`, `\R`, `^`, `(?i)[a-z]` and
+`a{2}` repeated), `GC.stats` allocation stays within `max_compile_bytes`
+and within the ledger total plus 64 KiB (the collector counts a thread's
+free list when it refills it). Measured, the process allocates 51% to 97%
+of the ledger total for those families; under `TRUSTED_PATTERN`,
+`(?i)` followed by 64,996 `k`s allocates 18.6 MB against a ledger of
+19.2 MB.
+
+Group names are checked against three tables (first entry per name,
+first entry per number, and the name-number pairs), so each name costs
+constant work, and a class merges one range stream per distinct member,
+so repeating `\p{L}` inside a class costs no more merge work than writing
+it once; each merge step is charged with the heap's depth.
 
 ## Hir
 
@@ -206,8 +229,8 @@ part of `crystal-alpha spec`.
 | Category | Patterns |
 |---|---|
 | Accepted by both, with equal capture counts and group names | 5,870 |
-| Refused by Mica as an excluded construct (named, with offset) | 2,339 |
-| Rejected by both as invalid (all 314 at the same byte offset) | 314 |
+| Refused by Mica as an excluded construct (named, with offset; PCRE2 accepts or rejects at the same or a later byte) | 2,339 |
+| Rejected by both as invalid at the same byte offset (a different offset fails the gate) | 314 |
 | Refused by Mica by a named compile limit | 6 |
 | Outside the dialect: needs a pcre2test option Crystal cannot set | 850 |
 | Rejected by pcre2test itself before compiling | 4 |
@@ -237,4 +260,10 @@ exception, within the work budget, deterministically.
 - `\R` is atomic in PCRE2; the compiler (R2) must not let a later failure
   split `\r\n`.
 - `max_pike_bytes` and the emitted-state check land with the compiler (R2).
+- Multiline `^` (`Hir::Look` with `StartOfLine`) matches at the start and
+  after each newline except a newline that ends the subject, as in PCRE2;
+  the R2 matcher must keep that meaning.
+- Roadmap 6.5's `conformance/regex/exclusions.tsv` and the three frozen ID
+  lists (excluded, divergent, eligible) are built before R2's denominator
+  gates; `census.tsv` stands in for them in R1.
 - The ECMA-262 and XSD parsers (R6, R7) and `\X` (R9).

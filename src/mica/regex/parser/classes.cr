@@ -19,7 +19,7 @@ module Mica::Regex
       if word_boundary_class?
         kind = @bytes[@pos + 2] == '<'.ord ? Ast::AssertionKind::WordStart : Ast::AssertionKind::WordEnd
         @pos += 6
-        append(Ast::Assertion.new(start, kind, @options.ascii_backslash_w?))
+        add_assertion(start, kind, @options.ascii_backslash_w?)
         @quantifiable = true
         return
       end
@@ -54,6 +54,7 @@ module Mica::Regex
         end
       end
 
+      @ledger.charge_array(0, sizeof(Ast::ClassItem), "a class", start)
       list_of_items = [] of Ast::ClassItem
       state = RangeState::None
       forbid_offset = 0
@@ -94,6 +95,7 @@ module Mica::Regex
             posix_negated = true
             @pos += 1
           end
+          @ledger.charge_string(terminator - @pos, "a POSIX class name", @pos)
           posix_name = String.new(@bytes[@pos, terminator - @pos])
           @pos = terminator + 2
           index = POSIX_NAMES.index(posix_name) || syntax_error("unknown POSIX class name", @pos)
@@ -186,7 +188,7 @@ module Mica::Regex
     end
 
     private def add_class_item(list_of_items : Array(Ast::ClassItem), item : Ast::ClassItem, start : Int32) : Nil
-      @ledger.charge(sizeof(Ast::ClassItem) * 2, "a class item", start)
+      @ledger.charge_append(sizeof(Ast::ClassItem), "a class item", start)
       list_of_items << item
     end
 
@@ -234,19 +236,19 @@ module Mica::Regex
     # or nil when the text is not POSIX class syntax.
     private def posix_syntax_end(offset : Int32) : Int32?
       terminator = @bytes[offset]
-      p = offset + 1
-      while @bytes.size - p >= 2
+      cursor = offset + 1
+      while @bytes.size - cursor >= 2
         charge_work(1)
-        byte = @bytes[p]
-        following = @bytes[p + 1]
+        byte = @bytes[cursor]
+        following = @bytes[cursor + 1]
         if byte == '\\'.ord && (following == ']'.ord || following == '\\'.ord)
-          p += 1
+          cursor += 1
         elsif (byte == '['.ord && following == terminator) || byte == ']'.ord
           return nil
         elsif byte == terminator && following == ']'.ord
-          return p
+          return cursor
         end
-        p += 1
+        cursor += 1
       end
       nil
     end

@@ -19,9 +19,9 @@ module Mica::Regex
     MAX_NAME_BYTES = 128
     # The most named groups (PCRE2's MAX_NAME_COUNT).
     MAX_NAME_COUNT = 10_000
-    # Bytes charged per element appended to a list: the element and the
-    # spare capacity of geometric growth.
-    LIST_ENTRY_BYTES = 16
+    # Bytes charged for reading one `\p{...}` name: the string builder and
+    # its buffer, the name, and the substrings the property lookup takes.
+    PROPERTY_NAME_BYTES = 512
 
     # What a frame on the group stack is.
     private enum FrameKind
@@ -62,6 +62,12 @@ module Mica::Regex
     @node_count = 0
     @list_of_frames = [] of Frame
     @list_of_group_names = [] of Ast::GroupName
+    # The first entry of `@list_of_group_names` for each name and for each
+    # group number, and every (name, number) pair recorded, so each new
+    # name is checked in constant time.
+    @first_entry_by_name = {} of String => Int32
+    @first_entry_by_number = {} of Int32 => Int32
+    @defined_pairs = Set({String, Int32}).new
 
     # Parses *pattern* (validated as UTF-8 first). *options* are the
     # options in force at the start; *limits*, *ledger* and *meter* bound
@@ -213,12 +219,11 @@ module Mica::Regex
       when '\\'.ord then parse_escape(start)
       when '^'.ord
         kind = @options.multiline? ? Ast::AssertionKind::StartOfLine : Ast::AssertionKind::StartOfText
-        append(Ast::Assertion.new(start, kind))
+        add_assertion(start, kind)
       when '$'.ord
-        append(Ast::Assertion.new(start, dollar_kind))
+        add_assertion(start, dollar_kind)
       when '.'.ord
-        append(Ast::AnyCharacter.new(start, @options.dot_all?))
-        @quantifiable = true
+        add_any_character(start, @options.dot_all?)
       when '*'.ord then apply_quantifier(0, nil, start, previous_quantifiable)
       when '+'.ord then apply_quantifier(1, nil, start, previous_quantifiable)
       when '?'.ord then apply_quantifier(0, 1, start, previous_quantifiable)
@@ -291,11 +296,11 @@ module Mica::Regex
     # the text is not a quantifier; raises for a count above 65535 or
     # counts out of order.
     private def read_repeat_counts : {Int32, Int32?}?
-      p = @pos
-      while p < @bytes.size && space_or_tab?(@bytes[p])
-        p += 1
+      cursor = @pos
+      while cursor < @bytes.size && space_or_tab?(@bytes[cursor])
+        cursor += 1
       end
-      scan = p
+      scan = cursor
       had_minimum = false
       if scan < @bytes.size && digit?(@bytes[scan])
         had_minimum = true
@@ -332,50 +337,50 @@ module Mica::Regex
       minimum = 0
       maximum = nil
       if had_minimum
-        minimum, p = read_count(p)
-        while space_or_tab?(@bytes[p])
-          p += 1
+        minimum, cursor = read_count(cursor)
+        while space_or_tab?(@bytes[cursor])
+          cursor += 1
         end
-        if @bytes[p] == '}'.ord
+        if @bytes[cursor] == '}'.ord
           maximum = minimum
         else
-          p += 1
-          while space_or_tab?(@bytes[p])
-            p += 1
+          cursor += 1
+          while space_or_tab?(@bytes[cursor])
+            cursor += 1
           end
-          if digit?(@bytes[p])
-            maximum, p = read_count(p)
-            syntax_error("numbers out of order in {} quantifier", p) if maximum < minimum
+          if digit?(@bytes[cursor])
+            maximum, cursor = read_count(cursor)
+            syntax_error("numbers out of order in {} quantifier", cursor) if maximum < minimum
           end
         end
       else
-        p += 1
-        while space_or_tab?(@bytes[p])
-          p += 1
+        cursor += 1
+        while space_or_tab?(@bytes[cursor])
+          cursor += 1
         end
-        maximum, p = read_count(p)
+        maximum, cursor = read_count(cursor)
       end
-      while space_or_tab?(@bytes[p])
-        p += 1
+      while space_or_tab?(@bytes[cursor])
+        cursor += 1
       end
-      @pos = p + 1
+      @pos = cursor + 1
       {minimum, maximum}
     end
 
     private def read_count(start : Int32) : {Int32, Int32}
-      p = start
+      cursor = start
       value = 0
-      while p < @bytes.size && digit?(@bytes[p])
-        value = value * 10 + (@bytes[p] - '0'.ord)
-        p += 1
+      while cursor < @bytes.size && digit?(@bytes[cursor])
+        value = value * 10 + (@bytes[cursor] - '0'.ord)
+        cursor += 1
         if value > MAX_REPEAT_COUNT
-          while p < @bytes.size && digit?(@bytes[p])
-            p += 1
+          while cursor < @bytes.size && digit?(@bytes[cursor])
+            cursor += 1
           end
-          syntax_error("number too big in {} quantifier", p)
+          syntax_error("number too big in {} quantifier", cursor)
         end
       end
-      {value, p}
+      {value, cursor}
     end
 
     # ---- Groups ---------------------------------------------------------------
@@ -448,6 +453,7 @@ module Mica::Regex
         @pos += 1
       end
       charge_work(@pos - start)
+      @ledger.charge_string(@pos - start, "a setting name", start)
       String.new(@bytes[start, @pos - start])
     end
 
@@ -636,6 +642,7 @@ module Mica::Regex
       if @pos >= @bytes.size || @bytes[@pos] != terminator
         syntax_error("syntax error in subpattern name (missing terminator?)", @pos)
       end
+      @ledger.charge_string(@pos - name_start, "a group name", name_start)
       group_name = String.new(@bytes[name_start, @pos - name_start])
       @pos += 1
       group_name
@@ -649,23 +656,37 @@ module Mica::Regex
     # Records a group name the way PCRE2 does: the same name on the same
     # number is ignored; the same name on another number needs DUPNAMES;
     # a new name on a number that already has a different name is an error.
+    #
+    # PCRE2 decides at the first earlier entry with the same name or the
+    # same number; the three tables find that entry without a scan.
     private def define_group_name(group_name : String, number : Int32, offset : Int32) : Nil
       if @list_of_group_names.size >= MAX_NAME_COUNT
         syntax_error("too many named subpatterns (maximum #{MAX_NAME_COUNT})", @pos)
       end
-      @list_of_group_names.each do |entry|
-        charge_work(1)
-        if entry.group_name == group_name
-          return if entry.capture_index == number
-          syntax_error("two named subpatterns have the same name (PCRE2_DUPNAMES not set)", @pos) unless @dupnames
-          break
-        elsif entry.capture_index == number
-          syntax_error("different names for subpatterns of the same number are not allowed", @pos)
-        end
+      charge_work(3)
+      by_name = @first_entry_by_name[group_name]?
+      by_number = @first_entry_by_number[number]?
+      if by_number && (by_name.nil? || by_number < by_name)
+        syntax_error("different names for subpatterns of the same number are not allowed", @pos)
       end
-      return if @list_of_group_names.any? { |entry| entry.group_name == group_name && entry.capture_index == number }
-      @ledger.charge(LIST_ENTRY_BYTES + group_name.bytesize, "a group name", offset)
+      if by_name
+        return if @list_of_group_names[by_name].capture_index == number
+        syntax_error("two named subpatterns have the same name (PCRE2_DUPNAMES not set)", @pos) unless @dupnames
+        return if @defined_pairs.includes?({group_name, number})
+      end
+      @ledger.charge_append(sizeof(Ast::GroupName), "a group name", offset)
       @list_of_group_names << Ast::GroupName.new(group_name, number)
+      index = @list_of_group_names.size - 1
+      unless by_name
+        @ledger.charge_hash_entry(sizeof(String) + sizeof(Int32), "a group name", offset)
+        @first_entry_by_name[group_name] = index
+      end
+      unless by_number
+        @ledger.charge_hash_entry(sizeof(Int32) * 2, "a group name", offset)
+        @first_entry_by_number[number] = index
+      end
+      @ledger.charge_hash_entry(sizeof({String, Int32}), "a group name", offset)
+      @defined_pairs << {group_name, number}
     end
 
     private def next_group_number(start : Int32) : Int32
@@ -695,7 +716,10 @@ module Mica::Regex
 
     private def push_frame(kind : FrameKind, start : Int32, capture_index : Int32, group_name : String?,
                            saved_options : CompileOptions, branch_reset : Bool, saved_dupnames : Bool = true) : Nil
-      @ledger.charge(instance_sizeof(Frame) + 2 * instance_sizeof(Array(Ast::Node)) + LIST_ENTRY_BYTES, "a group frame", start)
+      @ledger.charge_object(instance_sizeof(Frame), "a group frame", start)
+      @ledger.charge_array(0, sizeof(Ast::Node), "a group frame", start)
+      @ledger.charge_array(0, sizeof(Ast::Node), "a group frame", start)
+      @ledger.charge_append(sizeof(Frame), "a group frame", start)
       @list_of_frames << Frame.new(kind, start, capture_index, group_name, saved_options, saved_dupnames, branch_reset)
     end
 
@@ -706,7 +730,7 @@ module Mica::Regex
         @group_count = frame.reset_group
       end
       branch = finish_items(frame, frame.list_of_items.empty? ? @pos - 1 : frame.list_of_items.first.offset)
-      @ledger.charge(LIST_ENTRY_BYTES, "a branch", @pos)
+      @ledger.charge_append(sizeof(Ast::Node), "a branch", @pos)
       frame.list_of_branches << branch
       frame.list_of_items.clear
     end
@@ -734,9 +758,10 @@ module Mica::Regex
       last = finish_items(frame, frame.list_of_items.empty? ? frame.offset : frame.list_of_items.first.offset)
       branches = frame.list_of_branches
       return last if branches.empty?
-      @ledger.charge(LIST_ENTRY_BYTES, "a branch", frame.offset)
+      @ledger.charge_append(sizeof(Ast::Node), "a branch", frame.offset)
       branches << last
       charge_node(instance_sizeof(Ast::Alternation), frame.offset)
+      @ledger.charge_array(branches.size, sizeof(Ast::Node), "an alternation", frame.offset)
       Ast::Alternation.new(frame.offset, branches.dup)
     end
 
@@ -764,13 +789,26 @@ module Mica::Regex
       @quantifiable = true
     end
 
+    private def add_assertion(start : Int32, kind : Ast::AssertionKind, ascii_word : Bool = false) : Nil
+      charge_node(instance_sizeof(Ast::Assertion), start)
+      append(Ast::Assertion.new(start, kind, ascii_word))
+    end
+
+    private def add_any_character(start : Int32, matches_newline : Bool) : Nil
+      charge_node(instance_sizeof(Ast::AnyCharacter), start)
+      append(Ast::AnyCharacter.new(start, matches_newline))
+      @quantifiable = true
+    end
+
+    # Appends *node*, already charged, to the current branch.
     private def append(node : Ast::Node) : Nil
-      @ledger.charge(LIST_ENTRY_BYTES, "a list entry", node.offset)
+      @ledger.charge_append(sizeof(Ast::Node), "a list entry", node.offset)
       current_frame.list_of_items << node
     end
 
+    # Charges a syntax node of *bytes* before it is allocated, and counts it.
     private def charge_node(bytes : Int32, offset : Int32) : Nil
-      @ledger.charge(bytes, "a syntax node", offset)
+      @ledger.charge_object(bytes, "a syntax node", offset)
       @node_count += 1
       charge_work(1)
     end

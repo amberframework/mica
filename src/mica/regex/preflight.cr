@@ -26,22 +26,26 @@ module Mica::Regex
   # passes it (the decision waits for the root, since `{0}` cancels its
   # child).
   module Preflight
-    # Returns the bound for *pattern*, whose classes are already lowered.
-    # Raises `CompileLimitError` naming `max_program_states`.
+    # Returns the bound for *pattern*, whose classes and case-folded
+    # literals are already lowered. Raises `CompileLimitError` naming
+    # `max_program_states`.
     def self.estimate(pattern : Ast::Pattern, dialect : Dialect, limits : CompileLimits, ledger : AllocationLedger,
                       meter : Core::WorkMeter) : Int64
-      list_of_values = [] of Int64
+      # Every node pushes one value after popping its children's, so the
+      # stack never holds more values than there are nodes.
+      capacity = Math.max(pattern.node_count, 1)
+      ledger.charge_array(capacity, sizeof(Int64), "the preflight value stack", pattern.root.offset)
+      list_of_values = Array(Int64).new(capacity)
       limit = limits.max_program_states
       # The first subtree over the limit locates the error; the decision
       # waits for the root, because a {0} repetition can cancel a subtree.
       first_offender = nil
-      Ast.each_post_order(pattern.root, ledger) do |node, child_count|
+      Ast.each_post_order(pattern.root, pattern.node_count, ledger) do |node, child_count|
         offset = node.offset
         meter.enforce { Core::Position.new(offset.to_i64) } if meter.charge(1)
-        children = list_of_values.pop(child_count)
-        value = node_states(node, children, dialect, meter)
+        value = node_states(node, list_of_values, child_count, meter)
+        child_count.times { list_of_values.pop }
         first_offender ||= offset if value > limit
-        ledger.charge(16, "a preflight value", offset)
         list_of_values << value
       end
       root_states = list_of_values.pop? || 0_i64
@@ -57,7 +61,7 @@ module Mica::Regex
     # saves, the match state, and the unanchored prefix `(?s:.)*?` (a
     # class of every code point plus its loop split).
     def self.overhead_states : Int64
-      add(add(3_i64, set_states(ClassLowering.any_character(true))), 1_i64)
+      add(add(3_i64, ANY_CHARACTER_STATES[1]), 1_i64)
     end
 
     # Returns the class bound for *set*: byte ranges plus splits between
@@ -75,8 +79,8 @@ module Mica::Regex
       add(byte_ranges, sequences - 1)
     end
 
-    # The class bound for a sorted list of code points (a case-folded
-    # literal), merging adjacent members into ranges as the class would.
+    # The class bound for a sorted list of code points, merging adjacent
+    # members into ranges as the class would.
     def self.points_states(list_of_points : Array(Int32)) : Int64
       list_of_bounds = [] of Int32
       list_of_points.each do |code_point|
@@ -89,13 +93,32 @@ module Mica::Regex
       set_states(CodePointSet.from_bounds(list_of_bounds))
     end
 
-    private def self.node_states(node : Ast::Node, children : Array(Int64), dialect : Dialect,
+    # The class bounds of `\N` (index 0) and of `.` matching newlines
+    # (index 1), computed once per process.
+    private ANY_CHARACTER_STATES = {
+      set_states(ClassLowering.any_character(false)),
+      set_states(ClassLowering.any_character(true)),
+    }
+
+    # The bounds of `\R` (index 0) and of `\R` under `(*BSR_ANYCRLF)`
+    # (index 1), computed once per process.
+    private LINE_BREAK_STATES = {
+      add(add(2_i64, points_states([0x0A, 0x0B, 0x0C, 0x0D, 0x85, 0x2028, 0x2029])), 1_i64),
+      add(add(2_i64, points_states([0x0A, 0x0D])), 1_i64),
+    }
+
+    # The bound for *node*, whose *child_count* children's bounds are on
+    # top of *list_of_values*.
+    private def self.node_states(node : Ast::Node, list_of_values : Array(Int64), child_count : Int32,
                                  meter : Core::WorkMeter) : Int64
+      first_child = list_of_values.size - child_count
       case node
       when Ast::Literal
-        members = ClassLowering.literal(node.code_point, node.options, dialect)
-        return Utf8Sequences.encoded_length(node.code_point).to_i64 if members.size == 1
-        points_states(members)
+        if set = node.folded_set
+          set_states(set)
+        else
+          Utf8Sequences.encoded_length(node.code_point).to_i64
+        end
       when Ast::CharClass
         set = node.lowered_set || raise SyntaxError.new("internal error: class not lowered before the preflight",
           Core::Position.new(node.offset.to_i64))
@@ -103,28 +126,33 @@ module Mica::Regex
         meter.enforce { Core::Position.new(offset.to_i64) } if meter.charge(set.range_count)
         set_states(set)
       when Ast::AnyCharacter
-        set_states(ClassLowering.any_character(node.matches_newline?))
+        ANY_CHARACTER_STATES[node.matches_newline? ? 1 : 0]
       when Ast::LineBreak
-        others = node.any_crlf? ? [0x0A, 0x0D] : [0x0A, 0x0B, 0x0C, 0x0D, 0x85, 0x2028, 0x2029]
-        add(add(2_i64, points_states(others)), 1_i64)
+        LINE_BREAK_STATES[node.any_crlf? ? 1 : 0]
       when Ast::Assertion
         1_i64
       when Ast::Empty
         0_i64
       when Ast::Concatenation
-        children.reduce(0_i64) { |sum, value| add(sum, value) }
+        sum_from(list_of_values, first_child)
       when Ast::Alternation
-        splits = (children.size - 1).to_i64
-        children.reduce(splits) { |sum, value| add(sum, value) }
+        add(sum_from(list_of_values, first_child), (child_count - 1).to_i64)
       when Ast::Group
-        child = children.first? || 0_i64
+        child = child_count > 0 ? list_of_values[first_child] : 0_i64
         node.capturing? ? add(child, 2_i64) : child
       when Ast::Repetition
-        child = children.first? || 0_i64
+        child = child_count > 0 ? list_of_values[first_child] : 0_i64
         repetition_states(child, node.minimum, node.maximum)
       else
         raise SyntaxError.new("internal error: unknown syntax node #{node.class}", Core::Position.new(node.offset.to_i64))
       end
+    end
+
+    # The saturating sum of the values from index *first* to the top.
+    private def self.sum_from(list_of_values : Array(Int64), first : Int32) : Int64
+      total = 0_i64
+      (first...list_of_values.size).each { |index| total = add(total, list_of_values[index]) }
+      total
     end
 
     # `{n,m}`: m copies, the last m − n optional (one split each); `{n,}`:
