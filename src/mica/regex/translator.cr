@@ -21,7 +21,8 @@ module Mica::Regex
       end
       ledger.charge_object(instance_sizeof(Hir::Pattern), "a Hir pattern", pattern.root.offset)
       root = list_of_results.pop? || empty_node(ledger, pattern.root.offset)
-      Hir::Pattern.new(root, pattern.capture_count, pattern.list_of_group_names, pattern.options, dialect)
+      Hir::Pattern.new(root, pattern.capture_count, pattern.list_of_group_names, pattern.options, dialect,
+        pattern.source_end)
     end
 
     # The `Hir` for *node*, whose *child_count* children's results are on

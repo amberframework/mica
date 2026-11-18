@@ -306,7 +306,7 @@ describe Mica::Regex::Expression do
       Mica::Regex.escape("a.b*c").should eq("a\\.b\\*c")
       Mica::Regex.needs_escape?("a.b").should be_true
       source = Mica::Regex.union_source(["a.b", expression("c", Mica::Regex::CompileOptions::IgnoreCase)])
-      source.should eq("a\\.b|(?i-msx:c)")
+      source.should eq("a\\.b|(?i-mnrsxUa:c)")
       expression(source).matches?("xC", limits: LIMITS).should be_true
       Mica::Regex.compile("a", dialect: :crystal, compile_limits: TRUSTED).should eq(expression("a"))
     end

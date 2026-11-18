@@ -417,20 +417,65 @@ module Mica::Regex
       @dialect.hash(hasher)
     end
 
-    # Writes the expression as an inline-option group, as `Regex#to_s`
-    # does: `(?i-msx:source)`.
+    # Writes the expression as an inline-option group that carries every
+    # option with an inline form, setting the ones it has and clearing the
+    # rest, so the text means the same inside any other pattern: `c` under
+    # `IgnoreCase` is `(?i-mnrsxUa:c)`. Crystal's `Regex#to_s` writes only
+    # `imsx`; Mica writes `n`, `r`, `U`, `xx` and PCRE2's `(?aD)`, `(?aS)`,
+    # `(?aW)`, `(?aP)` and `(?aT)` too. Options with no inline form (see
+    # `CompileOptions::INLINE`) are left out; `Mica::Regex.union_source`
+    # refuses them.
     def to_s(io : IO) : Nil
+      options = @options
       io << "(?"
-      io << 'i' if @options.ignore_case?
-      io << 'm' if @options.multiline?
-      io << 's' if @options.dot_all?
-      io << 'x' if @options.extended?
+      io << 'i' if options.ignore_case?
+      io << 'm' if options.multiline?
+      io << 'n' if options.no_auto_capture?
+      io << 'r' if options.caseless_restrict?
+      io << 's' if options.dot_all?
+      io << (options.extended_more? ? "xx" : "x") if options.extended? || options.extended_more?
+      io << 'U' if options.ungreedy?
+      write_ascii_options(io, options)
       io << '-'
-      io << 'i' unless @options.ignore_case?
-      io << 'm' unless @options.multiline?
-      io << 's' unless @options.dot_all?
-      io << 'x' unless @options.extended?
-      io << ':' << @source << ')'
+      io << 'i' unless options.ignore_case?
+      io << 'm' unless options.multiline?
+      io << 'n' unless options.no_auto_capture?
+      io << 'r' unless options.caseless_restrict?
+      io << 's' unless options.dot_all?
+      io << 'x' unless options.extended? || options.extended_more?
+      io << 'U' unless options.ungreedy?
+      write_ascii_options(io, ~options & CompileOptions::ASCII_ALL)
+      io << ':'
+      # `aP` sets and clears `AsciiDigit` with `AsciiPosix`, so `AsciiDigit`
+      # alone is cleared by `-aP` above and set again here.
+      io << "(?aT)" if options.ascii_digit? && !options.ascii_posix?
+      io << @source
+      case @program.source_end
+      when .in_comment? then io << '\n'
+      when .in_quote?   then io << "\\E"
+      end
+      io << ')'
+    end
+
+    # Writes the `a` letters that name the ASCII options in *options*, for
+    # the set half or the cleared half of an option group: `a` alone for
+    # all five, else `aD`, `aS`, `aW`, then `aP` (which takes `AsciiDigit`
+    # with it) or `aT`.
+    private def write_ascii_options(io : IO, options : CompileOptions) : Nil
+      ascii = options & CompileOptions::ASCII_ALL
+      return if ascii.none?
+      if ascii == CompileOptions::ASCII_ALL
+        io << 'a'
+        return
+      end
+      io << "aD" if ascii.ascii_backslash_d?
+      io << "aS" if ascii.ascii_backslash_s?
+      io << "aW" if ascii.ascii_backslash_w?
+      if ascii.ascii_posix?
+        io << "aP"
+      elsif ascii.ascii_digit?
+        io << "aT"
+      end
     end
 
     def inspect(io : IO) : Nil
@@ -484,8 +529,23 @@ module Mica::Regex
 
   # Returns the source of an expression that matches any of *patterns*:
   # strings are escaped, expressions keep their options as inline groups
-  # (Crystal's `Regex.union`). Compile it with the limits that fit.
+  # (Crystal's `Regex.union`), so the result matches exactly what each
+  # member matches. Compile it with the limits that fit.
+  #
+  # Raises `ArgumentError` for an expression whose options have no inline
+  # form (`Anchored`, `FirstLine`, `DollarEndOnly`, `EndAnchored`,
+  # `MatchInvalidUtf`): its text alone would match differently.
   def self.union_source(patterns : Enumerable(Expression | String)) : String
-    patterns.join('|') { |pattern| pattern.is_a?(String) ? escape(pattern) : pattern.to_s }
+    patterns.join('|') do |pattern|
+      if pattern.is_a?(String)
+        escape(pattern)
+      else
+        outside = pattern.options & ~CompileOptions::INLINE
+        unless outside.none?
+          raise ArgumentError.new("#{pattern.inspect} has options with no inline form (#{outside}), so it cannot join a union")
+        end
+        pattern.to_s
+      end
+    end
   end
 end

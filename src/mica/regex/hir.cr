@@ -156,9 +156,10 @@ module Mica::Regex
       getter list_of_group_names : Array(Ast::GroupName)
       getter options : CompileOptions
       getter dialect : Dialect
+      getter source_end : Ast::SourceEnd
 
       def initialize(@root : Node, @capture_count : Int32, @list_of_group_names : Array(Ast::GroupName),
-                     @options : CompileOptions, @dialect : Dialect)
+                     @options : CompileOptions, @dialect : Dialect, @source_end : Ast::SourceEnd = Ast::SourceEnd::Closed)
       end
     end
   end

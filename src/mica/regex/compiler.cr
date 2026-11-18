@@ -102,11 +102,11 @@ module Mica::Regex
       run_tasks
       body = @list_of_values.pop
       start = emit_save(0, body)
-      check_pike_bytes
+      workspace_charge = check_pike_bytes
       group_names = @pattern.list_of_group_names
       @ledger.charge_object(instance_sizeof(Program), "the program", 0)
       Program.new(@list_of_states, @list_of_transitions, start, @pattern.capture_count, group_names,
-        @pattern.options)
+        @pattern.options, @limits.max_pike_bytes - workspace_charge, @pattern.source_end)
     end
 
     private def run_tasks : Nil
@@ -524,16 +524,22 @@ module Mica::Regex
       @meter.enforce { Core::Position.new(0_i64) } if @meter.charge(1)
     end
 
-    # Refuses a program whose Pike VM workspace with every capture slot
-    # (16·m·c + 32·m + 8·c bytes) passes `max_pike_bytes`.
-    private def check_pike_bytes : Nil
+    # Refuses a program whose Pike VM workspace passes `max_pike_bytes`,
+    # and returns its charge (`PikeVM.workspace_charge`). The workspace is
+    # the one a search holds: the capture layout (16·m·c + 32·m + 8·c
+    # bytes) when the pattern has groups, the span layout (32·m) when it
+    # has none. A search on a program with groups runs both phases in its
+    # capture workspace, so no second workspace is ever alive beside it.
+    private def check_pike_bytes : Int64
+      states = @list_of_states.size.to_i64
       slots = (@pattern.capture_count.to_i64 + 1) * 2
-      bytes = Program.pike_workspace_bytes(@list_of_states.size.to_i64, slots)
+      captures = @pattern.capture_count > 0
+      bytes = PikeVM.workspace_charge(states, slots, captures)
       limit = @limits.max_pike_bytes
-      return if bytes <= limit
+      return bytes if bytes <= limit
+      layout = captures ? "#{slots} slots" : "no captures"
       raise CompileLimitError.new("max_pike_bytes", limit,
-        "A Pike VM workspace of #{bytes} bytes (#{@list_of_states.size} states, #{slots} slots)",
-        Core::Position.new(0_i64))
+        "A Pike VM workspace of #{bytes} bytes (#{states} states, #{layout})", Core::Position.new(0_i64))
     end
   end
 end

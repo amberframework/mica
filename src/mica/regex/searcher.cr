@@ -32,13 +32,19 @@ module Mica::Regex
   # of later searches stay at or before it, so an iteration call scans each
   # byte at most once; every byte scanned is charged one operation.
   #
+  # **One workspace.** The searcher holds at most one `PikeVM` workspace:
+  # the span layout while only spans are asked for, the capture layout
+  # (which also runs span searches) once captures are, releasing the span
+  # workspace first. Beside it lives at most one `BoundedBacktracker`, sized
+  # within `Program#backtracker_allowance`, so everything a search holds
+  # stays within `CompileLimits#max_pike_bytes`.
+  #
   # WARNING: A searcher belongs to one call and one fiber.
   class Searcher
     # The call's meter.
     getter meter : SearchMeter
 
-    @span_vm : PikeVM? = nil
-    @capture_vm : PikeVM? = nil
+    @pike : PikeVM? = nil
     @backtracker : BoundedBacktracker? = nil
     @span_slots = Slice(Int64).new(2, PikeVM::UNSET)
     @capture_slots : Slice(Int64)
@@ -75,8 +81,9 @@ module Mica::Regex
       case @engine
       in .pike_vm?
         slots = @capture_slots
-        found = capture_vm.search(bytes, byte_index, bytes.size, byte_index, anchored, end_anchored, false, @meter, slots,
-          first_line_end(bytes, byte_index, anchored))
+        want_captures = @program.slot_count > 2
+        found = pike(want_captures).search(bytes, byte_index, bytes.size, byte_index, anchored, end_anchored, false,
+          @meter, slots, first_line_end(bytes, byte_index, anchored), want_captures)
         found ? slots : nil
       in .backtracker?
         slots = @capture_slots
@@ -96,23 +103,25 @@ module Mica::Regex
       check_start(bytes, byte_index)
       anchored = @program.options.anchored? || options.anchored?
       end_anchored = @program.options.end_anchored? || options.end_anchored?
-      span_vm.search(bytes, byte_index, bytes.size, byte_index, anchored, end_anchored, true, @meter, @span_slots,
-        first_line_end(bytes, byte_index, anchored))
+      pike(false).search(bytes, byte_index, bytes.size, byte_index, anchored, end_anchored, true, @meter, @span_slots,
+        first_line_end(bytes, byte_index, anchored), false)
     end
 
     private def find_in_two_phases(bytes : Bytes, byte_index : Int32, anchored : Bool, end_anchored : Bool,
                                    captures : Bool) : Slice(Int64)?
       span = @span_slots
-      return nil unless span_vm.search(bytes, byte_index, bytes.size, byte_index, anchored, end_anchored, false,
-                          @meter, span, first_line_end(bytes, byte_index, anchored))
-      return span if !captures || @program.slot_count == 2
+      want_captures = captures && @program.slot_count > 2
+      return nil unless pike(want_captures).search(bytes, byte_index, bytes.size, byte_index, anchored, end_anchored,
+                          false, @meter, span, first_line_end(bytes, byte_index, anchored), false)
+      return span unless want_captures
       start = span[0].to_i32
       finish = span[1].to_i32
       slots = @capture_slots
       found = if BoundedBacktracker.fits?(@program, finish - start)
                 backtracker.search(bytes, start, finish, byte_index, true, end_anchored, @meter, slots, Int32::MAX)
               else
-                capture_vm.search(bytes, start, finish, byte_index, true, end_anchored, false, @meter, slots, Int32::MAX)
+                pike(true).search(bytes, start, finish, byte_index, true, end_anchored, false, @meter, slots, Int32::MAX,
+                  true)
               end
       unless found && slots[0] == span[0] && slots[1] == span[1]
         raise Mica::Error.new("internal error: the capture pass did not find the span #{start}...#{finish}")
@@ -142,12 +151,15 @@ module Mica::Regex
       end
     end
 
-    private def span_vm : PikeVM
-      @span_vm ||= PikeVM.new(@program, 2)
-    end
-
-    private def capture_vm : PikeVM
-      @capture_vm ||= PikeVM.new(@program, @program.slot_count)
+    # Returns the workspace, in the capture layout when *captures*. A span
+    # workspace is released before a capture one replaces it.
+    private def pike(captures : Bool) : PikeVM
+      if workspace = @pike
+        return workspace if workspace.captures? || !captures
+        workspace.release
+        @pike = nil
+      end
+      @pike = PikeVM.new(@program, captures)
     end
 
     private def backtracker : BoundedBacktracker

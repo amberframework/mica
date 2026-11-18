@@ -56,6 +56,8 @@ module Mica::Regex
     @dupnames = true
     @any_crlf_line_breaks = false
     @inside_quote = false
+    # True while a `#` comment has found no line feed yet.
+    @comment_open = false
     @quantifiable = false
     @pending_repetition : Ast::Repetition? = nil
     @group_count = 0
@@ -99,7 +101,14 @@ module Mica::Regex
       end
       root_frame = @list_of_frames.pop
       root = finish_branches(root_frame)
-      Ast::Pattern.new(root, @group_count, @list_of_group_names, @options, @node_count)
+      source_end = if @inside_quote
+                     Ast::SourceEnd::InQuote
+                   elsif @comment_open
+                     Ast::SourceEnd::InComment
+                   else
+                     Ast::SourceEnd::Closed
+                   end
+      Ast::Pattern.new(root, @group_count, @list_of_group_names, @options, @node_count, source_end)
     end
 
     # ---- Start of pattern ---------------------------------------------------
@@ -256,11 +265,15 @@ module Mica::Regex
     end
 
     private def skip_comment_to_newline : Nil
+      @comment_open = true
       while @pos < @bytes.size
         byte = @bytes[@pos]
         @pos += 1
         charge_work(1)
-        break if byte == '\n'.ord
+        if byte == '\n'.ord
+          @comment_open = false
+          break
+        end
       end
     end
 

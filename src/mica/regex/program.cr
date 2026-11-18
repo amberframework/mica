@@ -76,9 +76,17 @@ module Mica::Regex
     getter list_of_group_names : Array(Ast::GroupName)
     # The options the pattern was compiled with.
     getter options : CompileOptions
+    # The bytes a `BoundedBacktracker` may take: `CompileLimits#max_pike_bytes`
+    # less the charge of the Pike VM workspace a search holds beside it
+    # (`PikeVM.workspace_charge`, capture layout when the program has
+    # groups). The two together stay within `max_pike_bytes`.
+    getter backtracker_allowance : Int64
+    # How the source text ends (see `Ast::SourceEnd`), for `Expression#to_s`.
+    getter source_end : Ast::SourceEnd
 
     def initialize(@list_of_states : Array(State), @list_of_transitions : Array(Transition), @start_state : Int32,
-                   @capture_count : Int32, @list_of_group_names : Array(Ast::GroupName), @options : CompileOptions)
+                   @capture_count : Int32, @list_of_group_names : Array(Ast::GroupName), @options : CompileOptions,
+                   @backtracker_allowance : Int64, @source_end : Ast::SourceEnd = Ast::SourceEnd::Closed)
     end
 
     # Returns the number of states (m in the bounds).
@@ -90,6 +98,13 @@ module Mica::Regex
     # group, group 0 included.
     def slot_count : Int32
       (@capture_count + 1) * 2
+    end
+
+    # Returns the bytes of a span-layout Pike VM workspace (no captures):
+    # two sparse sets (16·m), the one-word closure stack (8·m) and two
+    # `Int32` start tables (8·m), 32·m in all.
+    def self.span_workspace_bytes(state_count : Int64) : Int64
+      Preflight.multiply(32_i64, state_count)
     end
 
     # Returns the bytes of a Pike VM workspace for *slot_count* slots: two

@@ -148,7 +148,7 @@ is no default and no global switch.
 | `max_captures` | 64 | 1024 | at each capturing group |
 | `max_class_ranges` | 4096 | 65536 | while a class is merged, before its range list grows past the limit |
 | `max_program_states` | 100,000 | 1,000,000 | by the size preflight, before `Hir` exists |
-| `max_pike_bytes` | 4 MiB | 64 MiB | when compilation finishes, against the Pike VM workspace with every slot |
+| `max_pike_bytes` | 4 MiB | 64 MiB | when compilation finishes, against the one Pike VM workspace a search holds (span layout without groups, capture layout with them); the bounded backtracker gets what is left |
 | `max_compile_bytes` | 4 MiB | 64 MiB | by the allocation ledger, before each allocation |
 
 A limit that trips raises `Mica::Regex::CompileLimitError`, a
@@ -242,7 +242,7 @@ Mica::Regex::Expression.new(",\\s*", compile_limits: Mica::Regex::CompileLimits:
 | `regex.match(str, pos, options)`, `match!`, `match_at_byte_index`, `matches?`, `matches_at_byte_index?` | the same, plus a required `limits:` and an optional `timeout:` |
 | `str.scan(regex)`, `str.gsub(regex, ...)`, `str.sub(regex, ...)`, `str.split(regex, ...)` | `expression.scan(str, ...)`, `gsub`, `sub`, `split` (every form: string with backreferences, hash, block), plus `each_match` |
 | `regex.source`, `options`, `capture_count`, `name_table`, `to_s`, `==`, `hash` | the same |
-| `Regex.escape`, `Regex.needs_escape?`, `Regex.union` | `Mica::Regex.escape`, `needs_escape?`, `union_source` (returns the source; compile it with the limits that fit) |
+| `Regex.escape`, `Regex.needs_escape?`, `Regex.union` | `Mica::Regex.escape`, `needs_escape?`, `union_source` (returns the source; compile it with the limits that fit). Each expression member keeps every option with an inline form, `n`, `r`, `U`, `xx` and `(?aD)` to `(?aT)` included, so the union matches exactly what the member matches; a member with `Anchored`, `FirstLine`, `DollarEndOnly` or `EndAnchored` raises `ArgumentError` |
 | `MatchData#[]`, `[]?` (index, name, range), `begin`, `end`, `byte_begin`, `byte_end`, `pre_match`, `post_match`, `captures`, `named_captures`, `to_a`, `to_h`, `size`, `group_size`, `string`, `regex` | the same, with the same rules: `nil` for a group that did not take part, `""` for an empty one, `IndexError` and `KeyError` as stdlib raises them, and duplicate names resolved as stdlib's PCRE2 binding resolves them |
 
 Differences, all deliberate:
@@ -319,7 +319,9 @@ A search runs in two phases (roadmap 6.2.1, without the lazy DFA that R3
 adds):
 
 1. A **Pike VM** tracking only group 0 finds the leftmost-first span
-   `[s, e)`. Time O(m·(n + 1)).
+   `[s, e)`: each thread carries only the position where it started.
+   Time O(m·(n + 1)); memory 32·m bytes (two sparse sets, a one-word
+   closure stack and two start tables).
 2. Only when captures are asked for, a second engine runs anchored at s
    and reading no byte at or after e (cutting bytes only removes matches,
    so the highest-priority match from s still ends at e; assertions still
@@ -327,14 +329,25 @@ adds):
    - the **bounded backtracker** when m × (L + 1) ≤ 256 Ki bits, for
      L = e − s: a depth-first search in priority order that visits each
      (state, position) pair once. Time O(m·(L + 1) + c); memory m·(L + 1)/8
-     bytes of bitset plus at most m·(L + 1) jobs and c slots;
+     bytes of bitset, a job stack of m·(L + 1) + 1 entries and c slots,
+     used only when that fits what the Pike VM workspace leaves of
+     `max_pike_bytes` (`Program#backtracker_allowance`);
    - otherwise a **Pike VM** with every slot. Time O(m·c·(L + 1)); memory
      16·m·c + 32·m + 8·c bytes in one pointer-free buffer (two slot tables,
      two sparse sets, the closure stack of m frames, one scratch vector).
 
-`max_pike_bytes` is checked at compile time against that workspace with
-every slot (c = 2 × (groups + 1)), so at the untrusted limit of 4 MiB a
-program without groups can have about 65,000 states.
+A search holds one Pike VM workspace. A program without groups only
+ever needs the 32·m-byte span layout. A program with groups gets the
+capture layout (c = 2 × (groups + 1)) the first time captures are asked
+for, and runs phase 1 in it as well, so the span and capture workspaces
+are never alive together. `max_pike_bytes` is checked at compile time
+against that workspace's charge (`PikeVM.workspace_charge`: the buffer and
+its header object, each rounded to the collector's granule), and the
+bounded backtracker only runs within what remains, so everything a search
+holds stays within the limit. At the untrusted limit of 4 MiB a program
+without groups can have about 131,000 states (more than
+`max_program_states` allows), and `\A(a){14000}` (42,004 states, 4
+slots) fits while `\A(a){15000}` does not.
 
 **Semantics** are PCRE2's leftmost-first priority, including two rules an
 automaton has to build in:

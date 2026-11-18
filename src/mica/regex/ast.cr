@@ -267,6 +267,16 @@ module Mica::Regex
     # A named group and its number, in pattern order (the name table).
     record GroupName, group_name : String, capture_index : Int32
 
+    # How the source text ends: closed, or inside an extended-mode `#`
+    # comment or a `\Q` quote that runs to the end. Text appended after
+    # the source (as `Expression#to_s` appends a closing parenthesis)
+    # needs a line feed or a `\E` first to be read as pattern again.
+    enum SourceEnd
+      Closed
+      InComment
+      InQuote
+    end
+
     # The parse of a whole pattern.
     class Pattern
       # The root node.
@@ -281,9 +291,11 @@ module Mica::Regex
       getter options : CompileOptions
       # Syntax nodes created (the parse's share of the compile work).
       getter node_count : Int32
+      # How the source text ends.
+      getter source_end : SourceEnd
 
       def initialize(@root : Node, @capture_count : Int32, @list_of_group_names : Array(GroupName),
-                     @options : CompileOptions, @node_count : Int32)
+                     @options : CompileOptions, @node_count : Int32, @source_end : SourceEnd = SourceEnd::Closed)
       end
     end
   end
