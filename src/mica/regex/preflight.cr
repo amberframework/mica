@@ -17,7 +17,7 @@ module Mica::Regex
   # | alternation of k branches | the sum + (k − 1) splits |
   # | capturing group | child + 2 (two slot saves) |
   # | `{n,m}` | child × m + (m − n) splits |
-  # | `{n,}` | child × max(n, 1) + 1 loop split |
+  # | `{n,}` | child × max(n, 1) + 1 loop split, plus one more child when the child can match the empty string (the compiler's fresh-iteration copy) |
   # | whole pattern | root + group 0 (2) + match (1) + the unanchored `(?s:.)*?` prefix |
   #
   # Class counts come from `Utf8Sequences`, the routine the compiler uses,
@@ -36,6 +36,8 @@ module Mica::Regex
       capacity = Math.max(pattern.node_count, 1)
       ledger.charge_array(capacity, sizeof(Int64), "the preflight value stack", pattern.root.offset)
       list_of_values = Array(Int64).new(capacity)
+      ledger.charge_array(capacity, sizeof(Bool), "the preflight nullability stack", pattern.root.offset)
+      list_of_nullable = Array(Bool).new(capacity)
       limit = limits.max_program_states
       # The first subtree over the limit locates the error; the decision
       # waits for the root, because a {0} repetition can cancel a subtree.
@@ -43,8 +45,13 @@ module Mica::Regex
       Ast.each_post_order(pattern.root, pattern.node_count, ledger) do |node, child_count|
         offset = node.offset
         meter.enforce { Core::Position.new(offset.to_i64) } if meter.charge(1)
-        value = node_states(node, list_of_values, child_count, meter)
-        child_count.times { list_of_values.pop }
+        nullable = node_nullable?(node, list_of_nullable, child_count)
+        value = node_states(node, list_of_values, list_of_nullable, child_count, meter)
+        child_count.times do
+          list_of_values.pop
+          list_of_nullable.pop
+        end
+        list_of_nullable << nullable
         first_offender ||= offset if value > limit
         list_of_values << value
       end
@@ -109,8 +116,8 @@ module Mica::Regex
 
     # The bound for *node*, whose *child_count* children's bounds are on
     # top of *list_of_values*.
-    private def self.node_states(node : Ast::Node, list_of_values : Array(Int64), child_count : Int32,
-                                 meter : Core::WorkMeter) : Int64
+    private def self.node_states(node : Ast::Node, list_of_values : Array(Int64), list_of_nullable : Array(Bool),
+                                 child_count : Int32, meter : Core::WorkMeter) : Int64
       first_child = list_of_values.size - child_count
       case node
       when Ast::Literal
@@ -142,7 +149,8 @@ module Mica::Regex
         node.capturing? ? add(child, 2_i64) : child
       when Ast::Repetition
         child = child_count > 0 ? list_of_values[first_child] : 0_i64
-        repetition_states(child, node.minimum, node.maximum)
+        child_nullable = child_count == 0 || list_of_nullable[first_child]
+        repetition_states(child, node.minimum, node.maximum, child_nullable)
       else
         raise SyntaxError.new("internal error: unknown syntax node #{node.class}", Core::Position.new(node.offset.to_i64))
       end
@@ -156,12 +164,37 @@ module Mica::Regex
     end
 
     # `{n,m}`: m copies, the last m − n optional (one split each); `{n,}`:
-    # max(n, 1) copies and a loop split.
-    def self.repetition_states(child : Int64, minimum : Int32, maximum : Int32?) : Int64
+    # max(n, 1) copies and a loop split, plus a second copy of the looping
+    # body when it can match the empty string (*child_nullable*): the
+    # compiler runs each iteration in a fresh copy until it consumes a byte,
+    # so an empty iteration leaves the loop as PCRE2 leaves it.
+    def self.repetition_states(child : Int64, minimum : Int32, maximum : Int32?, child_nullable : Bool = false) : Int64
       if maximum
         add(multiply(child, maximum.to_i64), (maximum - minimum).to_i64)
       else
-        add(multiply(child, Math.max(minimum, 1).to_i64), 1_i64)
+        copies = Math.max(minimum, 1).to_i64 + (child_nullable ? 1 : 0)
+        add(multiply(child, copies), 1_i64)
+      end
+    end
+
+    # Returns true when *node* can match the empty string, from its
+    # children's answers on top of *list_of_nullable*. Assertions count as
+    # nullable (they consume nothing).
+    private def self.node_nullable?(node : Ast::Node, list_of_nullable : Array(Bool), child_count : Int32) : Bool
+      first_child = list_of_nullable.size - child_count
+      case node
+      when Ast::Literal, Ast::CharClass, Ast::AnyCharacter, Ast::LineBreak
+        false
+      when Ast::Concatenation
+        (first_child...list_of_nullable.size).all? { |index| list_of_nullable[index] }
+      when Ast::Alternation
+        (first_child...list_of_nullable.size).any? { |index| list_of_nullable[index] }
+      when Ast::Repetition
+        node.minimum == 0 || child_count == 0 || list_of_nullable[first_child]
+      when Ast::Group
+        child_count == 0 || list_of_nullable[first_child]
+      else
+        true
       end
     end
 

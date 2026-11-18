@@ -1,0 +1,457 @@
+module Mica::Regex
+  # A compiled regular expression, Mica's counterpart of Crystal's `Regex`.
+  # Its method names and return types follow `Regex`, and its matches are
+  # `Mica::Regex::MatchData` values that follow `Regex::MatchData`, so
+  # moving code from stdlib `Regex` to Mica is mostly a type rename plus
+  # the limits:
+  #
+  # - compiling takes a required `compile_limits:` (`CompileLimits`), and
+  #   every search takes a required `limits:` (`SearchLimits`), with an
+  #   optional wall-clock `timeout:`;
+  # - the iteration methods Crystal puts on `String` (`scan`, `gsub`,
+  #   `sub`, `split`) are methods of the expression that take the string;
+  # - the native API does not set `$~` (and so `$1`); use the returned
+  #   `MatchData`. The operators `=~` and `===` have no form that can take
+  #   the required limits, so they are left out.
+  #
+  # Every search runs in time linear in the haystack (see `Searcher`,
+  # `PikeVM` and `BoundedBacktracker` for the bounds) and fails with a
+  # `SearchLimitError` instead of running past its limits. The haystack
+  # must be valid UTF-8 (`Mica::EncodingError` otherwise; the
+  # `MatchInvalidUtf` mode arrives in milestone R4).
+  #
+  # An expression is immutable and can be shared between fibers; each call
+  # allocates its own workspace.
+  #
+  # ```
+  # date = Mica::Regex::Expression.new("(?<year>\\d{4})-(?<month>\\d{2})",
+  #   compile_limits: Mica::Regex::CompileLimits::TRUSTED_PATTERN)
+  # limits = Mica::Regex::SearchLimits::REQUEST
+  # match = date.match("due 2026-11", limits: limits)
+  # match.try(&.["year"])                                                    # => "2026"
+  # date.gsub("2026-11 and 2027-01", "\\k<month>/\\k<year>", limits: limits) # => "11/2026 and 01/2027"
+  # ```
+  class Expression
+    # The pattern as written.
+    getter source : String
+    # The options it was compiled with.
+    getter options : CompileOptions
+    # The dialect it was read in.
+    getter dialect : Dialect
+    # :nodoc:
+    getter program : Program
+    # Named groups in PCRE2 name-table order: sorted by name (byte order),
+    # duplicates of a name in pattern order, one entry per name and number.
+    getter list_of_name_entries : Array(Ast::GroupName)
+
+    # Compiles *source* under *compile_limits*. Raises `SyntaxError` (or
+    # `UnsupportedConstructError`) for a pattern the dialect rejects or
+    # leaves out, and `CompileLimitError` when a limit trips.
+    def initialize(@source : String, @options : CompileOptions = CompileOptions::None, *,
+                   compile_limits : CompileLimits, @dialect : Dialect = Dialect::Crystal)
+      if @options.match_invalid_utf?
+        raise ArgumentError.new("CompileOptions::MatchInvalidUtf arrives in Mica::Regex milestone R4")
+      end
+      @program = Syntax.compile(@source, dialect: @dialect, compile_limits: compile_limits, options: @options)
+      @list_of_name_entries = Expression.name_entries(@program.list_of_group_names)
+    end
+
+    # The name table entries of *list_of_group_names*, in PCRE2 order.
+    protected def self.name_entries(list_of_group_names : Array(Ast::GroupName)) : Array(Ast::GroupName)
+      unique = [] of Ast::GroupName
+      list_of_group_names.each do |entry|
+        unique << entry unless unique.any? { |seen| seen.group_name == entry.group_name && seen.capture_index == entry.capture_index }
+      end
+      unique.each_with_index.to_a.sort! do |(left, left_index), (right, right_index)|
+        order = left.group_name.to_slice <=> right.group_name.to_slice
+        order == 0 ? left_index <=> right_index : order
+      end.map(&.[0])
+    end
+
+    # Returns the number of capturing groups.
+    def capture_count : Int32
+      @program.capture_count
+    end
+
+    # Returns a hash from group number to name for every named group.
+    def name_table : Hash(Int32, String)
+      table = {} of Int32 => String
+      @list_of_name_entries.each { |entry| table[entry.capture_index] = entry.group_name }
+      table
+    end
+
+    # Returns the first match in *string* at or after character index
+    # *pos*, or nil.
+    def match(string : String, pos : Int32 = 0, options : MatchOptions = MatchOptions::None, *,
+              limits : SearchLimits, timeout : Time::Span? = nil) : MatchData?
+      byte_index = string.char_index_to_byte_index(pos)
+      return nil unless byte_index
+      match_at_byte_index(string, byte_index, options, limits: limits, timeout: timeout)
+    end
+
+    # Like `match`, but raises `MatchNotFoundError` when nothing matches.
+    def match!(string : String, pos : Int32 = 0, options : MatchOptions = MatchOptions::None, *,
+               limits : SearchLimits, timeout : Time::Span? = nil) : MatchData
+      match(string, pos, options, limits: limits, timeout: timeout) || raise MatchNotFoundError.new("Match not found")
+    end
+
+    # Returns the first match in *string* at or after byte *byte_index*, or
+    # nil (also when *byte_index* is past the end). Raises `ArgumentError`
+    # when *byte_index* is negative or inside a character.
+    def match_at_byte_index(string : String, byte_index : Int32 = 0, options : MatchOptions = MatchOptions::None, *,
+                            limits : SearchLimits, timeout : Time::Span? = nil) : MatchData?
+      searcher = Searcher.new(@program, string, limits, timeout)
+      found = searcher.find(byte_index, options, true)
+      found ? MatchData.new(self, string, byte_index, found) : nil
+    end
+
+    # Returns true when *string* has a match at or after character index
+    # *pos*. Stops at the first match it reaches.
+    def matches?(string : String, pos : Int32 = 0, options : MatchOptions = MatchOptions::None, *,
+                 limits : SearchLimits, timeout : Time::Span? = nil) : Bool
+      byte_index = string.char_index_to_byte_index(pos)
+      return false unless byte_index
+      matches_at_byte_index?(string, byte_index, options, limits: limits, timeout: timeout)
+    end
+
+    # Returns true when *string* has a match at or after byte *byte_index*.
+    def matches_at_byte_index?(string : String, byte_index : Int32 = 0, options : MatchOptions = MatchOptions::None, *,
+                               limits : SearchLimits, timeout : Time::Span? = nil) : Bool
+      Searcher.new(@program, string, limits, timeout).matches?(byte_index, options)
+    end
+
+    # Yields each successive match in *string*, as `String#scan` finds
+    # them: after an empty match the next search starts one character
+    # later. All searches share the call's work allowance.
+    def each_match(string : String, options : MatchOptions = MatchOptions::None, *, limits : SearchLimits,
+                   timeout : Time::Span? = nil, & : MatchData ->) : Nil
+      searcher = Searcher.new(@program, string, limits, timeout)
+      byte_offset = 0
+      while found = searcher.find(byte_offset, options, true)
+        match = MatchData.new(self, string, byte_offset, found)
+        yield match
+        index = match.byte_begin(0)
+        match_bytesize = match.byte_end(0) - index
+        match_bytesize += char_bytesize_at(string, index) if match_bytesize == 0
+        byte_offset = index + match_bytesize
+      end
+    end
+
+    # Yields each successive match in *string* (as `each_match`) and
+    # returns *string*, like `String#scan(Regex, &)`.
+    def scan(string : String, options : MatchOptions = MatchOptions::None, *, limits : SearchLimits,
+             timeout : Time::Span? = nil, & : MatchData ->) : String
+      each_match(string, options, limits: limits, timeout: timeout) { |match| yield match }
+      string
+    end
+
+    # Returns every successive match in *string*, like
+    # `String#scan(Regex)`.
+    def scan(string : String, options : MatchOptions = MatchOptions::None, *, limits : SearchLimits,
+             timeout : Time::Span? = nil) : Array(MatchData)
+      list_of_matches = [] of MatchData
+      each_match(string, options, limits: limits, timeout: timeout) { |match| list_of_matches << match }
+      list_of_matches
+    end
+
+    # Replaces every match in *string* with the block's value (its
+    # `to_s`), like `String#gsub(Regex, &)`. The block gets the matched
+    # text and the match. Raises `SearchLimitError` naming
+    # `max_output_bytes` when the result would pass it.
+    def gsub(string : String, options : MatchOptions = MatchOptions::None, *, limits : SearchLimits,
+             timeout : Time::Span? = nil, & : String, MatchData -> _) : String
+      replace(string, options, limits, timeout, true) do |matched, match, output|
+        output << yield matched, match
+      end
+    end
+
+    # Replaces every match with *replacement*. With *backreferences*,
+    # `\0`..`\9` insert a group, `\k<name>` a named group and `\\` a
+    # backslash, as in `String#gsub(Regex, String)`.
+    def gsub(string : String, replacement : String, backreferences : Bool = true,
+             options : MatchOptions = MatchOptions::None, *, limits : SearchLimits,
+             timeout : Time::Span? = nil) : String
+      replace(string, options, limits, timeout, true) do |_, match, output|
+        write_replacement(output, replacement, match, backreferences)
+      end
+    end
+
+    # Replaces every match with the value *hash* has for the matched text
+    # (nothing when it has none), like `String#gsub(Regex, Hash)`.
+    def gsub(string : String, hash : Hash(String, _) | NamedTuple, options : MatchOptions = MatchOptions::None, *,
+             limits : SearchLimits, timeout : Time::Span? = nil) : String
+      gsub(string, options, limits: limits, timeout: timeout) { |matched| hash[matched]? }
+    end
+
+    # Replaces the first match with the block's value, like
+    # `String#sub(Regex, &)`.
+    def sub(string : String, options : MatchOptions = MatchOptions::None, *, limits : SearchLimits,
+            timeout : Time::Span? = nil, & : String, MatchData -> _) : String
+      replace(string, options, limits, timeout, false) do |matched, match, output|
+        output << yield matched, match
+      end
+    end
+
+    # Replaces the first match with *replacement* (backreferences as in
+    # `gsub`).
+    def sub(string : String, replacement : String, backreferences : Bool = true,
+            options : MatchOptions = MatchOptions::None, *, limits : SearchLimits,
+            timeout : Time::Span? = nil) : String
+      replace(string, options, limits, timeout, false) do |_, match, output|
+        write_replacement(output, replacement, match, backreferences)
+      end
+    end
+
+    # Replaces the first match with the value *hash* has for it.
+    def sub(string : String, hash : Hash(String, _) | NamedTuple, options : MatchOptions = MatchOptions::None, *,
+            limits : SearchLimits, timeout : Time::Span? = nil) : String
+      sub(string, options, limits: limits, timeout: timeout) { |matched| hash[matched]? }
+    end
+
+    # Splits *string* at each match, like `String#split(Regex)`: captured
+    # groups are included, at most *limit* pieces are made, and empty
+    # pieces are dropped with *remove_empty*. Raises `SearchLimitError`
+    # naming `max_output_bytes` when the pieces would pass it.
+    def split(string : String, limit : Int32? = nil, *, remove_empty : Bool = false,
+              options : MatchOptions = MatchOptions::None, limits : SearchLimits,
+              timeout : Time::Span? = nil) : Array(String)
+      list_of_pieces = [] of String
+      split(string, limit, remove_empty: remove_empty, options: options, limits: limits, timeout: timeout) do |piece|
+        list_of_pieces << piece
+      end
+      list_of_pieces
+    end
+
+    # Yields each piece of `split`.
+    def split(string : String, limit : Int32? = nil, *, remove_empty : Bool = false,
+              options : MatchOptions = MatchOptions::None, limits : SearchLimits,
+              timeout : Time::Span? = nil, & : String ->) : Nil
+      output = OutputMeter.new(limits.max_output_bytes)
+      if string.empty?
+        yield "" unless remove_empty
+        return
+      end
+      if limit && limit <= 1
+        output.add(string.bytesize)
+        yield string
+        return
+      end
+      if @source.empty?
+        split_by_character(string, limit, output) { |piece| yield piece }
+        return
+      end
+      searcher = Searcher.new(@program, string, limits, timeout)
+      count = 0
+      match_offset = slice_offset = 0
+      while found = searcher.find(match_offset, options, true)
+        match = MatchData.new(self, string, match_offset, found)
+        index = match.byte_begin(0)
+        next_offset = match.byte_end(0)
+        if next_offset == slice_offset
+          match_offset = next_offset + char_bytesize_at(string, next_offset)
+        else
+          slice_size = index - slice_offset
+          unless remove_empty && slice_size == 0
+            output.add(slice_size)
+            yield string.byte_slice(slice_offset, slice_size)
+          end
+          count += 1
+          1.upto(match.size - 1) do |group|
+            if piece = match[group]?
+              output.add(piece.bytesize)
+              yield piece
+            end
+          end
+          slice_offset = match_offset = next_offset
+        end
+        break if limit && count + 1 == limit
+        break if match_offset >= string.bytesize
+      end
+      unless remove_empty && slice_offset == string.bytesize
+        output.add(string.bytesize - slice_offset)
+        yield string.byte_slice(slice_offset)
+      end
+    end
+
+    private def split_by_character(string : String, limit : Int32?, output : OutputMeter, & : String ->) : Nil
+      yielded = 0
+      string.each_char do |char|
+        output.add(char.bytesize)
+        yield char.to_s
+        yielded += 1
+        break if limit && yielded + 1 == limit
+      end
+      if limit && yielded != string.size
+        rest = string[yielded..-1]
+        output.add(rest.bytesize)
+        yield rest
+      end
+    end
+
+    # Copies *string* with its matches (every match, or the first)
+    # replaced by what the block writes.
+    private def replace(string : String, options : MatchOptions, limits : SearchLimits, timeout : Time::Span?,
+                        every : Bool, & : String, MatchData, IO ->) : String
+      searcher = Searcher.new(@program, string, limits, timeout)
+      byte_offset = 0
+      found = searcher.find(byte_offset, options, true)
+      return string unless found
+      output = OutputMeter.new(limits.max_output_bytes)
+      last_byte_offset = 0
+      String.build(string.bytesize) do |buffer|
+        while found
+          match = MatchData.new(self, string, byte_offset, found)
+          index = match.byte_begin(0)
+          output.add(index - last_byte_offset)
+          buffer.write(string.to_slice[last_byte_offset, index - last_byte_offset])
+          matched = match[0]
+          before = buffer.bytesize
+          yield matched, match, buffer
+          output.add(buffer.bytesize - before)
+          if matched.bytesize == 0
+            byte_offset = index + char_bytesize_at(string, index)
+            last_byte_offset = index
+          else
+            byte_offset = index + matched.bytesize
+            last_byte_offset = byte_offset
+          end
+          break unless every
+          found = searcher.find(byte_offset, options, true)
+        end
+        if last_byte_offset < string.bytesize
+          output.add(string.bytesize - last_byte_offset)
+          buffer.write(string.to_slice[last_byte_offset..])
+        end
+      end
+    end
+
+    # Writes *replacement* with its backreferences expanded, as
+    # `String#scan_backreferences` does.
+    private def write_replacement(output : IO, replacement : String, match : MatchData, backreferences : Bool) : Nil
+      unless backreferences
+        output << replacement
+        return
+      end
+      bytes = replacement.to_slice
+      first_index = 0
+      index = 0
+      while backslash = bytes.index('\\'.ord.to_u8, index)
+        index = backslash + 1
+        break if index >= bytes.size
+        char = bytes[index].unsafe_chr
+        case char
+        when '\\'
+          output.write(bytes[first_index, index - first_index])
+          index += 1
+          first_index = index
+        when '0'..'9'
+          output.write(bytes[first_index, index - 1 - first_index])
+          output << match[char - '0']?
+          index += 1
+          first_index = index
+        when 'k'
+          index += 1
+          next unless index < bytes.size && bytes[index] == '<'.ord
+          output.write(bytes[first_index, index - 2 - first_index])
+          index += 1
+          start_index = index
+          end_index = bytes.index('>'.ord.to_u8, start_index)
+          raise ArgumentError.new("Missing ending '>' for '\\\\k<...'") unless end_index
+          name = replacement.byte_slice(start_index, end_index - start_index)
+          capture = match[name]?
+          raise IndexError.new("Undefined group name reference: #{name.inspect}") unless capture
+          output << capture
+          index = end_index + 1
+          first_index = index
+        end
+      end
+      output.write(bytes[first_index..]) if first_index < bytes.size
+    end
+
+    private def char_bytesize_at(string : String, byte_index : Int32) : Int32
+      return 1 if byte_index >= string.bytesize
+      Core::UTF8.sequence_length(string.to_slice[byte_index])
+    end
+
+    def ==(other : Expression) : Bool
+      @source == other.source && @options == other.options && @dialect == other.dialect
+    end
+
+    def hash(hasher)
+      hasher = @source.hash(hasher)
+      hasher = @options.hash(hasher)
+      @dialect.hash(hasher)
+    end
+
+    # Writes the expression as an inline-option group, as `Regex#to_s`
+    # does: `(?i-msx:source)`.
+    def to_s(io : IO) : Nil
+      io << "(?"
+      io << 'i' if @options.ignore_case?
+      io << 'm' if @options.multiline?
+      io << 's' if @options.dot_all?
+      io << 'x' if @options.extended?
+      io << '-'
+      io << 'i' unless @options.ignore_case?
+      io << 'm' unless @options.multiline?
+      io << 's' unless @options.dot_all?
+      io << 'x' unless @options.extended?
+      io << ':' << @source << ')'
+    end
+
+    def inspect(io : IO) : Nil
+      io << "Mica::Regex::Expression(" << @source.inspect << ", " << @options << ')'
+    end
+
+    # The bytes `gsub`, `sub` and `split` produce, against
+    # `SearchLimits#max_output_bytes`.
+    private class OutputMeter
+      def initialize(@limit : Int64)
+        @bytes = 0_i64
+      end
+
+      def add(count : Int) : Nil
+        @bytes += count
+        return if @bytes <= @limit
+        raise SearchLimitError.new("max_output_bytes", @limit, "An output of #{@bytes} bytes",
+          Core::Position.new(0_i64))
+      end
+    end
+  end
+
+  # Compiles *pattern* in *dialect* under *compile_limits* (see
+  # `Expression.new`).
+  def self.compile(pattern : String, *, dialect : Dialect, compile_limits : CompileLimits,
+                   options : CompileOptions = CompileOptions::None) : Expression
+    Expression.new(pattern, options, compile_limits: compile_limits, dialect: dialect)
+  end
+
+  # The characters `escape` puts a backslash before (Crystal's
+  # `Regex::SPECIAL_CHARACTERS`).
+  SPECIAL_CHARACTERS = {' ', '.', '\\', '+', '*', '?', '[', '^', ']', '$', '(', ')', '{', '}', '=', '!', '<', '>',
+                        '|', ':', '-'}
+
+  # Returns *text* with every special character escaped, so it matches
+  # itself as a pattern (Crystal's `Regex.escape`).
+  def self.escape(text : String) : String
+    String.build(text.bytesize) do |result|
+      text.each_byte do |byte|
+        result << '\\' if byte < 0x80 && SPECIAL_CHARACTERS.includes?(byte.unsafe_chr)
+        result.write_byte(byte)
+      end
+    end
+  end
+
+  # Returns true when *text* contains a special character.
+  def self.needs_escape?(text : String) : Bool
+    text.each_char { |char| return true if SPECIAL_CHARACTERS.includes?(char) }
+    false
+  end
+
+  # Returns the source of an expression that matches any of *patterns*:
+  # strings are escaped, expressions keep their options as inline groups
+  # (Crystal's `Regex.union`). Compile it with the limits that fit.
+  def self.union_source(patterns : Enumerable(Expression | String)) : String
+    patterns.join('|') { |pattern| pattern.is_a?(String) ? escape(pattern) : pattern.to_s }
+  end
+end

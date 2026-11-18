@@ -52,6 +52,24 @@ module Mica::Regex
       super("#{detail} exceeds #{@limit_name} (#{@limit_value})", position)
     end
   end
+
+  # Raised when a search needs more than its `SearchLimits` allow (work or
+  # output); `limit_name` and `limit_value` name the limit.
+  class SearchLimitError < Mica::LimitExceededError
+    # The name of the limit, for example "max_work".
+    getter limit_name : String
+
+    # The limit's value for this call.
+    getter limit_value : Int64
+
+    def initialize(@limit_name : String, @limit_value : Int64, detail : String, position : Core::Position)
+      super("#{detail} exceeds #{@limit_name} (#{@limit_value})", position)
+    end
+  end
+
+  # Raised by `Expression#match!` when nothing matches.
+  class MatchNotFoundError < Mica::Error
+  end
 end
 
 require "./regex/dialect"
@@ -68,3 +86,14 @@ require "./regex/class_lowering"
 require "./regex/preflight"
 require "./regex/translator"
 require "./regex/syntax"
+require "./regex/program"
+require "./regex/look"
+require "./regex/compiler"
+require "./regex/match_options"
+require "./regex/search_limits"
+require "./regex/search_meter"
+require "./regex/pike_vm"
+require "./regex/bounded_backtracker"
+require "./regex/searcher"
+require "./regex/expression"
+require "./regex/match_data"

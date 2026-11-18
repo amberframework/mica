@@ -1,4 +1,5 @@
-# Requirements for Mica::Regex milestone R1 (the Crystal-dialect front end):
+# Requirements for Mica::Regex milestones R1 (the Crystal-dialect front end)
+# and R2 (the Pike VM, the bounded backtracker and the native search API):
 # the PCRE2 10.49 pattern syntax subset it accepts, the constructs it
 # refuses by name, its compile limits and allocation ledger, Unicode tables
 # and case folding, and the complexity of compiling. The PCRE2 testinput
@@ -23,3 +24,8 @@ REGEX-R1-hir	docs/regex.md Hir	Patterns translate to Hir with folded classes, ex
 REGEX-R1-pcre2-census	docs/regex.md PCRE2 census	Every PCRE2 10.49 testinput pattern is classified; Mica and PCRE2 agree on acceptance except for listed exclusions and divergences
 REGEX-R1-compile-complexity	docs/regex.md Limits	Compile work grows linearly with pattern size, and the roadmap 6.8 families are refused under max_compile_bytes
 REGEX-R1-fuzz	docs/regex.md Fuzzing	Random and mutated patterns end in a result or a Mica::Error, never a crash
+REGEX-R2-compiler	docs/regex.md Engines	Hir compiles to a byte-level Thompson NFA with UTF-8 automata, within the preflight bound, checking max_program_states while emitting and max_pike_bytes when done
+REGEX-R2-semantics	docs/regex.md Engines	Searches report the leftmost-first match with PCRE2's meanings: an empty group iteration ends the repetition, \R is atomic, anchors and word boundaries follow the Crystal dialect
+REGEX-R2-api	docs/regex.md Native API	Expression and MatchData mirror Regex and Regex::MatchData (match, match!, match_at_byte_index, matches?, captures, named groups, name table, escape, union)
+REGEX-R2-iteration	docs/regex.md Native API	each_match, scan, gsub, sub and split follow String#scan, #gsub, #sub and #split, with one work allowance per call
+REGEX-R2-limits	docs/regex.md Search limits	Every search takes required SearchLimits; running out of work or output raises SearchLimitError naming the limit, and a timeout raises DeadlineExceededError

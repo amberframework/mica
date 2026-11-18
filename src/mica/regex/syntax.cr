@@ -68,6 +68,21 @@ module Mica::Regex
       Translator.translate(parsed, dialect, ledger, work_meter)
     end
 
+    # Compiles *pattern* into the `Program` the engines run: the front half,
+    # the translation to `Hir`, and the NFA compiler, all charged to one
+    # allocation ledger under *compile_limits*. The compiler's work is
+    # bounded by the preflight's state estimate, which is added to the
+    # meter's units. `Expression.new` is the public way in.
+    def self.compile(pattern : String | Bytes, *, dialect : Dialect, compile_limits : CompileLimits,
+                     options : CompileOptions = CompileOptions::None, meter : Core::WorkMeter? = nil) : Program
+      work_meter = meter || Core::WorkMeter.new(COMPILE_WORK_BUDGET)
+      ledger = new_ledger(compile_limits, meter)
+      parsed, estimate = front_half(pattern, dialect, compile_limits, options, ledger, work_meter)
+      hir = Translator.translate(parsed, dialect, ledger, work_meter)
+      work_meter.add_units(estimate)
+      Compiler.compile(hir, estimate, compile_limits, ledger, work_meter)
+    end
+
     # Parses *pattern* into its syntax tree (no class lowering or preflight).
     def self.parse(pattern : String | Bytes, *, dialect : Dialect, compile_limits : CompileLimits,
                    options : CompileOptions = CompileOptions::None, meter : Core::WorkMeter? = nil) : Ast::Pattern
