@@ -33,6 +33,18 @@ module SearchComplexity
     searcher.meter.operations
   end
 
+  # Runs every search of a scan (each_match's offsets) on one searcher and
+  # returns the work it charged.
+  def self.scan_work(program : Mica::Regex::Program, haystack : String) : Int64
+    searcher = Mica::Regex::Searcher.new(program, haystack, WIDE, nil)
+    offset = 0
+    while found = searcher.find(offset, Mica::Regex::MatchOptions::None, false)
+      finish = found[1].to_i32
+      offset = finish == found[0] ? finish + 1 : finish
+    end
+    searcher.meter.operations
+  end
+
   # Checks the envelope and the growth of *measurements*, records them,
   # and returns a description of any failure.
   def self.check(name : String, measurements : Array(Measurement), envelope : Float64, lower_bound : Bool) : Array(String)
@@ -147,6 +159,29 @@ describe "Mica::Regex search complexity" do
         bound = 2_i64 * program.state_count * (haystack.bytesize + 1) + program.slot_count + haystack.bytesize
         (operations <= bound).should be_true
       end
+    end
+  end
+
+  describe "iteration" do
+    it_satisfies "REGEX-R2-complexity", "a FirstLine scan stays linear in n: the line feed search is made once and charged" do
+      program = SearchComplexity.program("a")
+      first_line = Mica::Regex::Expression.new("a", Mica::Regex::CompileOptions::FirstLine,
+        compile_limits: SearchComplexity::TRUSTED).program
+      measurements = SearchComplexity::SIZES.map do |scale|
+        haystack = "a" * (2_000 * scale)
+        operations = SearchComplexity.scan_work(first_line, haystack)
+        SearchComplexity::Measurement.new(scale, operations, 4_i64 * (haystack.bytesize + 1) * program.state_count)
+      end
+      SearchComplexity.check("FirstLine scan of a over a*n", measurements, 4.0, true).should eq([] of String)
+    end
+
+    it_satisfies "REGEX-R2-limits", "charges the FirstLine line feed search, so max_work stops it" do
+      compiled = Mica::Regex::Expression.new("x", Mica::Regex::CompileOptions::FirstLine,
+        compile_limits: SearchComplexity::TRUSTED)
+      haystack = "a" * 100_000
+      # Validation alone fits the allowance; the line feed search does not.
+      tight = Mica::Regex::SearchLimits.custom(work_ceiling: 150_000_i64)
+      expect_raises(Mica::Regex::SearchLimitError, "max_work") { compiled.match(haystack, limits: tight) }
     end
   end
 end

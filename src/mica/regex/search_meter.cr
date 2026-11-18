@@ -27,6 +27,12 @@ module Mica::Regex
       exceeded(at) if @work_meter.charge(count)
     end
 
+    # Raises `Mica::DeadlineExceededError` when the timeout has passed,
+    # reading the clock now (charges read it only at checkpoints).
+    def enforce_deadline(at : Int32) : Nil
+      @work_meter.enforce_deadline("while searching") { Core::Position.new(at.to_i64) }
+    end
+
     private def exceeded(at : Int32) : Nil
       verdict = @work_meter.verdict
       return if verdict.within?

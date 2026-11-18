@@ -332,7 +332,7 @@ describe Mica::Regex::Syntax do
 
   describe "dialects" do
     it "reports the milestone for dialects whose parser is not built yet" do
-      expect_raises(ArgumentError, /R6/) do
+      expect_raises(ArgumentError, "R6") do
         Mica::Regex::Syntax.check("a", dialect: :ecma262, compile_limits: TRUSTED)
       end
     end

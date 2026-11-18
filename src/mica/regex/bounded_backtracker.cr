@@ -42,9 +42,11 @@ module Mica::Regex
     end
 
     # Searches like `PikeVM#search`, over *start*..*end_bound*, which must
-    # satisfy `fits?`. Fills *slots* and returns true on a match.
+    # satisfy `fits?`, with the same *first_line_end* bound. Fills *slots*
+    # and returns true on a match.
     def search(haystack : Bytes, start : Int32, end_bound : Int32, search_start : Int32, anchored : Bool,
-               end_anchored : Bool, meter : SearchMeter, slots : Slice(Int64)) : Bool
+               end_anchored : Bool, meter : SearchMeter, slots : Slice(Int64),
+               first_line_end : Int32) : Bool
       span = end_bound - start
       unless BoundedBacktracker.fits?(@program, span)
         raise ArgumentError.new("A span of #{span} bytes does not fit the backtracker's bitset")
@@ -57,7 +59,6 @@ module Mica::Regex
       else
         @visited.fill(0_u64, 0, words)
       end
-      first_line_end = @program.options.first_line? ? first_line_limit(haystack, start) : Int32::MAX
       at = start
       while at <= end_bound
         if at == start || (!anchored && boundary?(haystack, at) && at <= first_line_end)
@@ -132,15 +133,6 @@ module Mica::Regex
         end
       end
       false
-    end
-
-    private def first_line_limit(haystack : Bytes, start : Int32) : Int32
-      index = start
-      while index < haystack.size
-        return index if haystack.unsafe_fetch(index) == Look::LINE_FEED
-        index += 1
-      end
-      haystack.size
     end
 
     private def boundary?(haystack : Bytes, at : Int32) : Bool

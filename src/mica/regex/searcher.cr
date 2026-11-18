@@ -1,4 +1,5 @@
 module Mica::Regex
+  # :nodoc:
   # Which engine a `Searcher` runs. `Auto` is what the public API uses;
   # the others let specs and the engine differential force one path.
   enum Engine
@@ -12,6 +13,7 @@ module Mica::Regex
     Backtracker
   end
 
+  # :nodoc:
   # Runs the searches of one call over one haystack: it validates the
   # haystack once, holds the call's `SearchMeter`, and keeps its engine
   # workspaces for the searches that follow (as `scan` and `gsub` make).
@@ -24,6 +26,12 @@ module Mica::Regex
   # cutting bytes only removes matches. It costs O(m·(L + 1) + c) in the
   # backtracker or O(m·c·(L + 1)) in the Pike VM, for L = e − s.
   #
+  # **First line.** Under `CompileOptions::FirstLine` an unanchored search
+  # starts no match after the first line feed at or after its offset. The
+  # searcher scans for that line feed once and reuses it while the offsets
+  # of later searches stay at or before it, so an iteration call scans each
+  # byte at most once; every byte scanned is charged one operation.
+  #
   # WARNING: A searcher belongs to one call and one fiber.
   class Searcher
     # The call's meter.
@@ -34,6 +42,10 @@ module Mica::Regex
     @backtracker : BoundedBacktracker? = nil
     @span_slots = Slice(Int64).new(2, PikeVM::UNSET)
     @capture_slots : Slice(Int64)
+    # The last first-line scan: it started at @line_scan_start and found
+    # the line feed (or the haystack end) at @line_feed_at.
+    @line_scan_start = -1
+    @line_feed_at = -1
 
     def initialize(@program : Program, @haystack : String, limits : SearchLimits, timeout : Time::Span?,
                    @engine : Engine = Engine::Auto)
@@ -45,6 +57,10 @@ module Mica::Regex
       if offset = Core::UTF8.first_invalid_offset(bytes)
         raise Mica::EncodingError.new("The haystack is not valid UTF-8", Core::Position.new(offset.to_i64))
       end
+      # The deadline is read at the start of every call, so a timeout that
+      # has already passed fails even a search too short to reach a clock
+      # checkpoint.
+      @meter.enforce_deadline(0)
     end
 
     # Returns the slots of the leftmost-first match at or after
@@ -59,11 +75,13 @@ module Mica::Regex
       case @engine
       in .pike_vm?
         slots = @capture_slots
-        found = capture_vm.search(bytes, byte_index, bytes.size, byte_index, anchored, end_anchored, false, @meter, slots)
+        found = capture_vm.search(bytes, byte_index, bytes.size, byte_index, anchored, end_anchored, false, @meter, slots,
+          first_line_end(bytes, byte_index, anchored))
         found ? slots : nil
       in .backtracker?
         slots = @capture_slots
-        found = backtracker.search(bytes, byte_index, bytes.size, byte_index, anchored, end_anchored, @meter, slots)
+        found = backtracker.search(bytes, byte_index, bytes.size, byte_index, anchored, end_anchored, @meter, slots,
+          first_line_end(bytes, byte_index, anchored))
         found ? slots : nil
       in .auto?
         find_in_two_phases(bytes, byte_index, anchored, end_anchored, captures)
@@ -78,27 +96,43 @@ module Mica::Regex
       check_start(bytes, byte_index)
       anchored = @program.options.anchored? || options.anchored?
       end_anchored = @program.options.end_anchored? || options.end_anchored?
-      span_vm.search(bytes, byte_index, bytes.size, byte_index, anchored, end_anchored, true, @meter, @span_slots)
+      span_vm.search(bytes, byte_index, bytes.size, byte_index, anchored, end_anchored, true, @meter, @span_slots,
+        first_line_end(bytes, byte_index, anchored))
     end
 
     private def find_in_two_phases(bytes : Bytes, byte_index : Int32, anchored : Bool, end_anchored : Bool,
                                    captures : Bool) : Slice(Int64)?
       span = @span_slots
       return nil unless span_vm.search(bytes, byte_index, bytes.size, byte_index, anchored, end_anchored, false,
-                          @meter, span)
+                          @meter, span, first_line_end(bytes, byte_index, anchored))
       return span if !captures || @program.slot_count == 2
       start = span[0].to_i32
       finish = span[1].to_i32
       slots = @capture_slots
       found = if BoundedBacktracker.fits?(@program, finish - start)
-                backtracker.search(bytes, start, finish, byte_index, true, end_anchored, @meter, slots)
+                backtracker.search(bytes, start, finish, byte_index, true, end_anchored, @meter, slots, Int32::MAX)
               else
-                capture_vm.search(bytes, start, finish, byte_index, true, end_anchored, false, @meter, slots)
+                capture_vm.search(bytes, start, finish, byte_index, true, end_anchored, false, @meter, slots, Int32::MAX)
               end
       unless found && slots[0] == span[0] && slots[1] == span[1]
         raise Mica::Error.new("internal error: the capture pass did not find the span #{start}...#{finish}")
       end
       slots
+    end
+
+    # Returns the last position where an unanchored search from *start*
+    # may begin a match: the first line feed at or after *start* under
+    # `CompileOptions::FirstLine`, or `Int32::MAX`. A scan already made
+    # from at or before *start* answers when its line feed is at or after
+    # *start* (no line feed lies between); otherwise the bytes from
+    # *start* are scanned, each charged one operation.
+    private def first_line_end(bytes : Bytes, start : Int32, anchored : Bool) : Int32
+      return Int32::MAX if anchored || !@program.options.first_line?
+      return @line_feed_at if @line_scan_start >= 0 && @line_scan_start <= start <= @line_feed_at
+      line_feed_at = bytes.index(Look::LINE_FEED, start) || bytes.size
+      @meter.charge(line_feed_at - start + 1, start)
+      @line_scan_start = start
+      @line_feed_at = line_feed_at
     end
 
     private def check_start(bytes : Bytes, byte_index : Int32) : Nil

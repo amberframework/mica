@@ -68,13 +68,14 @@ module Mica::Regex
     # *anchored*) and reads no byte at or after *end_bound*; assertions see
     # the whole haystack. *search_start* is where `\G` holds. With
     # *earliest*, stops at the first match state reached (for `matches?`).
+    # An unanchored search starts no thread after *first_line_end* (the
+    # `CompileOptions::FirstLine` bound, `Int32::MAX` without it).
     # Fills *slots* (at least `slot_count` entries) and returns true on a
     # match.
     def search(haystack : Bytes, start : Int32, end_bound : Int32, search_start : Int32, anchored : Bool,
-               end_anchored : Bool, earliest : Bool, meter : SearchMeter, slots : Slice(Int64)) : Bool
+               end_anchored : Bool, earliest : Bool, meter : SearchMeter, slots : Slice(Int64),
+               first_line_end : Int32) : Bool
       slots_per_thread = @slot_count
-      options = @program.options
-      first_line_end = options.first_line? ? first_line_limit(haystack, start) : Int32::MAX
       @current_size = 0
       @next_size = 0
       matched = false
@@ -120,17 +121,6 @@ module Mica::Regex
         at += 1
       end
       matched
-    end
-
-    # The last position where an unanchored search may start a thread under
-    # `CompileOptions::FirstLine`: the first line feed at or after *start*.
-    private def first_line_limit(haystack : Bytes, start : Int32) : Int32
-      index = start
-      while index < haystack.size
-        return index if haystack.unsafe_fetch(index) == Look::LINE_FEED
-        index += 1
-      end
-      haystack.size
     end
 
     private def boundary?(haystack : Bytes, at : Int32) : Bool

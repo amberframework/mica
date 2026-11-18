@@ -212,6 +212,57 @@ describe Mica::Regex::Expression do
       expression("a").gsub("aa", "bb", limits: small).should eq("bbbb")
     end
 
+    it_satisfies "REGEX-R2-limits", "charges max_output_bytes before each replacement piece is written" do
+      cap = 1_i64 * 1024 * 1024
+      small = Mica::Regex::SearchLimits.custom(max_output_bytes: cap)
+      haystack = "a" * (256 * 1024)
+      compiled = expression("a")
+      # Unbounded, each would build about 50 MiB. Bounded, the allocation is
+      # the result buffer, which doubles up to just past the cap (at most
+      # 1/4 + 1/2 + 1 + 2 times the cap), plus a few bytes per match.
+      {"\\0" * 200, "\\k<x>" * 200}.each do |replacement|
+        named = replacement.includes?("k<") ? expression("(?<x>a)") : compiled
+        GC.collect
+        before = GC.stats.total_bytes
+        expect_raises(Mica::Regex::SearchLimitError, "max_output_bytes") do
+          named.gsub(haystack, replacement, limits: small)
+        end
+        (GC.stats.total_bytes - before).should be < 4.5 * cap
+      end
+      GC.collect
+      before = GC.stats.total_bytes
+      expect_raises(Mica::Regex::SearchLimitError, "max_output_bytes") do
+        compiled.gsub(haystack, limits: small) { |matched| matched * 200 }
+      end
+      (GC.stats.total_bytes - before).should be < 4.5 * cap
+    end
+
+    it_satisfies "REGEX-R2-limits", "meters split's shortcut paths like every other search" do
+      no_work = Mica::Regex::SearchLimits.custom(work_ceiling: 0_i64)
+      invalid = String.new(Bytes[0x61, 0x2C, 0xFF])
+      {expression(""), expression(",")}.each do |compiled|
+        limit = compiled.source.empty? ? nil : 1
+        expect_raises(Mica::Regex::SearchLimitError, "max_work") do
+          compiled.split("abc" * 1_000, limit, limits: no_work)
+        end
+        expect_raises(Mica::DeadlineExceededError) do
+          compiled.split("abc" * 1_000, limit, limits: LIMITS, timeout: Time::Span.zero)
+        end
+        expect_raises(Mica::EncodingError) { compiled.split(invalid, limit, limits: LIMITS) }
+      end
+      # One operation per character, on top of validation.
+      tight = Mica::Regex::SearchLimits.custom(work_ceiling: 4_500_i64)
+      expect_raises(Mica::Regex::SearchLimitError, "max_work") { expression("").split("abc" * 1_000, limits: tight) }
+      expression("").split("abc", limits: tight).should eq(["a", "b", "c"])
+    end
+
+    it_satisfies "REGEX-R2-limits", "reads the deadline at the start of every call, so a passed timeout fails a short search" do
+      expect_raises(Mica::DeadlineExceededError) do
+        expression("a").match("a", limits: LIMITS, timeout: Time::Span.zero)
+      end
+      expression("a").match("a", limits: LIMITS, timeout: 1.minute).should_not be_nil
+    end
+
     it_satisfies "REGEX-R2-limits", "stops at a timeout with Mica::DeadlineExceededError" do
       compiled = expression("(?:a|b|ab|ba)*c")
       expect_raises(Mica::DeadlineExceededError) do

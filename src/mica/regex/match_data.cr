@@ -227,22 +227,42 @@ module Mica::Regex
       end
     end
 
+    # :nodoc:
+    # Group *n*'s bytes in the haystack, without a copy, or nil (as `#[]?`).
+    def group_bytes?(n : Int) : Bytes?
+      return unless valid_group?(n)
+      range = byte_range(n) { return nil }
+      @string.to_slice[range.begin, range.end - range.begin]
+    end
+
+    # :nodoc:
+    # The bytes of the named group whose name is *group_name* (UTF-8), in
+    # the haystack, without a copy, or nil (as `#[]?(String)`).
+    def named_group_bytes?(group_name : Bytes) : Bytes?
+      range = named_byte_range(group_name) { return nil }
+      @string.to_slice[range.begin, range.end - range.begin]
+    end
+
     private def fetch_named(group_name : String, &)
+      range = named_byte_range(group_name) { |exists| return yield exists }
+      @string.byte_slice(range.begin, range.end - range.begin)
+    end
+
+    # The byte range of the named group *group_name* that took part (the
+    # last of duplicates, as PCRE2 selects); yields whether the name exists
+    # when none did.
+    private def named_byte_range(group_name : String | Bytes, &)
       selected = nil
       exists = false
       @regex.list_of_name_entries.each do |entry|
-        next unless entry.group_name == group_name
+        next unless entry.group_name.to_slice == group_name.to_slice
         exists = true
         range = byte_range(entry.capture_index) { nil }
         if range && (selected.nil? || range.begin > selected.begin)
           selected = range
         end
       end
-      if selected
-        @string.byte_slice(selected.begin, selected.end - selected.begin)
-      else
-        yield exists
-      end
+      selected || yield exists
     end
 
     private def check_index_out_of_bounds(index : Int) : Nil

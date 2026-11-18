@@ -165,8 +165,8 @@ module Mica::Regex
     # `max_output_bytes` when the result would pass it.
     def gsub(string : String, options : MatchOptions = MatchOptions::None, *, limits : SearchLimits,
              timeout : Time::Span? = nil, & : String, MatchData -> _) : String
-      replace(string, options, limits, timeout, true) do |matched, match, output|
-        output << yield matched, match
+      replace(string, options, limits, timeout, true) do |matched, match, buffer, output|
+        write_block_value(buffer, output, yield matched, match)
       end
     end
 
@@ -176,8 +176,8 @@ module Mica::Regex
     def gsub(string : String, replacement : String, backreferences : Bool = true,
              options : MatchOptions = MatchOptions::None, *, limits : SearchLimits,
              timeout : Time::Span? = nil) : String
-      replace(string, options, limits, timeout, true) do |_, match, output|
-        write_replacement(output, replacement, match, backreferences)
+      replace(string, options, limits, timeout, true) do |_, match, buffer, output|
+        write_replacement(buffer, output, replacement, match, backreferences)
       end
     end
 
@@ -192,8 +192,8 @@ module Mica::Regex
     # `String#sub(Regex, &)`.
     def sub(string : String, options : MatchOptions = MatchOptions::None, *, limits : SearchLimits,
             timeout : Time::Span? = nil, & : String, MatchData -> _) : String
-      replace(string, options, limits, timeout, false) do |matched, match, output|
-        output << yield matched, match
+      replace(string, options, limits, timeout, false) do |matched, match, buffer, output|
+        write_block_value(buffer, output, yield matched, match)
       end
     end
 
@@ -202,8 +202,8 @@ module Mica::Regex
     def sub(string : String, replacement : String, backreferences : Bool = true,
             options : MatchOptions = MatchOptions::None, *, limits : SearchLimits,
             timeout : Time::Span? = nil) : String
-      replace(string, options, limits, timeout, false) do |_, match, output|
-        write_replacement(output, replacement, match, backreferences)
+      replace(string, options, limits, timeout, false) do |_, match, buffer, output|
+        write_replacement(buffer, output, replacement, match, backreferences)
       end
     end
 
@@ -231,6 +231,9 @@ module Mica::Regex
     def split(string : String, limit : Int32? = nil, *, remove_empty : Bool = false,
               options : MatchOptions = MatchOptions::None, limits : SearchLimits,
               timeout : Time::Span? = nil, & : String ->) : Nil
+      # The searcher validates and charges the haystack and reads the
+      # deadline before any shortcut below.
+      searcher = Searcher.new(@program, string, limits, timeout)
       output = OutputMeter.new(limits.max_output_bytes)
       if string.empty?
         yield "" unless remove_empty
@@ -242,10 +245,9 @@ module Mica::Regex
         return
       end
       if @source.empty?
-        split_by_character(string, limit, output) { |piece| yield piece }
+        split_by_character(string, limit, searcher.meter, output) { |piece| yield piece }
         return
       end
-      searcher = Searcher.new(@program, string, limits, timeout)
       count = 0
       match_offset = slice_offset = 0
       while found = searcher.find(match_offset, options, true)
@@ -278,9 +280,15 @@ module Mica::Regex
       end
     end
 
-    private def split_by_character(string : String, limit : Int32?, output : OutputMeter, & : String ->) : Nil
+    # Splits *string* into its characters (the empty pattern), charging one
+    # operation per character to *meter*.
+    private def split_by_character(string : String, limit : Int32?, meter : SearchMeter, output : OutputMeter,
+                                   & : String ->) : Nil
       yielded = 0
+      byte_index = 0
       string.each_char do |char|
+        meter.charge(1, byte_index)
+        byte_index += char.bytesize
         output.add(char.bytesize)
         yield char.to_s
         yielded += 1
@@ -296,23 +304,23 @@ module Mica::Regex
     # Copies *string* with its matches (every match, or the first)
     # replaced by what the block writes.
     private def replace(string : String, options : MatchOptions, limits : SearchLimits, timeout : Time::Span?,
-                        every : Bool, & : String, MatchData, IO ->) : String
+                        every : Bool, & : String, MatchData, IO, OutputMeter ->) : String
       searcher = Searcher.new(@program, string, limits, timeout)
       byte_offset = 0
       found = searcher.find(byte_offset, options, true)
       return string unless found
       output = OutputMeter.new(limits.max_output_bytes)
       last_byte_offset = 0
-      String.build(string.bytesize) do |buffer|
+      # The buffer starts no larger than the output may grow.
+      capacity = Math.min(string.bytesize.to_i64, limits.max_output_bytes).clamp(64_i64, Int32::MAX.to_i64).to_i32
+      String.build(capacity) do |buffer|
         while found
           match = MatchData.new(self, string, byte_offset, found)
           index = match.byte_begin(0)
           output.add(index - last_byte_offset)
           buffer.write(string.to_slice[last_byte_offset, index - last_byte_offset])
           matched = match[0]
-          before = buffer.bytesize
-          yield matched, match, buffer
-          output.add(buffer.bytesize - before)
+          yield matched, match, buffer, output
           if matched.bytesize == 0
             byte_offset = index + char_bytesize_at(string, index)
             last_byte_offset = index
@@ -330,14 +338,26 @@ module Mica::Regex
       end
     end
 
+    # Writes the `to_s` of a replacement block's *value*, charging its size
+    # to *output* before it reaches *buffer*.
+    private def write_block_value(buffer : IO, output : OutputMeter, value) : Nil
+      text = value.to_s
+      output.add(text.bytesize)
+      buffer << text
+    end
+
     # Writes *replacement* with its backreferences expanded, as
-    # `String#scan_backreferences` does.
-    private def write_replacement(output : IO, replacement : String, match : MatchData, backreferences : Bool) : Nil
+    # `String#scan_backreferences` does. Every literal run and every group is
+    # charged to *output* before it reaches *buffer*, so a replacement that
+    # multiplies the input stops at `max_output_bytes` instead of after the
+    # result is built.
+    private def write_replacement(buffer : IO, output : OutputMeter, replacement : String, match : MatchData,
+                                  backreferences : Bool) : Nil
+      bytes = replacement.to_slice
       unless backreferences
-        output << replacement
+        write_charged(buffer, output, bytes)
         return
       end
-      bytes = replacement.to_slice
       first_index = 0
       index = 0
       while backslash = bytes.index('\\'.ord.to_u8, index)
@@ -346,31 +366,40 @@ module Mica::Regex
         char = bytes[index].unsafe_chr
         case char
         when '\\'
-          output.write(bytes[first_index, index - first_index])
+          write_charged(buffer, output, bytes[first_index, index - first_index])
           index += 1
           first_index = index
         when '0'..'9'
-          output.write(bytes[first_index, index - 1 - first_index])
-          output << match[char - '0']?
+          write_charged(buffer, output, bytes[first_index, index - 1 - first_index])
+          if group = match.group_bytes?(char - '0')
+            write_charged(buffer, output, group)
+          end
           index += 1
           first_index = index
         when 'k'
           index += 1
           next unless index < bytes.size && bytes[index] == '<'.ord
-          output.write(bytes[first_index, index - 2 - first_index])
+          write_charged(buffer, output, bytes[first_index, index - 2 - first_index])
           index += 1
           start_index = index
           end_index = bytes.index('>'.ord.to_u8, start_index)
           raise ArgumentError.new("Missing ending '>' for '\\\\k<...'") unless end_index
-          name = replacement.byte_slice(start_index, end_index - start_index)
-          capture = match[name]?
-          raise IndexError.new("Undefined group name reference: #{name.inspect}") unless capture
-          output << capture
+          name = bytes[start_index, end_index - start_index]
+          capture = match.named_group_bytes?(name)
+          unless capture
+            raise IndexError.new("Undefined group name reference: #{String.new(name).inspect}")
+          end
+          write_charged(buffer, output, capture)
           index = end_index + 1
           first_index = index
         end
       end
-      output.write(bytes[first_index..]) if first_index < bytes.size
+      write_charged(buffer, output, bytes[first_index..]) if first_index < bytes.size
+    end
+
+    private def write_charged(buffer : IO, output : OutputMeter, piece : Bytes) : Nil
+      output.add(piece.bytesize)
+      buffer.write(piece)
     end
 
     private def char_bytesize_at(string : String, byte_index : Int32) : Int32
