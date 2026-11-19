@@ -299,7 +299,8 @@ is bounded by `max_output_bytes` instead). Under `CompileOptions::FirstLine`
 the search for the first line feed is charged one operation per byte, and
 an iteration call scans each byte for it at most once; the Pike VM and the
 bounded backtracker stop once no thread is live and no start is allowed
-past that line feed, so nothing after the first line is read. `split` meters and
+past that line feed, so they read past the first line only while a
+thread that started on it is live. `split` meters and
 validates the haystack on every path, the empty pattern (one operation per
 character) and `limit <= 1` included.
 
