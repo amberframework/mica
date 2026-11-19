@@ -245,14 +245,31 @@ describe "Mica::Regex R3 engines" do
       folded.list_of_literals.map { |literal| String.new(literal) }.should eq(["AB", "Ab", "aB", "ab"])
     end
 
-    it_satisfies "REGEX-R3-accelerators", "gives an alternation no set once its branches cannot fit, and every fitting one" do
-      program("(?i)sherlock holmes|john watson").literal_set.should be_nil
+    it_satisfies "REGEX-R3-accelerators", "keeps every alternation that fits whole, and cuts one that does not to even shares of prefixes" do
       fitting = program("(?i)ab|cd").literal_set.should_not be_nil
       fitting.list_of_literals.size.should eq(8)
-      # 32 entries and 2 fit; 64 and 2 do not.
+      fitting.exact?.should be_true
+      # 32 entries and 2 fit whole.
       program("(?i)(abcde)|z").literal_set.try(&.list_of_literals.size).should eq(34)
-      program("(?i)(abcdef)|z").literal_set.should be_nil
-      program("(?i)z|(abcdef)").literal_set.should be_nil
+      # 64 and 2 do not: the long branch keeps its 32 five-letter prefixes,
+      # in either order.
+      ["(?i)(abcdef)|z", "(?i)z|(abcdef)"].each do |source|
+        cut = program(source).literal_set.should_not be_nil
+        cut.exact?.should be_false
+        cut.list_of_literals.map { |literal| String.new(literal).downcase }.uniq.sort!.should eq(["abcde", "z"])
+      end
+      # Two case-insensitive phrases: each cut to its share, every prefix at
+      # least three bytes long, and every case of each prefix kept.
+      names = program("(?i)sherlock holmes|john watson").literal_set.should_not be_nil
+      names.exact?.should be_false
+      names.list_of_literals.size.should be <= Mica::Regex::LiteralSet::MAX_LITERALS
+      names.list_of_literals.all? { |literal| literal.size >= Mica::Regex::LiteralExtractor::MIN_CUT_BYTES }.should be_true
+      lowered = names.list_of_literals.map { |literal| String.new(literal).downcase }
+      lowered.any?(&.starts_with?("sher")).should be_true
+      lowered.any?(&.starts_with?("john")).should be_true
+      names.list_of_literals.any? { |literal| String.new(literal).starts_with?("JoHn") }.should be_true
+      # Thirteen words cannot each keep three letters in every case.
+      program("(?i)alpha|bravo|charlie|delta|echo|foxtrot|golf|hotel|india|juliet|kilo|lima|mike").literal_set.should be_nil
     end
 
     it_satisfies "REGEX-R3-accelerators", "keeps each literal once, first occurrence first, in short and long sets" do
@@ -264,10 +281,36 @@ describe "Mica::Regex R3 engines" do
       long.list_of_literals.map { |literal| String.new(literal) }.should eq(list_of_words)
     end
 
-    it_satisfies "REGEX-R3-accelerators", "chooses the rare-byte, first-byte and packed searchers" do
-      program("sherlock\\d").plan.prefilter.try(&.kind).should eq(Mica::Regex::Prefilter::Kind::RareByte)
-      program("(?:ab|ac)\\d").plan.prefilter.try(&.kind).should eq(Mica::Regex::Prefilter::Kind::FirstBytes)
-      program("(?:ab|bc|cd|de)\\d").plan.prefilter.try(&.kind).should eq(Mica::Regex::Prefilter::Kind::Packed)
+    it_satisfies "REGEX-R3-accelerators", "chooses the rare-byte, first-byte, packed and pair searchers" do
+      program("sherlockd").plan.prefilter.try(&.kind).should eq(Mica::Regex::Prefilter::Kind::RareByte)
+      program("(?:zb|zc)d").plan.prefilter.try(&.kind).should eq(Mica::Regex::Prefilter::Kind::FirstBytes)
+      program("(?:ab|bc|cd|de)d").plan.prefilter.try(&.kind).should eq(Mica::Regex::Prefilter::Kind::Packed)
+      # A common first byte (a, t, a Cyrillic lead byte) takes the pair tests.
+      program("(?:ab|ac)d").plan.prefilter.try(&.kind).should eq(Mica::Regex::Prefilter::Kind::PackedPairs)
+      program("(?i)twain").plan.prefilter.try(&.kind).should eq(Mica::Regex::Prefilter::Kind::PackedPairs)
+      program("(?i)шерлок").plan.prefilter.try(&.kind).should eq(Mica::Regex::Prefilter::Kind::PackedPairs)
+    end
+
+    it_satisfies "REGEX-R3-accelerators", "covers every case of a literal with one pair test, the case bit folded" do
+      twain = program("(?i)twain").plan.prefilter.should_not be_nil
+      twain.list_of_pair_tests.size.should eq(1)
+      test = twain.list_of_pair_tests[0]
+      # w and n, the rarest letters, with the ASCII case bit.
+      {test.first_offset, test.second_offset}.should eq({1, 4})
+      (test.first_fold & 0xFF).should eq(0x20)
+      # A Cyrillic word: one test over continuation bytes, the case bit
+      # 0x20 there (Ш is D0 A8, ш is D1 88).
+      cyrillic = program("(?i)шерлок").plan.prefilter.should_not be_nil
+      cyrillic.list_of_pair_tests.size.should eq(1)
+      cyrillic.list_of_pair_tests[0].first_offset.odd?.should be_true
+      # ſ (C5 BF) folds with s but is two bytes long: a second test.
+      program("(?i)sherlock").plan.prefilter.try(&.list_of_pair_tests.size).should eq(2)
+      # Literals that share no folded pair take a test each, up to the limit:
+      # their bytes all have even parity, so any two differ in two bits or more.
+      words = %w[ce fi lo qr tw xc ef il oq].map(&.to_slice)
+      words.size.should eq(Mica::Regex::Prefilter::MAX_PAIR_TESTS + 1)
+      Mica::Regex::PairTest.cover(words, Mica::Regex::Prefilter::MAX_PAIR_TESTS).should be_nil
+      Mica::Regex::PairTest.cover(words.first(4), Mica::Regex::Prefilter::MAX_PAIR_TESTS).try(&.size).should eq(4)
     end
 
     it_satisfies "REGEX-R3-accelerators", "finds the same matches with the accelerators on and off" do
@@ -314,6 +357,67 @@ describe "Mica::Regex R3 engines" do
             break unless found
             offset = found[1].to_i32
           end
+        end
+      end
+    end
+
+    it_satisfies "REGEX-R3-accelerators", "finds every match with the pair tests, any case, at every offset modulo 8" do
+      random = Random::PCG32.new(20261120_u64)
+      sources = ["(?i)twain", "(?i)the", "(?i)sherlock", "(?i)holmes\\w*", "(?i)шерлок", "(?i)шерлок холмс",
+                 "(?i)sherlock|holmes|watson", "(?i)tom|sawyer|huckleberry|finn", "(?:ab|ac)\\d",
+                 "шерлок|джон|ирен", "(?i)kelvin"]
+      sources.each do |source|
+        expression = Mica::Regex::Expression.new(source, compile_limits: TRUSTED)
+        expression.program.end_first_searches
+        # Each word of the pattern in random cases, among filler that makes
+        # false lanes and false candidates (the same letters, other cases).
+        list_of_words = source.lchop("(?i)").split('|').map(&.gsub(/\\[dw]\*?/, "1"))
+        list_of_variants = list_of_words.flat_map do |word|
+          [word, word.upcase, word.capitalize, word.gsub('s', 'ſ'), word.gsub('k', 'K'), word.gsub('о', 'ᲂ'),
+           word.chars.map { |char| random.next_bool ? char.upcase : char }.join]
+        end
+        filler = list_of_words.join.chars.uniq + [' ', 'e', 'E', '\u{1}', 'ш', 'Ш']
+        40.times do |round|
+          haystack = String.build do |io|
+            (round % 9).times { io << filler.sample(random) }
+            io << list_of_variants.sample(random) if round.odd?
+            (30 + random.rand(300)).times do
+              io << (random.rand(17) == 0 ? list_of_variants.sample(random) : filler.sample(random).to_s)
+            end
+            io << list_of_variants.sample(random) if round % 3 == 0
+          end
+          on = Mica::Regex::Searcher.new(expression.program, haystack, LIMITS, nil, Mica::Regex::Engine::Auto)
+          off = Mica::Regex::Searcher.new(expression.program, haystack, LIMITS, nil, Mica::Regex::Engine::PikeVM)
+          offset = 0
+          while true
+            found = on.find(offset, Mica::Regex::MatchOptions::None, false).try(&.to_a)
+            found.should eq(off.find(offset, Mica::Regex::MatchOptions::None, false).try(&.to_a.first(2)))
+            break unless found
+            offset = found[1] > found[0] ? found[1].to_i32 : found[0].to_i32 + 1
+            while offset < haystack.bytesize && haystack.to_slice[offset] & 0xC0 == 0x80
+              offset += 1
+            end
+          end
+        end
+      end
+    end
+
+    it_satisfies "REGEX-R3-accelerators", "switches a rare byte that is dense in the haystack to its pair, finding every match" do
+      expression = Mica::Regex::Expression.new("b{30}a", compile_limits: TRUSTED)
+      expression.program.end_first_searches
+      prefilter = expression.program.plan.prefilter.should_not be_nil
+      prefilter.kind.should eq(Mica::Regex::Prefilter::Kind::RareByte)
+      prefilter.list_of_dense_tests.size.should eq(1)
+      [0, 1, 7, 8, 31, 64, 999].each do |extra|
+        haystack = "b" * (100 + extra) + "a" + "b" * extra + "ba" + "b" * 31 + "a"
+        on = Mica::Regex::Searcher.new(expression.program, haystack, LIMITS, nil, Mica::Regex::Engine::Auto)
+        off = Mica::Regex::Searcher.new(expression.program, haystack, LIMITS, nil, Mica::Regex::Engine::PikeVM)
+        offset = 0
+        while true
+          found = on.find(offset, Mica::Regex::MatchOptions::None, false).try(&.to_a)
+          found.should eq(off.find(offset, Mica::Regex::MatchOptions::None, false).try(&.to_a.first(2)))
+          break unless found
+          offset = found[1].to_i32
         end
       end
     end

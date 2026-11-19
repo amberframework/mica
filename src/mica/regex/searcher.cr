@@ -954,7 +954,8 @@ module Mica::Regex
       scan = @scan ||= PrefilterScan.new(prefilter, bytes, verified_only: true)
       start = scan.find(byte_index, @meter)
       return false if start < 0
-      literal = prefilter.literal_at(bytes, start, @meter)
+      # The scan verified the candidate, so it knows the literal.
+      literal = scan.last_literal
       @span_slots[0] = start.to_i64
       @span_slots[1] = (start + prefilter.literal_size(literal)).to_i64
       true
