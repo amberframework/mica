@@ -142,6 +142,25 @@ describe "Mica::Regex R3 engines" do
     end
   end
 
+  describe "the forward lazy DFA" do
+    it_satisfies "REGEX-R3-dfa", "steps over a run of ASCII bytes in a state every one leads back to" do
+      haystack = "line one\n" * 50 + "é ß 中 😀 tail\n" + "x" * 37 + "\n"
+      [
+        "(?s)\\A.*$", "(?s)^((.*)()()($))", "\\A[^\\n]*\\n", "(?s)a.*é", "(?s).*😀", "[^é]+é", "\\b\\w+(?s:.)*\\z",
+        "(?m)^.*tail$",
+      ].each do |source|
+        {haystack, "", "é", "abcdefgh", "abcdefghé", "abcdefgh\n"}.each do |subject|
+          span(source, subject).first.should eq(span(source, subject, Mica::Regex::Engine::PikeVM).first)
+        end
+      end
+      # The flagged row is read again after a cache clear rebuilds it.
+      pool = Mica::Regex::CachePool.new(max_bytes: 1 << 20, max_cache_bytes: 1 << 13)
+      last_e = haystack.byte_index("é").should_not be_nil
+      found = searcher("(?s)\\A.*é", haystack * 4, pool: pool).find(0, Mica::Regex::MatchOptions::None, false)
+      found.try(&.to_a).should eq([0_i64, (haystack.bytesize * 3 + last_e + 2).to_i64])
+    end
+  end
+
   describe "shared class tables" do
     it_satisfies "REGEX-R3-differential", "reads a large class's transitions from one table shared by every copy and program" do
       wide = program("\\w+@\\w{2}")

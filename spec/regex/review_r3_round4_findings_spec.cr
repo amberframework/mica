@@ -157,6 +157,10 @@ describe "Mica::Regex R3 fourth review findings" do
     expect_stops_at_the_allowance("[a-z]+[0-9]", "abcdefghij" * 2_000, Mica::Regex::Engine::NoAccelerators, false)
   end
 
+  it_satisfies "REGEX-R3-dfa", "has the forward lazy DFA's ASCII runs allowed before it reads them" do
+    expect_stops_at_the_allowance("(?s)\\A.*é", "abcdefghij" * 2_000, Mica::Regex::Engine::NoAccelerators, false)
+  end
+
   it_satisfies "REGEX-R3-dfa", "has the reverse lazy DFA's chunks allowed before it reads them" do
     # The reverse search from the match end reads the haystack last.
     haystack = "abcdefghij" * 2_000 + "0"

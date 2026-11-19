@@ -157,8 +157,28 @@ module Mica::Regex
       generation = @generation
       id = intern(key, meter)
       return id if id < 0
-      @transition_table[state * dfa.stride + symbol] = entry_of(id) if generation == @generation
+      if generation == @generation
+        @transition_table[state * dfa.stride + symbol] = entry_of(id)
+        mark_ascii_loop(dfa, state) if id == state
+      end
       id
+    end
+
+    # Flags the entries of *state*'s own row on the ASCII symbols with
+    # `LazyDFA::ASCII_LOOP` once every one of them is built and leads back
+    # to *state*, and *state* is neither a match, dead nor a start state, so
+    # `LazyDFA#find_end` steps over a run of ASCII bytes there without
+    # reading the table. Forward only (the reverse DFA has no ASCII
+    # symbols listed).
+    private def mark_ascii_loop(dfa : LazyDFA, state : Int32) : Nil
+      return if @list_of_marks.unsafe_fetch(state) & (LazyDFA::MARK_MATCH | LazyDFA::MARK_DEAD | LazyDFA::MARK_START) != 0
+      symbols = dfa.list_of_ascii_symbols
+      return if symbols.empty?
+      row = state * dfa.stride
+      symbols.each do |symbol|
+        return unless @transition_table.unsafe_fetch(row + symbol) & LazyDFA::ROW_MASK == row
+      end
+      symbols.each { |symbol| @transition_table[row + symbol] = row | LazyDFA::ASCII_LOOP }
     end
 
     # The table entry for state *id*: its row offset (`id * stride`), with

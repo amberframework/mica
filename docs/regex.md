@@ -687,6 +687,14 @@ do, into a `DFACache` leased for the search:
   one kind and not for the other.
 - **Byte classes** (`ByteClasses`) group bytes no state can tell apart, so
   a state has one transition per class.
+- **ASCII loops.** Once every ASCII byte's transition out of a forward
+  state is built and leads back to it, and the state is neither a match,
+  dead nor a start state (the loop of `(?s:.)*`), the entries of its own
+  row carry a flag, and the search steps over a run of ASCII bytes there
+  eight at a time without reading the table, within the bytes the meter
+  has allowed. `(?s)^((.*)()()($))` over 7 MB of source goes from about
+  14 ms to 1 ms. A row offset is a multiple of 8, which leaves the flag
+  its bit.
 - **Cost:** every byte read, every NFA state a new state's closure visits,
   and every state a cache clear discards is charged one operation. A cache
   that would pass `CachePool#max_cache_bytes` is cleared, and no

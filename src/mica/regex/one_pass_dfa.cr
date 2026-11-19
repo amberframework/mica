@@ -114,7 +114,7 @@ module Mica::Regex
           allowed_end = at + meter.readable(Math.min(finish - at, PrefilterScan::CHARGE_CHUNK), at)
         end
         if @list_of_ascii_loops.unsafe_fetch(row // @class_count)
-          at = OnePassDFA.after_ascii(bytes, at, allowed_end)
+          at = Core::ByteScan.skip_ascii(haystack, at, allowed_end)
           next if at >= allowed_end
         end
         cell = row &+ class_of[bytes[at]]
@@ -242,20 +242,6 @@ module Mica::Regex
         slots[slot] = at.to_i64
         saved &= saved - 1
       end
-    end
-
-    # The first position from *at* up to *bound* whose byte is not ASCII,
-    # or *bound*: eight bytes at a time while they fit.
-    protected def self.after_ascii(bytes : Pointer(UInt8), at : Int32, bound : Int32) : Int32
-      while at + 8 <= bound
-        word = (bytes + at).as(Pointer(UInt64)).value
-        break if word & 0x8080808080808080_u64 != 0
-        at &+= 8
-      end
-      while at < bound && bytes[at] < 0x80
-        at &+= 1
-      end
-      at
     end
 
     private def take(edge : Edge, haystack : Bytes, at : Int32, search_start : Int32, slots : Slice(Int64)) : Bool
