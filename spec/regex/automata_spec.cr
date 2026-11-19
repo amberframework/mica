@@ -43,14 +43,34 @@ describe "Mica::Regex R3 engines" do
       found.last_path.should eq(Mica::Regex::Searcher::Path::PikeVM)
     end
 
-    it_satisfies "REGEX-R3-dfa", "gives up on a Unicode word assertion next to a non-ASCII byte and still answers" do
+    it_satisfies "REGEX-R3-dfa", "decides Unicode word assertions next to non-ASCII text on the lazy DFAs" do
       found = searcher("\\bé", "a é")
       found.find(0, Mica::Regex::MatchOptions::None, false).try(&.to_a).should eq([2, 4])
-      found.dfa_gave_up?.should be_true
-      found.last_path.should eq(Mica::Regex::Searcher::Path::PikeVM)
+      found.dfa_gave_up?.should be_false
+      found.last_path.should eq(Mica::Regex::Searcher::Path::LazyDFA)
       ascii = searcher("(?aW)\\ba", "é a")
       ascii.find(0, Mica::Regex::MatchOptions::None, false).try(&.to_a).should eq([3, 4])
       ascii.dfa_gave_up?.should be_false
+      # Every offset of mixed scripts, word and non-word, one to four bytes
+      # per character, against the Pike VM.
+      haystack = "Шерлок Холмс, café ß-ǅ x²·𝔘𝔫𝔦 ꙮ_9 ‿a ‐b 中文 áb"
+      {"\\b\\w+\\b", "\\B\\w\\B", "\\b.", ".\\b", "\\w+\\b ", "(?:\\b|é)\\w", "\\B.+?\\b"}.each do |source|
+        expression = program(source)
+        offset = 0
+        while offset <= haystack.bytesize
+          on = Mica::Regex::Searcher.new(expression, haystack, LIMITS, nil, Mica::Regex::Engine::Auto)
+          off = Mica::Regex::Searcher.new(expression, haystack, LIMITS, nil, Mica::Regex::Engine::PikeVM)
+          on.find(offset, Mica::Regex::MatchOptions::None, false).try(&.to_a)
+            .should eq(off.find(offset, Mica::Regex::MatchOptions::None, false).try(&.to_a))
+          on.dfa_gave_up?.should be_false
+          on.finish
+          off.finish
+          offset += 1
+          while offset < haystack.bytesize && haystack.byte_at(offset) & 0xC0 == 0x80
+            offset += 1
+          end
+        end
+      end
     end
 
     it_satisfies "REGEX-R3-dfa", "reads $ and \\Z before a final line feed and multiline ^ as PCRE2 does" do

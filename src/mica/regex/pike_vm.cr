@@ -34,22 +34,23 @@ module Mica::Regex
   #
   # A workspace serves any number of searches in one call, one at a time.
   #
-  # **Pool lease** (roadmap 6.2.1). A workspace is a `CachePool` member:
-  # its charge is reserved from the pool before the buffer is allocated,
-  # and `SearchLimitError` naming `cache_pool_max_bytes` is raised when the
-  # pool cannot supply it. A workspace parked between calls is idle and
-  # the pool may evict it (free its buffer); `prepare` allocates it again,
+  # **Pool lease** (roadmap 6.2.1). A workspace's charge is reserved from
+  # its `CachePool` before the buffer is allocated, and `SearchLimitError`
+  # naming `cache_pool_max_bytes` is raised when the pool cannot supply it.
+  # A workspace parked in an idle `SearchLease` between calls goes when the
+  # pool evicts that lease (its buffer freed); `prepare` allocates it again,
   # reserving first, before the next search.
   #
   # WARNING: A workspace belongs to one fiber.
-  class PikeVM < PoolMember
+  class PikeVM
     # A slot that holds no position.
     UNSET = -1_i64
 
     # Returns the bytes the collector hands out for a workspace of
     # *program* in the span layout or (with *captures*) the capture
-    # layout: the buffer, this object and its pool reservation, each
-    # rounded up to the collector's granule (`AllocationLedger.granules`).
+    # layout: the buffer, this object and its pool reservation (with its
+    # finalizer record), each rounded up to the collector's granule
+    # (`AllocationLedger.granules`).
     def self.workspace_charge(program : Program, captures : Bool) : Int64
       workspace_charge(program.state_count.to_i64, program.slot_count.to_i64, captures)
     end
@@ -62,7 +63,7 @@ module Mica::Regex
                   Program.span_workspace_bytes(state_count)
                 end
       Preflight.add(Preflight.add(AllocationLedger.granules(payload), AllocationLedger.granules(instance_sizeof(PikeVM))),
-        AllocationLedger.granules(instance_sizeof(CacheReservation)))
+        AllocationLedger.granules(instance_sizeof(CacheReservation)) + AllocationLedger::FINALIZER_BYTES)
     end
 
     # True when the workspace has the capture layout.
@@ -102,7 +103,6 @@ module Mica::Regex
       @current_dense = @current_sparse = @next_dense = @next_sparse = Pointer(UInt32).null
       @stack = @scratch = Pointer(Int64).null
       allocate
-      pool.register(self)
     end
 
     private def reserve_charge : Nil
@@ -120,11 +120,6 @@ module Mica::Regex
       return unless @buffer.null?
       reserve_charge
       allocate
-    end
-
-    # Frees the buffer and gives the charge back (see `CachePool`).
-    protected def evict : Nil
-      release
     end
 
     private def allocate : Nil

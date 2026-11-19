@@ -98,7 +98,9 @@ module Mica::Core
     getter units : Int64 = 0_i64
 
     @checkpoint : Int64
-    @started : Time::Instant
+    # When the clock started; nil after a `restart` under a budget with no
+    # timeout, which leaves the clock unread.
+    @started : Time::Instant?
 
     def initialize(@budget : WorkBudget = WorkBudget.new)
       @started = Time.instant
@@ -107,12 +109,15 @@ module Mica::Core
     end
 
     # Starts the meter over under *budget*, as a new meter would: no
-    # operations, no units, and the clock started now. Lets a caller that
-    # runs many short operations reuse one meter.
+    # operations, no units, and the clock started now when *budget* has a
+    # timeout. Lets a caller that runs many short operations reuse one
+    # meter. Without a timeout the clock is not read (a clock read costs
+    # more than a short operation), and `elapsed` is zero until the next
+    # restart that has one.
     def restart(@budget : WorkBudget) : Nil
       @operations = 0_i64
       @units = 0_i64
-      @started = Time.instant
+      @started = @budget.timeout ? Time.instant : nil
       @checkpoint = 0_i64
       @checkpoint = next_checkpoint
     end
@@ -185,7 +190,8 @@ module Mica::Core
 
     # Returns the time since the meter started.
     def elapsed : Time::Span
-      Time.instant - @started
+      started = @started
+      started ? Time.instant - started : Time::Span::ZERO
     end
 
     # Returns true when a timeout is set and has passed. Reads the clock;

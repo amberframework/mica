@@ -20,10 +20,16 @@ module Mica::Regex
   # input, so every assertion is decided when the transition is built: the
   # closure that leads to a match runs one byte late, as in Rust regex. The
   # end of the haystack is an extra input symbol, and (forward, for `$` and
-  # `\Z`) so is a line feed that ends the haystack. Unicode word assertions
-  # need a whole character on each side, so a DFA that meets one next to a
-  # non-ASCII byte gives up and the search runs on the Pike VM (Rust regex
-  # does the same). `\G` is left to the Pike VM.
+  # `\Z`) so is a line feed that ends the haystack. `\G` is left to the
+  # Pike VM.
+  #
+  # **Unicode word assertions** need a whole character on each side. When a
+  # program has one, every byte of a non-ASCII character is read as one of
+  # two symbols, its class or its class marked as part of a word character
+  # (`word_symbol`), so the transition that reads the next character knows
+  # whether it is a word character, and the state after it records whether
+  # the previous one was. The search loops decode each non-ASCII character
+  # once to choose the symbol (`wide_char`). The DFA never gives up on them.
   #
   # **Cost.** A transition the cache holds costs one table read. Building a
   # state costs one operation per NFA state its closure visits, at most
@@ -78,20 +84,27 @@ module Mica::Regex
     @relevant_flags : Int32
     @unicode_words : Bool
     @final_lf : Bool
+    # The first word symbol (see `word_symbol`); every symbol below it is a
+    # plain class or an edge symbol.
+    @word_offset : Int32
 
     def initialize(@program : Program, @byte_classes : ByteClasses, @reverse : Bool)
-      # Rounded up to a multiple of 4, so a row offset leaves two low bits
-      # free for flags (see `find_end`).
-      @stride = (@byte_classes.class_count + 2 + 3) & ~3
-      @reverse_nfa = @reverse ? ReverseNFA.new(@program) : nil
       looks = LazyDFA.looks_used(@program)
+      @unicode_words = looks.any? { |kind| LazyDFA.unicode_word?(kind) }
+      class_count = @byte_classes.class_count
+      @word_offset = class_count + 2
+      # The classes, the two edge symbols, and (with Unicode word
+      # assertions) a word symbol per class, rounded up to a multiple of 4,
+      # so a row offset leaves two low bits free for flags (see `find_end`).
+      symbols = @unicode_words ? @word_offset + class_count : @word_offset
+      @stride = (symbols + 3) & ~3
+      @reverse_nfa = @reverse ? ReverseNFA.new(@program) : nil
       line_start = looks.includes?(Program::LookKind::StartOfLine)
       text_start = looks.includes?(Program::LookKind::StartOfText)
       text_end = looks.includes?(Program::LookKind::EndOfText)
       final_newline = looks.includes?(Program::LookKind::EndOfTextOrFinalNewline)
       line_end = looks.includes?(Program::LookKind::EndOfLine) ||
                  looks.includes?(Program::LookKind::NotBeforeLineFeed)
-      @unicode_words = looks.any? { |kind| LazyDFA.unicode_word?(kind) }
       words = @unicode_words || looks.any? { |kind| LazyDFA.ascii_word?(kind) }
       @final_lf = !@reverse && final_newline
       relevant = UNANCHORED | START_PENDING | MATCH_BEHIND
@@ -105,7 +118,6 @@ module Mica::Regex
         relevant |= PREVIOUS_LF if line_start
       end
       relevant |= PREVIOUS_WORD if words
-      relevant |= PREVIOUS_WIDE if @unicode_words
       @relevant_flags = relevant
     end
 
@@ -140,6 +152,26 @@ module Mica::Regex
       @byte_classes.class_count + 1
     end
 
+    # The symbol for a byte of class *class_index* that is part of a
+    # non-ASCII word character (with Unicode word assertions only).
+    def word_symbol(class_index : Int32) : Int32
+      @word_offset + class_index
+    end
+
+    # :nodoc:
+    # Returns the start and end of the character holding byte *at* of the
+    # (valid UTF-8) haystack, and whether it is a word character (PCRE2's
+    # UCP `\w`).
+    def self.wide_char(haystack : Bytes, at : Int32) : {Int32, Int32, Bool}
+      start = at
+      while start > 0 && at - start < 3 && haystack.unsafe_fetch(start) & 0xC0 == 0x80
+        start -= 1
+      end
+      lead = haystack.unsafe_fetch(start)
+      length = lead < 0xE0 ? 2 : (lead < 0xF0 ? 3 : 4)
+      {start, start + length, Look.word_after?(haystack, start, false)}
+    end
+
     # Searches forward from *start* for the end of the leftmost-first
     # match, reading to the end of *haystack*. Returns the end, `NO_MATCH`,
     # or `GAVE_UP` (the caller then runs the Pike VM). With *earliest*,
@@ -162,6 +194,10 @@ module Mica::Regex
       bytes = haystack.to_unsafe
       class_table = @byte_classes.table
       stride = @stride
+      words = @unicode_words
+      # The character the last non-ASCII byte belonged to (see `wide_char`).
+      wide_start = wide_end = 0
+      wide_word = false
       while true
         if scan && current & START_ENTRY != 0
           candidate = scan.find(at, meter)
@@ -180,9 +216,15 @@ module Mica::Regex
         chunk_start = at
         table = cache.transition_table.to_unsafe
         while at < chunk_end
-          entry = table[(current & ROW_MASK) &+ class_table[bytes[at]]]
+          byte = bytes[at]
+          symbol = class_table[byte].to_i32
+          if words && byte >= 0x80
+            wide_start, wide_end, wide_word = LazyDFA.wide_char(haystack, at) unless wide_start <= at < wide_end
+            symbol &+= @word_offset if wide_word
+          end
+          entry = table[(current & ROW_MASK) &+ symbol]
           if entry < 0
-            id = cache.transition(self, current // stride, @byte_classes.class_of(bytes[at]), meter)
+            id = cache.transition(self, current // stride, symbol, meter)
             return GAVE_UP if id < 0
             entry = cache.entry_of(id)
             table = cache.transition_table.to_unsafe
@@ -237,15 +279,24 @@ module Mica::Regex
       bytes = haystack.to_unsafe
       class_table = @byte_classes.table
       stride = @stride
+      words = @unicode_words
+      wide_start = wide_end = 0
+      wide_word = false
       dead = false
       while at > lower_bound && !dead
         chunk_end = Math.max(lower_bound, at - 4096)
         chunk_start = at
         table = cache.transition_table.to_unsafe
         while at > chunk_end
-          entry = table[(current & ROW_MASK) &+ class_table[bytes[at - 1]]]
+          byte = bytes[at - 1]
+          symbol = class_table[byte].to_i32
+          if words && byte >= 0x80
+            wide_start, wide_end, wide_word = LazyDFA.wide_char(haystack, at - 1) unless wide_start <= at - 1 < wide_end
+            symbol &+= @word_offset if wide_word
+          end
+          entry = table[(current & ROW_MASK) &+ symbol]
           if entry < 0
-            id = cache.transition(self, current // stride, @byte_classes.class_of(bytes[at - 1]), meter)
+            id = cache.transition(self, current // stride, symbol, meter)
             return GAVE_UP if id < 0
             entry = cache.entry_of(id)
             table = cache.transition_table.to_unsafe
@@ -265,7 +316,7 @@ module Mica::Regex
         cache.note_bytes(chunk_start - at)
       end
       return last_start if dead
-      symbol = lower_bound > 0 ? @byte_classes.class_of(haystack.unsafe_fetch(lower_bound - 1)) : edge_symbol
+      symbol = lower_bound > 0 ? symbol_at(haystack, lower_bound - 1) : edge_symbol
       state = step(cache, current // stride, symbol, meter)
       return GAVE_UP if state < 0
       last_start = lower_bound if cache.list_of_marks.unsafe_fetch(state) & MARK_MATCH != 0
@@ -290,7 +341,7 @@ module Mica::Regex
       if at == 0
         flags |= TEXT_EDGE
       else
-        flags |= byte_flags(haystack.unsafe_fetch(at - 1))
+        flags |= symbol_flags(haystack.unsafe_fetch(at - 1).to_i32, symbol_at(haystack, at - 1))
       end
       flags & @relevant_flags
     end
@@ -302,19 +353,34 @@ module Mica::Regex
         flags |= TEXT_EDGE
       else
         byte = haystack.unsafe_fetch(at)
-        flags |= byte_flags(byte)
+        flags |= symbol_flags(byte.to_i32, symbol_at(haystack, at))
         flags |= PREVIOUS_TAIL if byte & 0xC0 == 0x80
         flags |= FINAL_LF_EDGE if at == size - 1 && byte == Look::LINE_FEED
       end
       flags & @relevant_flags
     end
 
-    private def byte_flags(byte : UInt8) : Int32
+    # The flags reading *byte* (read as *symbol*) leaves for the next
+    # position. A non-ASCII byte counts as a word byte when its symbol is a
+    # word symbol (with Unicode word assertions).
+    private def symbol_flags(byte : Int32, symbol : Int32) : Int32
       flags = 0
       flags |= PREVIOUS_LF if byte == Look::LINE_FEED
-      flags |= PREVIOUS_WORD if byte < 0x80 && Look.word_code_point?(byte.to_i32, true)
-      flags |= PREVIOUS_WIDE if byte >= 0x80
+      if byte < 0x80
+        flags |= PREVIOUS_WORD if Look.word_code_point?(byte, true)
+      else
+        flags |= PREVIOUS_WIDE
+        flags |= PREVIOUS_WORD if symbol >= @word_offset
+      end
       flags
+    end
+
+    # The symbol the search loops read for byte *at* of *haystack*.
+    private def symbol_at(haystack : Bytes, at : Int32) : Int32
+      byte = haystack.unsafe_fetch(at)
+      symbol = @byte_classes.class_of(byte)
+      symbol += @word_offset if @unicode_words && byte >= 0x80 && LazyDFA.wide_char(haystack, at)[2]
+      symbol
     end
 
     # :nodoc:
@@ -331,6 +397,7 @@ module Mica::Regex
     private def symbol_byte(symbol : Int32) : Int32
       return -1 if symbol == edge_symbol
       return Look::LINE_FEED.to_i32 if symbol == final_lf_symbol
+      symbol -= @word_offset if symbol >= @word_offset
       @byte_classes.representative(symbol).to_i32
     end
 
@@ -390,7 +457,7 @@ module Mica::Regex
       return matched ? DEAD_MATCH_KEY : DEAD_KEY if byte < 0 && symbol == edge_symbol
       next_flags = matched ? MATCH_BEHIND : 0
       next_flags |= UNANCHORED if flags & UNANCHORED != 0 && !matched
-      next_flags |= byte_flags(byte.to_u8)
+      next_flags |= symbol_flags(byte, symbol)
       builder.begin_targets(next_flags & @relevant_flags)
       builder.each_output do |state_index|
         state = states.unsafe_fetch(state_index)
@@ -430,8 +497,7 @@ module Mica::Regex
       in .search_start?
         nil
       in .word_boundary?, .not_word_boundary?, .word_start?, .word_end?
-        return nil if flags & PREVIOUS_WIDE != 0 || byte >= 0x80
-        word_look(kind, flags & PREVIOUS_WORD != 0, word_byte?(byte))
+        word_look(kind, flags & PREVIOUS_WORD != 0, symbol_word?(byte, symbol))
       in .word_boundary_ascii?, .not_word_boundary_ascii?, .word_start_ascii?, .word_end_ascii?
         word_look(kind, flags & PREVIOUS_WORD != 0, word_byte?(byte))
       end
@@ -439,6 +505,13 @@ module Mica::Regex
 
     private def word_byte?(byte : Int32) : Bool
       byte >= 0 && byte < 0x80 && Look.word_code_point?(byte, true)
+    end
+
+    # True when the character *byte* (read as *symbol*) belongs to is a
+    # Unicode word character; false at an edge.
+    private def symbol_word?(byte : Int32, symbol : Int32) : Bool
+      return word_byte?(byte) if byte < 0x80
+      symbol >= @word_offset && symbol != edge_symbol && symbol != final_lf_symbol
     end
 
     private def word_look(kind : Program::LookKind, before : Bool, after : Bool) : Bool
@@ -466,7 +539,7 @@ module Mica::Regex
         builder.output(current) if reverse_nfa.consumes?(current)
         reverse_nfa.each_epsilon(current) do |target, look|
           if look >= 0
-            verdict = reverse_look(Program::LookKind.new(look), flags, byte)
+            verdict = reverse_look(Program::LookKind.new(look), flags, byte, symbol)
             if verdict.nil?
               quit = true
               next
@@ -480,7 +553,7 @@ module Mica::Regex
       accepted = false if flags & PREVIOUS_TAIL != 0
       return accepted ? DEAD_MATCH_KEY : DEAD_KEY if byte < 0
       next_flags = accepted ? MATCH_BEHIND : 0
-      next_flags |= byte_flags(byte.to_u8)
+      next_flags |= symbol_flags(byte, symbol)
       next_flags |= PREVIOUS_TAIL if byte & 0xC0 == 0x80
       next_flags |= FINAL_LF_EDGE if flags & TEXT_EDGE != 0 && byte == Look::LINE_FEED
       builder.begin_targets(next_flags & @relevant_flags)
@@ -494,7 +567,7 @@ module Mica::Regex
 
     # As `forward_look`, read backward: the position's later bytes are in
     # *flags* and its earlier byte is *byte* (-1 at the start of the text).
-    private def reverse_look(kind : Program::LookKind, flags : Int32, byte : Int32) : Bool?
+    private def reverse_look(kind : Program::LookKind, flags : Int32, byte : Int32, symbol : Int32) : Bool?
       at_start = byte < 0
       at_end = flags & TEXT_EDGE != 0
       later_lf = flags & PREVIOUS_LF != 0
@@ -514,8 +587,7 @@ module Mica::Regex
       in .search_start?
         nil
       in .word_boundary?, .not_word_boundary?, .word_start?, .word_end?
-        return nil if flags & PREVIOUS_WIDE != 0 || byte >= 0x80
-        word_look(kind, word_byte?(byte), flags & PREVIOUS_WORD != 0)
+        word_look(kind, symbol_word?(byte, symbol), flags & PREVIOUS_WORD != 0)
       in .word_boundary_ascii?, .not_word_boundary_ascii?, .word_start_ascii?, .word_end_ascii?
         word_look(kind, word_byte?(byte), flags & PREVIOUS_WORD != 0)
       end

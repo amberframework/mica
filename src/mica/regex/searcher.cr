@@ -68,6 +68,9 @@ module Mica::Regex
   #
   # WARNING: A searcher belongs to one call and one fiber.
   class Searcher
+    # The shortest haystack a lease remembers as validated.
+    REMEMBERED_HAYSTACK_BYTES = 4096
+
     # The call's meter.
     getter meter : SearchMeter
     # True once a lazy DFA gave up in this call (for specs).
@@ -162,14 +165,18 @@ module Mica::Regex
       lease = @lease
       unless lease && lease.validated?(@haystack)
         # Validation reads every byte once: one operation per byte. A lease
-        # remembers the last `String` it validated, so an iteration of
-        # separate calls over one haystack validates it once.
+        # remembers the last `String` of at least `REMEMBERED_HAYSTACK_BYTES`
+        # it validated, so an iteration of separate calls over one long
+        # haystack validates it once; a short one costs less to validate
+        # again than to remember (a weak reference per call).
         bytes = @haystack.to_slice
         @meter.charge(bytes.size, 0)
         if offset = Core::UTF8.first_invalid_offset(bytes)
           raise Mica::EncodingError.new("The haystack is not valid UTF-8", Core::Position.new(offset.to_i64))
         end
-        lease.try(&.remember_validated(@haystack))
+        if lease && bytes.size >= REMEMBERED_HAYSTACK_BYTES
+          lease.remember_validated(@haystack)
+        end
       end
       # The deadline is read at the start of every call, so a timeout that
       # has already passed fails even a search too short to reach a clock
@@ -206,7 +213,7 @@ module Mica::Regex
       bytes = @haystack.to_slice
       return nil if byte_index > bytes.size
       check_start(bytes, byte_index)
-      anchored = @program.options.anchored? || options.anchored?
+      anchored = @program.options.anchored? || options.anchored? || anchored_start?
       end_anchored = @program.options.end_anchored? || options.end_anchored?
       case @engine
       in .pike_vm?
@@ -234,7 +241,7 @@ module Mica::Regex
       bytes = @haystack.to_slice
       return false if byte_index > bytes.size
       check_start(bytes, byte_index)
-      anchored = @program.options.anchored? || options.anchored?
+      anchored = @program.options.anchored? || options.anchored? || anchored_start?
       end_anchored = @program.options.end_anchored? || options.end_anchored?
       if dfa = automaton(end_anchored)
         if literal_search?(anchored)
@@ -321,6 +328,15 @@ module Mica::Regex
         raise Mica::Error.new("internal error: the reverse DFA found no start for the match ending at #{finish}")
       end
       start
+    end
+
+    # True when the plan proved every match starts at the start of the text,
+    # so an unanchored search finds only what an anchored one at its offset
+    # finds (nothing past offset 0).
+    private def anchored_start? : Bool
+      return false unless @engine.automata?
+      plan = @plan
+      !!plan && plan.anchored_start?
     end
 
     # The forward lazy DFA when this search may use it, or nil.

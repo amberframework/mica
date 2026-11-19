@@ -33,6 +33,10 @@ module Mica::Regex
     getter prefilter : Prefilter?
     # True when the prefilter alone finds matches (see `LiteralSet#exact?`).
     getter? literal_search : Bool
+    # True when every match starts at the start of the text (each path from
+    # the start state passes `\A` before it reads a byte): a search is
+    # then anchored at its offset, and the reverse DFA is not needed.
+    getter? anchored_start : Bool
     # The lazily built parts are published through atomics, so a search
     # on another thread that sees one sees it fully built.
     @reverse = Atomic(LazyDFA?).new(nil)
@@ -51,6 +55,33 @@ module Mica::Regex
       literal_set = @program.literal_set
       @prefilter = literal_set ? Prefilter.new(literal_set) : nil
       @literal_search = !!literal_set.try(&.exact?)
+      @anchored_start = SearchPlan.anchored_start?(@program)
+    end
+
+    # True when every path from *program*'s start state reaches a
+    # `StartOfText` assertion before it reads a byte or matches.
+    def self.anchored_start?(program : Program) : Bool
+      states = program.list_of_states
+      visited = Set(Int32).new
+      list_of_pending = [program.start_state]
+      while index = list_of_pending.pop?
+        next unless visited.add?(index)
+        state = states[index]
+        case state.kind
+        when .split?
+          list_of_pending << state.next_state << state.alternate
+        when .save?
+          list_of_pending << state.next_state
+        when .look?
+          next if Program::LookKind.new(state.argument).start_of_text?
+          list_of_pending << state.next_state
+        when .fail?
+          next
+        else
+          return false
+        end
+      end
+      true
     end
 
     # The reverse lazy DFA (built on first use), or nil.
@@ -86,7 +117,7 @@ module Mica::Regex
     def lease(pool : CachePool) : SearchLease
       lease = @hot_lease.swap(nil) || @mutex.synchronize { @list_of_idle_leases.pop? }
       if lease && lease.pool.same?(pool)
-        lease.wake
+        lease.acquire
         return lease
       end
       SearchLease.new(self, pool)
@@ -94,10 +125,16 @@ module Mica::Regex
 
     # Returns *lease* for a later search to reuse. At most `MAX_IDLE_LEASES`
     # are kept per program.
+    # The lease is handed to the pool (idle, evictable) before it is
+    # published as the hot lease; one that goes to the idle list instead
+    # drops its workspaces first, taken back from the pool meanwhile.
     def give_back(lease : SearchLease) : Nil
-      lease.sleep
+      tick = lease.pool.tick
+      lease.release_to_pool(tick)
       return if @hot_lease.compare_and_set(nil, lease)[1]
+      lease.acquire
       lease.drop_workspaces
+      lease.release_to_pool(tick)
       @mutex.synchronize do
         @list_of_idle_leases << lease if @list_of_idle_leases.size < MAX_IDLE_LEASES
       end
@@ -113,7 +150,11 @@ module Mica::Regex
   # the last call (kept only while the lease is the program's hot lease,
   # so a program retains at most one set), and the last haystack the lease
   # validated.
-  class SearchLease
+  #
+  # The lease is the `CachePool` member: a search holds it BUSY (one
+  # atomic exchange to take it, one store to hand it back), and the pool
+  # evicts an idle lease's caches and kept Pike VM workspace together.
+  class SearchLease < PoolMember
     getter pool : CachePool
     @forward_cache : DFACache?
     @reverse_cache : DFACache?
@@ -152,11 +193,9 @@ module Mica::Regex
     end
 
     # Drops the kept workspaces (a lease that goes to the idle list). The
-    # Pike VM workspace is taken back from the pool first, so the pool
-    # cannot evict it while it is released.
+    # caller holds the lease, so the pool cannot evict it meanwhile.
     def drop_workspaces : Nil
       if pike = @pike
-        pike.acquire
         pike.release
       end
       @pike = nil
@@ -165,6 +204,7 @@ module Mica::Regex
     end
 
     def initialize(@plan : SearchPlan, @pool : CachePool)
+      @pool.register(self)
     end
 
     # The forward cache, made on first use; nil when the pool cannot supply
@@ -190,21 +230,12 @@ module Mica::Regex
       @validated = WeakRef.new(haystack)
     end
 
-    # Takes the caches and the kept Pike VM workspace back from the pool
-    # for a search.
-    def wake : Nil
-      @forward_cache.try(&.acquire)
-      @reverse_cache.try(&.acquire)
-      @pike.try(&.acquire)
-    end
-
-    # Hands the caches and the kept Pike VM workspace to the pool while the
-    # lease is idle (evictable).
-    def sleep : Nil
-      tick = @pool.tick
-      @forward_cache.try(&.release_to_pool(tick))
-      @reverse_cache.try(&.release_to_pool(tick))
-      @pike.try(&.release_to_pool(tick))
+    # Drops the caches' states and the kept Pike VM workspace, giving their
+    # bytes back to the pool. Runs only while the lease is idle and EVICTING.
+    protected def evict : Nil
+      @forward_cache.try(&.evict)
+      @reverse_cache.try(&.evict)
+      @pike.try(&.release)
     end
   end
 end

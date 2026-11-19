@@ -151,9 +151,22 @@ module Mica::Core
     # when all of it is valid UTF-8. Runs in one pass, reading runs of ASCII
     # eight bytes at a time.
     def self.first_invalid_offset(bytes : Bytes) : Int32?
-      index = 0
       size = bytes.size
       pointer = bytes.to_unsafe
+      # All ASCII (the common case): OR every word and the tail together
+      # and test the high bits once, with no branch per word.
+      high_bits = 0_u64
+      index = 0
+      while index + 8 <= size
+        high_bits |= (pointer + index).as(UInt64*).value
+        index += 8
+      end
+      while index < size
+        high_bits |= pointer[index]
+        index += 1
+      end
+      return nil if high_bits & 0x8080808080808080_u64 == 0
+      index = 0
       while index < size
         while index + 8 <= size && (pointer + index).as(UInt64*).value & 0x8080808080808080_u64 == 0
           index += 8

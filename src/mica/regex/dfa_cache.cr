@@ -10,7 +10,7 @@ module Mica::Regex
   # in every generation of the cache.
   #
   # WARNING: A cache belongs to one search at a time.
-  class DFACache < PoolMember
+  class DFACache
     # The transition table (see the class description).
     getter transition_table : Array(Int32)
     # One byte of `LazyDFA::MARK_*` bits per state.
@@ -61,7 +61,6 @@ module Mica::Regex
       @start_states = Array(Int32).new(LazyDFA::MATCH_BEHIND * 2, -1)
       @builder = DFABuilder.new(@dfa.program.state_count)
       reset_states
-      @pool.register(self)
     end
 
     # Bytes the builder's scratch space and the cache's fixed parts take.
@@ -75,8 +74,9 @@ module Mica::Regex
       @bytes_since_clear += count
     end
 
-    # Drops every state and gives the memory back to the pool.
-    protected def evict : Nil
+    # Drops every state and gives the memory back to the pool (its lease
+    # is being evicted, see `SearchLease`).
+    def evict : Nil
       @transition_table = [] of Int32
       @list_of_marks = [] of UInt8
       @list_of_keys = [] of Array(Int32)

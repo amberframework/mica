@@ -100,7 +100,8 @@ describe "Mica::Regex R2 review round 3" do
       program.state_count.should be > 65_536
       expected = Mica::Regex::AllocationLedger.granules(32_i64 * program.state_count) +
                  Mica::Regex::AllocationLedger.granules(instance_sizeof(Mica::Regex::PikeVM)) +
-                 Mica::Regex::AllocationLedger.granules(instance_sizeof(Mica::Regex::CacheReservation))
+                 Mica::Regex::AllocationLedger.granules(instance_sizeof(Mica::Regex::CacheReservation)) +
+                 Mica::Regex::AllocationLedger::FINALIZER_BYTES
       Mica::Regex::PikeVM.workspace_charge(program, captures: false).should eq(expected)
       haystack = "a" * 90_000
       bytes = allocated_bytes do

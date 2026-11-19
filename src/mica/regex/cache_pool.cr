@@ -134,7 +134,8 @@ module Mica::Regex
 
   # :nodoc:
   # Memory a `CachePool` accounts for and may reclaim while no search holds
-  # it: a lazy-DFA cache (`DFACache`) or a Pike VM workspace (`PikeVM`).
+  # it: a `SearchLease`, with its lazy-DFA caches (`DFACache`) and the Pike
+  # VM workspace (`PikeVM`) it keeps between calls.
   # A member is BUSY while a search holds it, IDLE once handed back, and
   # EVICTING while the pool drops its memory. An evicted member stays
   # usable: it rebuilds what it needs, reserving again, when next used.

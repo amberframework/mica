@@ -81,7 +81,23 @@ module Mica::Regex
           code_point == 0x5F
       end
       return false if ascii
+      if code_point < 0x10000
+        return WORD_BITMAP.unsafe_fetch(code_point >> 6) & (1_u64 << (code_point & 63)) != 0
+      end
       Unicode.includes?(Unicode::Tables::SET_XWD, code_point)
+    end
+
+    # One bit per code point below U+10000, set for the UCP word set
+    # (`\p{Xwd}`): one load instead of a binary search for the common
+    # case. Built from the table once, on first use, and never written
+    # afterward.
+    private WORD_BITMAP = begin
+      bits = Slice(UInt64).new(1024)
+      Unicode.each_range(Unicode::Tables::SET_XWD) do |first, last|
+        next if first >= 0x10000
+        (first..Math.min(last, 0xFFFF)).each { |code_point| bits[code_point >> 6] |= 1_u64 << (code_point & 63) }
+      end
+      bits
     end
 
     # Decodes the (valid) UTF-8 sequence that starts at *at*.

@@ -25,6 +25,10 @@ module Mica::Regex
   class AllocationLedger
     # The collector's allocation granule.
     GRANULE = 16
+    # What the collector allocates to register one finalizer (its
+    # finalization record), beside the object itself: measured as 32 bytes
+    # with bdwgc 8.2 on 64-bit targets, checked by the Pike VM charge spec.
+    FINALIZER_BYTES = 32
 
     # Bytes a growing `Array` allocates per element, as a multiple of the
     # element size: stdlib arrays double up to 256 elements and then grow
