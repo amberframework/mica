@@ -116,10 +116,12 @@ module Mica::Regex
       short = ShortSearch.new(@program, string, byte_index, options, limits, timeout)
       if short.applies?
         return nil if short.rejects?
-        # Slots and scratch on the stack: `ShortSearch::MAX_SLOTS` each.
+        # Slots and scratch on the stack: `ShortSearch::MAX_SLOTS` each
+        # (`run` declines a program with more).
         buffer = uninitialized StaticArray(Int64, 32)
-        slots = Slice.new(buffer.to_unsafe, @program.slot_count)
-        scratch = Slice.new(buffer.to_unsafe + ShortSearch::MAX_SLOTS, @program.slot_count)
+        slot_count = Math.min(@program.slot_count, ShortSearch::MAX_SLOTS)
+        slots = Slice.new(buffer.to_unsafe, slot_count)
+        scratch = Slice.new(buffer.to_unsafe + ShortSearch::MAX_SLOTS, slot_count)
         finish = short.run(slots, scratch)
         return nil if finish == LazyDFA::NO_MATCH
         return MatchData.new(self, string, byte_index, slots) unless finish == LazyDFA::GAVE_UP

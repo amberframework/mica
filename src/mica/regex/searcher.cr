@@ -354,7 +354,7 @@ module Mica::Regex
     # still undecided there (a long match, or a long failure such as `a+b`
     # over a run of a's) turns the search at starts off for the call, so
     # it costs the call at most this much.
-    MAX_TRY_BYTES = 256
+    MAX_TRY_BYTES = 64
 
     # One anchored try at *start* (see `find_at_starts`), on *one_pass*
     # when there is one, else on *forward* with *cache*.

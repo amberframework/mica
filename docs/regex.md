@@ -424,13 +424,13 @@ much as the cost per byte:
 
 - **No engine for a short haystack that cannot match.** A program's
   `StartFilter` (built with its plan) holds the fewest bytes a match spans,
-  the bytes a match can start with, and an ASCII byte every match
-  contains when there is one (`:` in `.*:(\d+)`), read from the NFA with
-  every assertion taken as passing. `match`, `match_at_byte_index`, `search` and
+  the bytes a match can start with, and up to three ASCII bytes every
+  match contains (`:` in `.*:(\d+)`), read from the NFA with every
+  assertion taken as passing. `match`, `match_at_byte_index`, `search` and
   `matches?` over a haystack of at most 256 bytes return no match at once,
   with no lease and no engine, when too few bytes remain or none of them
   can start a match (only the first, when the search is anchored), or the
-  required byte is missing. They do so only where the searcher would also return no match without raising:
+  a required byte is missing. They do so only where the searcher would also return no match without raising:
   the haystack is valid UTF-8 and its validation fits the work allowance,
   the offset is a character boundary, and no timeout is set.
 - **Short haystacks on the one-pass DFA.** Once a one-pass program has had
@@ -481,7 +481,7 @@ much as the cost per byte:
   call; past the haystack's size, or once the prefilter proves
   ineffective, the call stops trying, so the one-pass search adds at most
   O(n) to a call. A single try stops after `Searcher::MAX_TRY_BYTES`
-  (256) undecided bytes and turns the search at starts off for the call,
+  (64) undecided bytes and turns the search at starts off for the call,
   so a long failure such as `(?:a+)+b` over a run of a's costs at most
   that much extra.
 - **Groups read on first use.** When only the bounded backtracker or the

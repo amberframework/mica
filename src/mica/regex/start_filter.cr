@@ -5,8 +5,8 @@ module Mica::Regex
   # taking a lease or starting an engine (see "Short searches" in
   # docs/regex.md).
   #
-  # It also holds an ASCII byte every match contains, when there is one
-  # (`:` in `.*:(\d+)`).
+  # It also holds up to `MAX_REQUIRED_BYTES` ASCII bytes every match
+  # contains (`:` in `.*:(\d+)`, `y` and `x` in `(x+x+)+y`).
   #
   # All are read from the NFA, with every assertion taken as passing, so
   # they over-approximate the matches: a haystack the filter rejects has no
@@ -22,13 +22,16 @@ module Mica::Regex
   class StartFilter
     # The fewest bytes a match spans (0 when it can be empty).
     getter minimum_bytes : Int32
-    # An ASCII byte every match contains (the rarest found), or nil.
-    getter required_byte : UInt8?
+    # ASCII bytes every match contains, rarest first (at most
+    # `MAX_REQUIRED_BYTES`).
+    getter list_of_required_bytes = [] of UInt8
     # One bit per byte value that can start a non-empty match.
     @start_bytes = StaticArray(UInt64, 4).new(0_u64)
 
     # The most single-byte states `required_byte` considers.
     private MAX_REQUIRED_CANDIDATES = 8
+    # The most required bytes kept.
+    MAX_REQUIRED_BYTES = 3
 
     # The one byte every match starts with, or -1.
     @single_start = -1
@@ -37,7 +40,7 @@ module Mica::Regex
       @minimum_bytes = StartFilter.shortest_match(program)
       return unless @minimum_bytes > 0
       collect_start_bytes(program)
-      @required_byte = StartFilter.required_byte(program)
+      @list_of_required_bytes = StartFilter.required_bytes(program)
       list_of_start_bytes = (0..255).select { |byte| starts?(byte.to_u8) }
       @single_start = list_of_start_bytes.first if list_of_start_bytes.size == 1
     end
@@ -52,8 +55,8 @@ module Mica::Regex
       return false if @minimum_bytes == 0
       last = from if anchored
       return true if next_start(haystack, from, last) < 0
-      required = @required_byte
-      !!required && !haystack[from..].index(required)
+      tail = haystack[from..]
+      @list_of_required_bytes.any? { |byte| !tail.index(byte) }
     end
 
     # The first position from *from* through *last* where a match may
@@ -72,17 +75,20 @@ module Mica::Regex
       -1
     end
 
-    # The rarest ASCII byte (by `Prefilter.rank`) that every path from the
-    # start state to the match state reads in a state that reads only that
-    # byte, or nil. Each of the `MAX_REQUIRED_CANDIDATES` rarest such bytes
-    # is tried by searching for a path that avoids its states: O(m) each.
-    def self.required_byte(program : Program) : UInt8?
+    # The rarest ASCII bytes (by `Prefilter.rank`, at most
+    # `MAX_REQUIRED_BYTES`) that every path from the start state to the
+    # match state reads in a state that reads only that byte. Each of the
+    # `MAX_REQUIRED_CANDIDATES` rarest such bytes is tried by searching for
+    # a path that avoids its states: O(m) each.
+    def self.required_bytes(program : Program) : Array(UInt8)
       states = program.list_of_states
       list_of_candidates = states.compact_map do |state|
         state.low if state.kind.byte_range? && state.low == state.high && state.low < 0x80
       end
       list_of_candidates.uniq!.sort_by! { |byte| Prefilter.rank(byte) }
-      list_of_candidates.first(MAX_REQUIRED_CANDIDATES).find { |byte| !match_reachable_without?(program, byte) }
+      list_of_candidates.first(MAX_REQUIRED_CANDIDATES)
+        .reject { |byte| match_reachable_without?(program, byte) }
+        .first(MAX_REQUIRED_BYTES)
     end
 
     # True when a path from the start state reaches the match state without
