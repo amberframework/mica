@@ -163,12 +163,15 @@ module Mica::Regex
     end
 
     # Starts the scan over on *haystack*, as a new scan would (a searcher
-    # reuses its scan from one call to the next).
-    def reset(@haystack : Bytes) : Nil
+    # reuses its scan from one call to the next). With *keep_positions*
+    # (the haystack is the one the last call scanned), where each needle
+    # was found stays known.
+    def reset(@haystack : Bytes, *, keep_positions : Bool = false) : Nil
       @candidates = 0
       @skipped = 0_i64
       @guard_from = 0
       @packed_from = 0
+      return if keep_positions
       @found_at = StaticArray(Int32, 3).new(-1)
       @scanned_from = StaticArray(Int32, 3).new(0)
     end

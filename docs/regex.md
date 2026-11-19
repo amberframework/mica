@@ -219,7 +219,12 @@ it once; each merge step is charged with the heap's depth.
 `LineBreak` (`\R`, kept as its own node because PCRE2 matches it atomically:
 `\r\n` is never split by backtracking), `Repetition` with explicit counts,
 `Capture`, `Concatenation`, `Alternation` and `Empty`. Non-capturing groups
-and option settings are gone.
+and option settings are gone. Adjacent branches that start with the same
+literal share it: `,|,\s` becomes `,(?:|\s)` and `sam|samwise`
+`sam(?:|wise)`. Leftmost-first matching tries the same paths in the same
+order either way, so every match and group is unchanged, and the one-pass
+DFA can read the factored form, where the shared first byte made the
+branches ambiguous.
 
 ## Native API
 
@@ -619,6 +624,15 @@ much as the cost per byte:
   the searcher, trying one in `RETRY_INTERVAL` (256) to see whether that
   changed. `,\s*`, `[^a-z0-9]+` and `\s+` iterated by separate calls over
   a 1 MiB haystack cost about as much per match as PCRE2-JIT does.
+- **Scan positions kept across calls over one haystack.** A call that
+  searches the very `String` the call before it searched (separate calls
+  iterating, as `String#scan` makes them) keeps where the prefilter found
+  each needle and where each required byte was found: a needle that is
+  rare, or absent, is not looked for again past where it was found
+  (`>[^\n]*\n|\n` over a FASTA file no longer scans to the next `>` once
+  per line). Those bytes were read and charged once, by the call that
+  found them; strings are immutable and the parked searcher holds the last
+  one, so identity proves it is the same text.
 - **Groups read on first use.** When only the bounded backtracker or the
   Pike VM can read a pattern's groups (the first capture pass found the
   pattern is not one-pass),

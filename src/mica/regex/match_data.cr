@@ -282,14 +282,14 @@ module Mica::Regex
     # :nodoc:
     # Entry *index* of groups 1 to `group_size` (begin and end pairs), read
     # now if it is still pending.
+    @[AlwaysInline]
     protected def group_offset(index : Int32) : Int32
-      return @inline_groups[index] if @groups.empty?
-      offset = @groups[index]
-      if offset == GROUP_UNREAD
-        read_groups
-        offset = @groups[index]
-      end
-      offset
+      groups = @groups
+      return @inline_groups.unsafe_fetch(index) if groups.empty?
+      offset = groups[index]
+      return offset unless offset == GROUP_UNREAD
+      read_groups
+      @groups[index]
     end
 
     # Reads the groups into the shared buffer. Every entry is one aligned

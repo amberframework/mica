@@ -62,7 +62,9 @@ module Mica::Regex
         Hir::Concatenation.new(children_from(list_of_results, first_child, ledger, offset))
       when Ast::Alternation
         ledger.charge_object(instance_sizeof(Hir::Alternation), "a Hir alternation", offset)
-        Hir::Alternation.new(children_from(list_of_results, first_child, ledger, offset))
+        list_of_branches = factor_first_literals(children_from(list_of_results, first_child, ledger, offset), ledger,
+          offset)
+        list_of_branches.size == 1 ? list_of_branches[0] : Hir::Alternation.new(list_of_branches)
       when Ast::Group
         child = child_count > 0 ? list_of_results[first_child] : empty_node(ledger, offset)
         return child unless node.capturing?
@@ -92,6 +94,63 @@ module Mica::Regex
       list_of_children = Array(Hir::Node).new(count)
       (first...list_of_results.size).each { |index| list_of_children << list_of_results[index] }
       list_of_children
+    end
+
+    # Factors the first literal out of each run of adjacent branches that
+    # start with the same one: `,|,\s` becomes `,(?:|\s)`, which the
+    # one-pass DFA can read (after the comma the empty branch ranks first)
+    # where the two branches made it ambiguous. Leftmost-first matching
+    # tries the same paths in the same order either way (`L·X|L·Y` reads
+    # `L`, then tries `X`, then `Y`), so every match and group is the same.
+    # Only adjacent branches are joined, so priority between branches is
+    # kept.
+    private def self.factor_first_literals(list_of_branches : Array(Hir::Node), ledger : AllocationLedger,
+                                           offset : Int32) : Array(Hir::Node)
+      return list_of_branches if list_of_branches.size < 2
+      factored = nil
+      index = 0
+      while index < list_of_branches.size
+        literal = first_literal(list_of_branches[index])
+        run_end = index + 1
+        if literal
+          while run_end < list_of_branches.size && first_literal(list_of_branches[run_end]).try(&.code_point) == literal.code_point
+            run_end += 1
+          end
+        end
+        if run_end - index >= 2 && literal
+          factored ||= list_of_branches[0, index]
+          ledger.charge_array(run_end - index, sizeof(Hir::Node), "a Hir child list", offset)
+          list_of_rests = Array(Hir::Node).new(run_end - index)
+          (index...run_end).each { |branch| list_of_rests << rest_after_first(list_of_branches[branch], ledger, offset) }
+          ledger.charge_object(instance_sizeof(Hir::Alternation), "a Hir alternation", offset)
+          ledger.charge_object(instance_sizeof(Hir::Concatenation), "a Hir concatenation", offset)
+          ledger.charge_array(2, sizeof(Hir::Node), "a Hir child list", offset)
+          factored << Hir::Concatenation.new([literal, Hir::Alternation.new(list_of_rests)] of Hir::Node)
+        elsif factored
+          (index...run_end).each { |branch| factored << list_of_branches[branch] }
+        end
+        index = run_end
+      end
+      factored || list_of_branches
+    end
+
+    # The literal *branch* starts with, or nil.
+    private def self.first_literal(branch : Hir::Node) : Hir::Literal?
+      return branch if branch.is_a?(Hir::Literal)
+      return nil unless branch.is_a?(Hir::Concatenation)
+      first = branch.list_of_children.first?
+      first.is_a?(Hir::Literal) ? first : nil
+    end
+
+    # *branch* without its first literal (see `first_literal`).
+    private def self.rest_after_first(branch : Hir::Node, ledger : AllocationLedger, offset : Int32) : Hir::Node
+      return empty_node(ledger, offset) unless branch.is_a?(Hir::Concatenation)
+      children = branch.list_of_children
+      return empty_node(ledger, offset) if children.size == 1
+      return children[1] if children.size == 2
+      ledger.charge_object(instance_sizeof(Hir::Concatenation), "a Hir concatenation", offset)
+      ledger.charge_array(children.size - 1, sizeof(Hir::Node), "a Hir child list", offset)
+      Hir::Concatenation.new(children[1..])
     end
 
     private def self.empty_node(ledger : AllocationLedger, offset : Int32) : Hir::Node

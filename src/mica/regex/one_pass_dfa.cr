@@ -154,12 +154,17 @@ module Mica::Regex
       bytes = haystack.to_unsafe
       row = 0
       reaches_match = @match_edges.unsafe_fetch(0) >= 0
+      # The last match found is written to *slots* only when the scratch
+      # slots are about to change or the search ends: until then it is the
+      # scratch slots plus `pending_edge` written at `found`, so a run of
+      # bytes that each reach a match (`\w+`) copies the slots once.
+      pending_edge = -1
       while true
         if reaches_match || (at >= size && @match_edges.unsafe_fetch(row // @class_count) >= 0)
-          edge = edges[@match_edges.unsafe_fetch(row // @class_count)]
+          edge_index = @match_edges.unsafe_fetch(row // @class_count)
+          edge = edges[edge_index]
           if holds?(edge, haystack, at, search_start)
-            slots.size.times { |index| slots.unsafe_put(index, scratch.unsafe_fetch(index)) }
-            write(edge, at, slots)
+            pending_edge = edge_index
             found = at
             undecided = false
           elsif @list_of_shadows.unsafe_fetch(row // @class_count)
@@ -193,14 +198,27 @@ module Mica::Regex
         if step & STEP_TAKES_EDGE != 0
           edge = edges[table[cell]]
           break unless holds?(edge, haystack, at, search_start)
+          if pending_edge >= 0
+            record_match(edges[pending_edge], found, scratch, slots)
+            pending_edge = -1
+          end
           write(edge, at, scratch)
         end
         row = step >> 2
         reaches_match = step & STEP_REACHES_MATCH != 0
         at &+= 1
       end
+      record_match(edges[pending_edge], found, scratch, slots) if pending_edge >= 0
       meter.try(&.charge(at - charged + 1, charged))
       {undecided ? LazyDFA::GAVE_UP : found, at - start}
+    end
+
+    # Writes the match that *edge* completes at *at* into *slots*: the
+    # scratch slots, then the edge's own.
+    @[AlwaysInline]
+    private def record_match(edge : Edge, at : Int32, scratch : Slice(Int64), slots : Slice(Int64)) : Nil
+      slots.size.times { |index| slots.unsafe_put(index, scratch.unsafe_fetch(index)) }
+      write(edge, at, slots)
     end
 
     private def holds?(edge : Edge, haystack : Bytes, at : Int32, search_start : Int32) : Bool

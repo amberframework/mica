@@ -114,7 +114,9 @@ describe "Mica::Regex candidate searches" do
     tight = Mica::Regex::SearchLimits.custom(work_ceiling: 1_000_i64)
     candidate_answer(pattern, haystack, 0, tight).should be_nil
     expect_raises(Mica::Regex::SearchLimitError, /max_work/) do
-      pattern.match_at_byte_index(haystack, 0, limits: tight)
+      # A copy of the haystack, so no earlier call's validation or scan
+      # positions carry over.
+      pattern.match_at_byte_index(String.new(haystack.to_slice), 0, limits: tight)
     end
   end
 
