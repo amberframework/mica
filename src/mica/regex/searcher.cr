@@ -834,7 +834,7 @@ module Mica::Regex
         list_of_bytes = @program.list_of_required_bytes
         checked = Math.min(list_of_bytes.size, 1)
       elsif @first_search
-        list_of_bytes = @program.required_bytes_for_first_search(bytes.size - byte_index) || return false
+        list_of_bytes = @program.required_bytes_for_first_search(bytes.size - byte_index, @meter, byte_index) || return false
         checked = list_of_bytes.size
       else
         return false

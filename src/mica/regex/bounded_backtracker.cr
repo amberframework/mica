@@ -220,7 +220,7 @@ module Mica::Regex
             return false
           end
           meter.charge(1, at)
-          state = @program.state_at(current)
+          state = @program.state_at(current, meter, at)
           case state.kind
           when .byte_range?
             break unless at < end_bound

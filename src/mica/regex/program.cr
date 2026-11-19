@@ -143,6 +143,11 @@ module Mica::Regex
     @list_of_recorded_blocks : Array(ClassBlock)
     # The program's runs, in state order.
     getter list_of_runs : Array(ClassRun)
+    # The states of the runs before each run (`run_state_at` turns a state
+    # number past a run into an index in `@list_of_physical_states`).
+    @list_of_run_offsets : Array(Int32)
+    # The most runs one `run_state_at` reads (see `run_reads_per_state`).
+    @run_reads_per_state : Int32
     @state_count : Int32
     # Guards `materialize` (made only for a program with runs).
     @materialize_mutex : Mutex? = nil
@@ -185,6 +190,14 @@ module Mica::Regex
       @list_of_physical_states = list_of_states
       @list_of_recorded_blocks = list_of_class_blocks
       @state_count = list_of_states.size + @list_of_runs.sum(&.size)
+      offset = 0
+      @list_of_run_offsets = @list_of_runs.map do |run|
+        before = offset
+        offset += run.size
+        before
+      end
+      # A binary search over the runs, then the run it found.
+      @run_reads_per_state = @list_of_runs.empty? ? 0 : @list_of_runs.size.bit_length + 1
       if @list_of_runs.empty?
         @materialized = list_of_states
         @materialized_blocks = list_of_class_blocks
@@ -211,14 +224,39 @@ module Mica::Regex
       @materialized_blocks || raise Mica::Error.new("internal error: the program's class blocks were not built")
     end
 
-    # State *index*, read without building `list_of_states`.
+    # State *index*, read without building `list_of_states`. Before the
+    # states are built, a read finds the run that holds *index* by a binary
+    # search over the runs: at most `run_reads_per_state` runs read.
     @[AlwaysInline]
     def state_at(index : Int32) : State
       if states = @materialized
         states.unsafe_fetch(index)
       else
-        run_state_at(index)
+        run_state_at(index) { }
       end
+    end
+
+    # State *index*, as `state_at`, charging *meter* one operation for each
+    # run the read looks at, before it looks (at haystack byte *at*). Once
+    # the states are built a read is one array load and charges nothing.
+    # The engines that may run before the plan builds the states (the
+    # first searches' backtracker, and the Pike VM and backtracker a
+    # `Searcher` forces) read through this, so the meter bounds the
+    # lookups as it bounds the visits.
+    @[AlwaysInline]
+    def state_at(index : Int32, meter : SearchMeter, at : Int32) : State
+      if states = @materialized
+        states.unsafe_fetch(index)
+      else
+        run_state_at(index) { meter.charge(1, at) }
+      end
+    end
+
+    # The most operations one metered `state_at` charges while the runs
+    # are pending: the binary search's reads plus the run it found (0
+    # for a program without runs).
+    def run_reads_per_state : Int32
+      @run_reads_per_state
     end
 
     # :nodoc:
@@ -255,14 +293,26 @@ module Mica::Regex
       end
     end
 
-    private def run_state_at(index : Int32) : State
-      offset = 0
-      @list_of_runs.each do |run|
-        break if index < run.first_state
-        return run.state_at(index) if index < run.end_state
-        offset += run.size
+    # Finds the last run that starts at or before *index* by a binary
+    # search (the runs are in state order), yielding before each run it
+    # reads: at most `run_reads_per_state` yields.
+    private def run_state_at(index : Int32, & : ->) : State
+      low = 0
+      high = @list_of_runs.size
+      while low < high
+        middle = (low + high) >> 1
+        yield
+        if @list_of_runs.unsafe_fetch(middle).first_state <= index
+          low = middle + 1
+        else
+          high = middle
+        end
       end
-      @list_of_physical_states[index - offset]
+      return @list_of_physical_states[index] if low == 0
+      yield
+      run = @list_of_runs.unsafe_fetch(low - 1)
+      return run.state_at(index) if index < run.end_state
+      @list_of_physical_states[index - @list_of_run_offsets.unsafe_fetch(low - 1) - run.size]
     end
 
     # Builds every state and class block from the physical states and the
@@ -396,26 +446,53 @@ module Mica::Regex
     # states and sparse transitions) costs no more than about a few passes
     # over the span, so a short first search of a large program does not
     # pay for the analysis.
-    def required_bytes_for_first_search(span_bytes : Int32) : Array(UInt8)?
+    #
+    # With *meter*, the analysis charges it as it goes (one operation for
+    # each state and transition it reads, and for each run a state read
+    # looks at, see `state_at`), at haystack byte *at*, so it stops on the
+    # call's allowance or deadline before it reads more: at most
+    # `required_bytes_analysis_bound(span_bytes)` operations.
+    def required_bytes_for_first_search(span_bytes : Int32, meter : SearchMeter? = nil,
+                                        at : Int32 = 0) : Array(UInt8)?
       if found = @required_bytes.get(:acquire)
         return found
       end
-      # A large program with runs would build every state first, which
+      # A large program with runs reads each state through its runs, which
       # costs more than the first search it serves.
       return nil if runs_pending? && state_count >= FirstSearch::LARGE_PROGRAM_STATES
       allowance = REQUIRED_BYTES_BASE_EDGES + REQUIRED_BYTES_EDGES_PER_BYTE * span_bytes
-      return nil unless edges_within?(allowance)
-      list_of_required_bytes
+      return nil unless edges_within?(allowance, meter, at)
+      found = StartFilter.required_bytes(self, meter, at)
+      # Threads racing here find the same bytes; the first to publish wins.
+      @required_bytes.compare_and_set(nil, found)
+      @required_bytes.get(:acquire) || found
+    end
+
+    # :nodoc:
+    # The most operations `required_bytes_for_first_search` charges for a
+    # span of *span_bytes* bytes: the edges (states and transitions) it
+    # allows, counted once, read once more in the first pass, and read
+    # again by each of the analysis's candidates
+    # (`StartFilter::MAX_REQUIRED_CANDIDATES`), a state read costing its
+    # run lookups too (`run_reads_per_state`); nothing once the bytes are
+    # found.
+    def required_bytes_analysis_bound(span_bytes : Int32) : Int64
+      return 0_i64 if @required_bytes.get(:acquire)
+      edges = REQUIRED_BYTES_BASE_EDGES + REQUIRED_BYTES_EDGES_PER_BYTE * span_bytes
+      reads = 2_i64 + @run_reads_per_state
+      edges * (2_i64 + StartFilter::MAX_REQUIRED_CANDIDATES * reads)
     end
 
     # True when the states plus the sparse transitions they read (in the
     # program's own list and in shared tables) number at most
-    # *allowance*. Stops counting once past it.
-    private def edges_within?(allowance : Int64) : Bool
+    # *allowance*. Stops counting once past it. With *meter*, charges one
+    # operation for each state it reads, before reading it.
+    private def edges_within?(allowance : Int64, meter : SearchMeter? = nil, at : Int32 = 0) : Bool
       edges = state_count.to_i64 + @list_of_transitions.size
       return false if edges > allowance
       return true if @list_of_shared_tables.empty?
       each_state do |state, _|
+        meter.charge(1, at) if meter
         next unless state.kind.sparse? && state.low != 0
         edges += state.alternate
         return false if edges > allowance

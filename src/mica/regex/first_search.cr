@@ -85,17 +85,19 @@ module Mica::Regex
       program.state_count >= LARGE_PROGRAM_STATES && !BoundedBacktracker.fits?(program, span)
     end
 
-    # True when validating *haystack_bytes* bytes, the scans for the
-    # required bytes (`Searcher#required_byte_missing?`, at most one pass
-    # each over *span* bytes) and the most work the backtracker can do
-    # over the span (one operation per visit and one per slot write, at
-    # most one of each per (state, position) pair) fit the call's
-    # allowance.
+    # True when validating *haystack_bytes* bytes, finding the required
+    # bytes (`Program#required_bytes_analysis_bound`) and scanning for them
+    # (`Searcher#required_byte_missing?`, at most one pass each over *span*
+    # bytes), and the most work the backtracker can do over the span (one
+    # operation per visit, one per slot write, at most one of each per
+    # (state, position) pair, and the run lookups of the state each visit
+    # reads, `Program#run_reads_per_state`) fit the call's allowance.
     private def self.fits_allowance?(program : Program, haystack_bytes : Int32, span : Int32,
                                      limits : SearchLimits) : Bool
       visits = BoundedBacktracker.capped_visits(program, span)
       scans = StartFilter::MAX_REQUIRED_BYTES.to_i64 * span
-      needed = haystack_bytes.to_i64 + scans + 2_i64 * visits
+      per_visit = 2_i64 + program.run_reads_per_state
+      needed = haystack_bytes.to_i64 + program.required_bytes_analysis_bound(span) + scans + per_visit * visits
       needed <= limits.max_work(program.state_count, haystack_bytes.to_i64)
     end
   end

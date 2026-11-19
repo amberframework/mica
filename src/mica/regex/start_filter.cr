@@ -39,7 +39,7 @@ module Mica::Regex
     @second_ready = Atomic(Bool).new(false)
 
     # The most single-byte states `required_byte` considers.
-    private MAX_REQUIRED_CANDIDATES = 8
+    MAX_REQUIRED_CANDIDATES = 8
     # The most required bytes kept.
     MAX_REQUIRED_BYTES = 3
 
@@ -105,10 +105,16 @@ module Mica::Regex
     # again only when it gains a mark, so the pass is O(m) (each state and
     # transition read at most once per candidate, and in practice about
     # once).
-    def self.required_bytes(program : Program) : Array(UInt8)
+    #
+    # With *meter* (a first search, see
+    # `Program#required_bytes_for_first_search`), the analysis charges one
+    # operation for each state and transition it reads, and for each run a
+    # state read looks at, at haystack byte *at*, before it reads them.
+    def self.required_bytes(program : Program, meter : SearchMeter? = nil, at : Int32 = 0) : Array(UInt8)
       seen = StaticArray(Bool, 128).new(false)
       list_of_candidates = [] of UInt8
       program.each_state do |state, _|
+        meter.charge(1, at) if meter
         next unless state.kind.byte_range? && state.low == state.high && state.low < 0x80
         next if seen[state.low]
         seen[state.low] = true
@@ -118,7 +124,7 @@ module Mica::Regex
       return list_of_required if list_of_candidates.empty?
       list_of_candidates.sort_by! { |byte| Prefilter.rank(byte) }
       list_of_candidates = list_of_candidates.first(MAX_REQUIRED_CANDIDATES)
-      avoided = avoided_on_the_way_to_a_match(program, list_of_candidates)
+      avoided = avoided_on_the_way_to_a_match(program, list_of_candidates, meter, at)
       list_of_candidates.each_with_index do |byte, index|
         next if avoided.bit(index) == 1
         list_of_required << byte
@@ -130,7 +136,8 @@ module Mica::Regex
     # The candidates (bit i for `list_of_candidates[i]`) that some path from
     # the start state to a match state avoids: no state on it reads only
     # that byte.
-    private def self.avoided_on_the_way_to_a_match(program : Program, list_of_candidates : Array(UInt8)) : UInt8
+    private def self.avoided_on_the_way_to_a_match(program : Program, list_of_candidates : Array(UInt8),
+                                                   meter : SearchMeter?, at : Int32) : UInt8
       blocking = StaticArray(UInt8, 128).new(0_u8)
       list_of_candidates.each_with_index { |byte, index| blocking[byte] = 1_u8 << index }
       marks = Array(UInt8).new(program.state_count, 0_u8)
@@ -139,7 +146,12 @@ module Mica::Regex
       at_match = 0_u8
       while index = list_of_pending.pop?
         here = marks[index]
-        state = program.state_at(index)
+        state = if meter
+                  meter.charge(1, at)
+                  program.state_at(index, meter, at)
+                else
+                  program.state_at(index)
+                end
         case state.kind
         when .match?
           at_match |= here
@@ -152,6 +164,7 @@ module Mica::Regex
           mark(marks, list_of_pending, state.next_state, here & ~blocked_by(blocking, state.low, state.high))
         when .sparse?
           state.alternate.times do |offset|
+            meter.charge(1, at) if meter
             transition = program.transition_at(index, state, offset)
             mark(marks, list_of_pending, transition.target, here & ~blocked_by(blocking, transition.low, transition.high))
           end
