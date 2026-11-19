@@ -696,6 +696,28 @@ much as the cost per byte:
   with the match. The iteration methods (`each_match`, `scan`, `gsub`,
   `sub`, `split`) read groups with each match through the call's own
   searcher.
+- **Groups read with the span.** When groups are wanted from a program
+  that is not one-pass and the forward DFA finds a match end at most
+  `Searcher::GROUPS_WITH_SPAN_BYTES` (64) bytes past the offset, the
+  backtracker runs anchored at the offset over that span. A match that
+  starts at the offset is the leftmost one, so that one pass gives the
+  start and the groups, with no reverse DFA and no second capture pass
+  (`.*:(\d+)` over a `host:port` line). When no match starts there, the
+  search goes on with the reverse DFA. The pass stays within the bitset
+  gate, the call's remaining allowance and `FirstSearch.visit_limit`
+  visits, each charged before it is read.
+- **Fixed-length starts.** When every match of a program spans the same
+  number of bytes (its longest match, `ShortMatch.longest_match`, is as
+  long as its shortest, `StartFilter#minimum_bytes`; worked out once for a
+  program of at most `SearchPlan::FIXED_LENGTH_STATES` (2,048) states), a
+  match's start is that many bytes before the end the forward DFA found,
+  and the reverse DFA is not run (`[a-z]{5}`).
+- **A small match value.** A `MatchData` is 88 bytes: a match whose groups
+  are read on first use keeps its `GroupReader` and the shared offsets in
+  one pointer-free buffer and holds only its address, so every return of a
+  match copies little. A short search reads the program's plan once, and
+  a searcher that takes over from a short search of the same `String`
+  charges the haystack's validation without reading it again.
 
 ## Lazy DFA
 
