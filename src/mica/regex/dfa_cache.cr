@@ -362,9 +362,10 @@ module Mica::Regex
       @key
     end
 
-    # The key with its targets sorted (reverse states have no priority).
+    # The key with its targets sorted in place (reverse states have no
+    # priority), with no copy.
     def sorted_targets : Array(Int32)
-      @key[1..].sort!.each_with_index { |state, index| @key[index + 1] = state }
+      Slice.new(@key.to_unsafe + 1, @key.size - 1).sort! if @key.size > 2
       @key
     end
   end

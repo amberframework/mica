@@ -25,9 +25,9 @@ describe "Mica::Regex short searches" do
   describe "groups read on first use" do
     it_satisfies "REGEX-R3-short-search", "finds the match without its groups when only the backtracker or the Pike VM can read them" do
       email = planned_expression("\\A[\\w+\\-.]+@[a-z\\d\\-]+(\\.[a-z\\d\\-]+)*\\.[a-z]+\\z")
-      # The first match builds the one-pass DFA and finds it cannot be had.
-      email.program.plan.defers_groups?.should be_false
-      email.match("ann@example.org", limits: LIMITS).try(&.[1]?).should be_nil
+      # The first match finds its span alone; nothing has read groups yet.
+      email.program.plan.defers_groups?.should be_true
+      email.match("ann@example.org", limits: LIMITS).should_not be_nil
       email.program.plan.defers_groups?.should be_true
       match = email.match("john.smith@example.co.uk", limits: LIMITS).should_not be_nil
       match[0].should eq("john.smith@example.co.uk")
@@ -37,9 +37,22 @@ describe "Mica::Regex short searches" do
     end
 
     it_satisfies "REGEX-R3-short-search", "reads the groups with the match when the one-pass DFA can" do
-      placeholder = planned_expression("\\{\\{([^}]+)\\}\\}")
-      placeholder.program.plan.defers_groups?.should be_false
+      placeholder = planned_expression("{{([^}]+)}}")
+      # The first match defers its groups; reading them builds the one-pass
+      # DFA, and from then on the groups come with the match.
+      placeholder.program.plan.defers_groups?.should be_true
       placeholder.match("x {{name}} y", limits: LIMITS).try(&.[1]).should eq("name")
+      placeholder.program.plan.defers_groups?.should be_false
+      placeholder.match("{{other}}", limits: LIMITS).try(&.[1]).should eq("other")
+    end
+
+    it_satisfies "REGEX-R3-short-search", "finds matches without their groups until a caller reads them" do
+      pattern = planned_expression("(\\w+)=(\\w+)")
+      haystack = "!" * 5000 + "ab=cd"
+      pattern.match(haystack, limits: LIMITS).try(&.to_s).should eq("ab=cd")
+      pattern.program.plan.defers_groups?.should be_true
+      pattern.match(haystack, limits: LIMITS).try(&.[2]).should eq("cd")
+      pattern.program.plan.defers_groups?.should be_false
     end
 
     it_satisfies "REGEX-R3-short-search", "reads the groups of a match from where its search started" do

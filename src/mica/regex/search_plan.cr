@@ -238,15 +238,18 @@ module Mica::Regex
     # costs less than a later call would, and the groups are read with the
     # match.
     #
-    # Until a search has built the one-pass DFA (the first capture pass
-    # does), this is false, so a search that never matches never pays for
-    # building it. Once a caller has read the groups of a match found
-    # without them (`note_groups_read`), it is false for good: this
-    # program's callers read groups, and reading them later costs more
-    # than reading them with the match.
+    # Until a caller has read groups, this is also true while the one-pass
+    # DFA is not built: a program's first searches find their match
+    # without groups, so a caller that only asks whether and where it
+    # matched never pays for a capture pass or for building the one-pass
+    # DFA (the first capture pass, when a caller reads the groups, builds
+    # it). Once a caller has read the groups of a match found without them
+    # (`note_groups_read`), it is false for good: this program's callers
+    # read groups, and reading them later costs more than reading them
+    # with the match.
     def defers_groups? : Bool
-      @program.slot_count > 2 && @one_pass_built.get == 1 && @one_pass.get.nil? &&
-        @groups_read.get(:relaxed) == 0
+      return false unless @program.slot_count > 2 && @groups_read.get(:relaxed) == 0
+      @one_pass_built.get == 0 || @one_pass.get.nil?
     end
 
     # True while unanchored short searches of this program usually find
