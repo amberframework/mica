@@ -132,7 +132,13 @@ module Mica::Regex
           total = Preflight.add(total, Preflight.multiply(OTHER_LINE_BREAKS.range_count.to_i64 * 4, copies))
         when Hir::Repetition
           maximum = node.maximum
-          repeated = maximum ? maximum.to_i64 : Math.max(node.minimum, 1).to_i64 + 1
+          repeated = if maximum
+                       maximum.to_i64
+                     else
+                       # The fresh copy exists only for a body that can match
+                       # the empty string (see `finish_loop`).
+                       Math.max(node.minimum, 1).to_i64 + (consumes?(node.child, BOUND_DEPTH) ? 0 : 1)
+                     end
           push_bound_entry(stack, node.child, Preflight.multiply(copies, repeated))
         when Hir::Capture
           push_bound_entry(stack, node.child, copies)
@@ -143,6 +149,31 @@ module Mica::Regex
         end
       end
       total
+    end
+
+    # How deep `consumes?` looks before it answers false.
+    private BOUND_DEPTH = 4
+
+    # True when every match of *node* consumes a byte, looking at most
+    # *depth* levels down (deeper, it answers false, which only widens the
+    # bound). Over-allocating the transitions of `\w+` by a second copy of
+    # `\w` doubled the bytes a small pattern allocated.
+    private def consumes?(node : Hir::Node, depth : Int32) : Bool
+      return false if depth == 0
+      case node
+      when Hir::Class, Hir::Literal, Hir::LineBreak
+        true
+      when Hir::Capture
+        consumes?(node.child, depth - 1)
+      when Hir::Concatenation
+        node.list_of_children.any? { |child| consumes?(child, depth - 1) }
+      when Hir::Alternation
+        node.list_of_branches.all? { |branch| consumes?(branch, depth - 1) }
+      when Hir::Repetition
+        node.minimum > 0 && consumes?(node.child, depth - 1)
+      else
+        false
+      end
     end
 
     private def push_bound_entry(stack : Array({Hir::Node, Int64}), node : Hir::Node, copies : Int64) : Nil
@@ -339,6 +370,9 @@ module Mica::Regex
     # from *start* to *loop_split* through the body states *first*...*last*.
     private def nullable_body?(start : Int32, first : Int32, last : Int32, loop_split : Int32) : Bool
       return true if start == loop_split
+      # A body that starts by reading a byte (a class, a literal) has no
+      # epsilon path at all, so its states need no walk.
+      return false if first <= start < last && @list_of_states[start].kind.in?(Program::StateKind::ByteRange, Program::StateKind::Sparse)
       size = last - first
       grow(GrowingList::Visited, size, sizeof(Bool))
       visited = @list_of_visited
