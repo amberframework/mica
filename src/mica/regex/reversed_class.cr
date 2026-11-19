@@ -36,8 +36,8 @@ module Mica::Regex
     def self.for(program : Program, block : Program::ClassBlock, budget : Int32) : ReversedClass?
       shape = shape_of(program, block)
       return nil unless shape
-      if @@mutex.synchronize { @@memo.has_key?(shape) }
-        return @@mutex.synchronize { @@memo[shape]? }
+      @@mutex.synchronize do
+        return @@memo[shape] if @@memo.has_key?(shape)
       end
       reversed_class = build(shape, block.entry - block.first_state, budget)
       @@mutex.synchronize { @@memo[shape] = reversed_class if @@memo.size < MAX_ENTRIES }
