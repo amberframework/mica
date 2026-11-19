@@ -106,4 +106,22 @@ describe "Mica::Regex cold start" do
     cache.thrashing?.should be_true
     cache.clears.should eq(1)
   end
+  it_satisfies "REGEX-R3-first-search", "reads a large class's entry state with one load, to the target a binary search finds" do
+    program = program_of(".*[^A-Z]|wp{Greek}")
+    states = program.list_of_states
+    checked = 0
+    states.each_with_index do |state, index|
+      next unless state.kind.sparse?
+      256.times do |byte|
+        expected = -1
+        state.alternate.times do |offset|
+          transition = program.transition_at(index, state, offset)
+          expected = transition.target if transition.low <= byte <= transition.high
+        end
+        program.sparse_target(index, state, byte.to_u8).should eq(expected)
+      end
+      checked += 1
+    end
+    checked.should be >= 2
+  end
 end
