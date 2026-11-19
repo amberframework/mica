@@ -57,6 +57,7 @@ describe "Mica::Regex reversed classes" do
     reverse = program.plan.reverse.should_not be_nil
     reverse.with_reversed_classes?.should be_true
     lease.reverse_cache(reverse).should_not(be_nil).widest_key.should be <= Mica::Regex::SearchPlan::WIDE_REVERSE_KEY
+    program.plan.give_back(lease)
   end
 
   it_satisfies "REGEX-R3-reversed-classes", "agrees with the Pike VM on classes, case folding and word assertions" do

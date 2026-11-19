@@ -78,6 +78,7 @@ describe "Mica::Regex short matches" do
       lease = program.plan.lease(pool)
       forward = program.plan.forward.should_not be_nil
       lease.forward_cache(forward).should_not(be_nil).thrashing?.should be_true
+      program.plan.give_back(lease)
     end
 
     it_satisfies "REGEX-R3-short-match", "decides Unicode word assertions and finds starts next to non-ASCII text" do
