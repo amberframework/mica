@@ -247,8 +247,13 @@ module Mica::Regex
           reaches_match = false
           at &+= 1
           # A state that loops to itself (`.*`, `[^"]*`): its row stays,
-          # so the loads no longer wait on each other.
+          # so the loads no longer wait on each other. Where every ASCII
+          # byte loops back with this very step (`ascii_loop?`), a run of
+          # them is skipped eight bytes at a time.
           if step >> 2 == row
+            if @list_of_ascii_loops.unsafe_fetch(row // @class_count)
+              at = Core::ByteScan.skip_ascii(haystack, at, tight_bound) if at < tight_bound
+            end
             while at < tight_bound && steps[row &+ class_of[bytes[at]]] == step
               at &+= 1
             end
