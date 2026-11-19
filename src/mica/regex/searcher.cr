@@ -122,6 +122,9 @@ module Mica::Regex
     @one_pass_scratch : Slice(Int64)?
     @start_search_waste = 0_i64
     @start_search_off = false
+    # True once a capped capture pass on the backtracker gave up in this
+    # call (see `capped_capture_pass`).
+    @capped_captures_off = false
     # Searches started in this call (see `check_resumed_deadline`).
     @searches_started = 0
     # The forward cache's counters when this search retried the unanchored
@@ -209,6 +212,7 @@ module Mica::Regex
       @prefilter_off = false
       @start_search_waste = 0_i64
       @start_search_off = false
+      @capped_captures_off = false
       @searches_started = 0
       @required_at.fill(-1) unless same_haystack
       @dfa_gave_up = false
@@ -633,14 +637,45 @@ module Mica::Regex
         found = if BoundedBacktracker.fits?(@program, finish - start)
                   backtracker.search(bytes, start, finish, byte_index, true, end_anchored, @meter, slots, Int32::MAX)
                 else
-                  pike(true).search(bytes, start, finish, byte_index, true, end_anchored, false, @meter, slots,
-                    Int32::MAX, true)
+                  capped_capture_pass(bytes, byte_index, start, finish, end_anchored, slots) ||
+                    pike(true).search(bytes, start, finish, byte_index, true, end_anchored, false, @meter, slots,
+                      Int32::MAX, true)
                 end
       end
       unless found && slots[0] == start && slots[1] == finish
         raise Mica::Error.new("internal error: the capture pass did not find the span #{start}...#{finish}")
       end
       slots
+    end
+
+    # The capture pass over a span too long for the backtracker's bitset
+    # (a program of thousands of states, as alternatives of `\p{L}{14}`
+    # compile to): the backtracker marking visited pairs in a hash set and
+    # stopping after `BoundedBacktracker::SPARSE_VISITS` visits (see
+    # "Capped searches" there). It visits the same pairs as with the
+    # bitset, so it finds the same groups, and over the short spans words
+    # and fields make it reads a few states per byte where the Pike VM
+    # steps every live thread through its closure. Returns true when it
+    # filled *slots*; false when it does not apply or gave up, and the
+    # Pike VM runs instead. Its visits are charged, so a pass that gives
+    # up costs at most `SPARSE_VISITS` more operations, and after one does
+    # the call stops trying it: the extra work is at most that once per
+    # call.
+    private def capped_capture_pass(bytes : Bytes, byte_index : Int32, start : Int32, finish : Int32,
+                                    end_anchored : Bool, slots : Slice(Int64)) : Bool
+      return false if @capped_captures_off || !@engine.automata?
+      span = finish - start
+      return false unless span <= FirstSearch::MAX_BYTES && BoundedBacktracker.fits_capped?(@program, span)
+      return false if 2_i64 * BoundedBacktracker::SPARSE_VISITS > @meter.work_meter.allowance - @meter.operations
+      workspace = backtracker
+      workspace.visit_limit = BoundedBacktracker::SPARSE_VISITS
+      found = workspace.search(bytes, start, finish, byte_index, true, end_anchored, @meter, slots, Int32::MAX)
+      workspace.visit_limit = Int64::MAX
+      if workspace.gave_up?
+        @capped_captures_off = true
+        return false
+      end
+      found
     end
 
     # Finds the span of the leftmost-first match into *span*; returns
