@@ -305,7 +305,7 @@ module Mica::Regex
     # soon as another search built it; nil before, or when the program is
     # not one-pass.
     def short_search_one_pass : OnePassDFA?
-      return @one_pass.get if @one_pass_built.get == 1
+      return @one_pass.get(:relaxed) if @one_pass_built.get(:acquire) == 1
       return nil if @short_searches.add(1, :relaxed) < ShortSearch::BUILD_AFTER
       one_pass
     end
@@ -319,7 +319,7 @@ module Mica::Regex
     # The one-pass DFA when a search has built it already (see `one_pass`),
     # or nil.
     def built_one_pass : OnePassDFA?
-      @one_pass_built.get == 1 ? @one_pass.get : nil
+      @one_pass_built.get(:acquire) == 1 ? @one_pass.get(:relaxed) : nil
     end
 
     # The analysis of short matches (made on first use), or nil when a

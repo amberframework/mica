@@ -50,28 +50,27 @@ module Mica::Regex
     end
 
     # True when no match can start (see `StartFilter#rejects?`) and the
-    # searcher would say so without raising. Call `applies?` first.
-    def rejects? : Bool
+    # searcher would say so without raising. Call `applies?` first, and
+    # pass the program's *plan*.
+    def rejects?(plan : SearchPlan) : Bool
       bytes = @haystack.to_slice
-      plan = @program.plan
       filter = plan.start_filter
       return false unless fits?(filter.scan_work(bytes.size, @byte_index))
       unless filter.rejects?(bytes, @byte_index, anchored?(plan))
-        @screened = valid?
+        @screened = valid?(plan)
         return false
       end
-      valid?
+      valid?(plan)
     end
 
     # Runs the search on the one-pass DFA into *slots* (`slot_count`
     # entries) with *scratch* beside it. Returns the match end,
     # `LazyDFA::NO_MATCH`, or `LazyDFA::GAVE_UP` when this search declines.
-    # Call `applies?` first.
-    def run(slots : Slice(Int64), scratch : Slice(Int64)) : Int32
+    # Call `applies?` first, and pass the program's *plan*.
+    def run(plan : SearchPlan, slots : Slice(Int64), scratch : Slice(Int64)) : Int32
       return LazyDFA::GAVE_UP if @program.slot_count > MAX_SLOTS
       return LazyDFA::GAVE_UP if @program.options.first_line? || @program.options.end_anchored?
       return LazyDFA::GAVE_UP if @options.end_anchored?
-      plan = @program.plan
       one_pass = plan.short_search_one_pass || return LazyDFA::GAVE_UP
       bytes = @haystack.to_slice
       bound = work_bound(bytes.size)
@@ -81,7 +80,7 @@ module Mica::Regex
       steps = filter.scan_work(bytes.size, @byte_index) + (bytes.size - @byte_index) + bound
       return LazyDFA::GAVE_UP unless fits?(steps)
       unless @screened
-        return LazyDFA::GAVE_UP unless valid?
+        return LazyDFA::GAVE_UP unless valid?(plan)
         return LazyDFA::NO_MATCH if filter.rejects?(bytes, @byte_index, anchored?(plan))
       end
       if anchored?(plan)
@@ -136,8 +135,7 @@ module Mica::Regex
     # True when the haystack is valid UTF-8. The plan remembers the last
     # `String` a short search validated (strings are immutable), so an
     # iteration of calls over one haystack validates it once.
-    private def valid? : Bool
-      plan = @program.plan
+    private def valid?(plan : SearchPlan) : Bool
       return true if plan.short_validated?(@haystack)
       return false if Core::UTF8.first_invalid_offset(@haystack.to_slice)
       plan.remember_short_validated(@haystack)

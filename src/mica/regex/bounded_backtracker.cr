@@ -195,7 +195,14 @@ module Mica::Regex
     private def explore_from(haystack : Bytes, start : Int32, columns : Int32, from : Int32, end_bound : Int32,
                              search_start : Int32, end_anchored : Bool, meter : SearchMeter) : Bool
       clear_jobs
-      push_job(@program.start_state, from.to_i64)
+      program = @program
+      push_job(program.start_state, from.to_i64)
+      # Locals for the loop, so a visit does not reload them: the visited
+      # bitset does not move during a search, and the visits left are
+      # written back before every return.
+      sparse = @sparse
+      visited_words = @visited.to_unsafe
+      visits_left = @visits_left
       while @job_count > 0
         job = pop_job
         if job.state < 0
@@ -206,21 +213,22 @@ module Mica::Regex
         at = job.at.to_i32
         while true
           bit = current.to_i64 * columns + (at - start)
-          if @sparse
+          if sparse
             break unless mark_sparse?(bit)
           else
             word = bit >> 6
             mask = 1_u64 << (bit & 63)
-            visited = @visited.to_unsafe + word
+            visited = visited_words + word
             break if visited.value & mask != 0
             visited.value |= mask
           end
-          if (@visits_left -= 1) < 0
+          if (visits_left -= 1) < 0
+            @visits_left = visits_left
             @gave_up = true
             return false
           end
           meter.charge(1, at)
-          state = @program.state_at(current, meter, at)
+          state = program.state_at(current, meter, at)
           case state.kind
           when .byte_range?
             break unless at < end_bound
@@ -230,7 +238,7 @@ module Mica::Regex
             at += 1
           when .sparse?
             break unless at < end_bound
-            target = @program.sparse_target(current, state, haystack.unsafe_fetch(at))
+            target = program.sparse_target(current, state, haystack.unsafe_fetch(at))
             break if target < 0
             current = target
             at += 1
@@ -250,12 +258,14 @@ module Mica::Regex
             current = state.next_state
           when .match?
             break if end_anchored && at != haystack.size
+            @visits_left = visits_left
             return true
           else
             break
           end
         end
       end
+      @visits_left = visits_left
       false
     end
 

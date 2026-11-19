@@ -54,7 +54,7 @@ end
 # does not apply.
 private def candidate_answer(pattern : Mica::Regex::Expression, haystack : String, offset : Int32,
                              limits = LIMITS, timeout : Time::Span? = nil) : {Int32, Int64}?
-  search = Mica::Regex::CandidateSearch.new(pattern.program, haystack, offset, NONE, limits, timeout)
+  search = Mica::Regex::CandidateSearch.new(pattern.program, pattern.program.plan, haystack, offset, NONE, limits, timeout)
   one_pass = search.one_pass || return nil
   buffer = Slice(Int64).new(2 * Mica::Regex::CandidateSearch::MAX_SLOTS, -1_i64)
   slot_count = pattern.program.slot_count

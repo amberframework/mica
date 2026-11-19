@@ -129,7 +129,7 @@ module Mica::Regex
           allowed_end = at + meter.readable(Math.min(finish - at, PrefilterScan::CHARGE_CHUNK), at)
         end
         bound = Math.min(finish, allowed_end)
-        if @list_of_ascii_loops.unsafe_fetch(row // @class_count)
+        if @list_of_ascii_loops.unsafe_fetch(state_of(row))
           at = Core::ByteScan.skip_ascii(haystack, at, bound)
           next if at >= bound
         end
@@ -157,7 +157,7 @@ module Mica::Regex
         at &+= 1
       end
       meter.charge(finish - charged + 1, charged)
-      index = @match_edges.unsafe_fetch(row // @class_count)
+      index = @match_edges.unsafe_fetch(state_of(row))
       return false if index < 0
       take(@list_of_edges.unsafe_fetch(index), haystack, finish, search_start, slots)
     end
@@ -214,14 +214,14 @@ module Mica::Regex
       # bytes that each reach a match (`\w+`) copies the slots once.
       pending_edge = -1
       while true
-        if reaches_match || (at >= size - 1 && @match_edges.unsafe_fetch(row // @class_count) >= 0)
-          edge_index = @match_edges.unsafe_fetch(row // @class_count)
+        if reaches_match || (at >= size - 1 && @match_edges.unsafe_fetch(state_of(row)) >= 0)
+          edge_index = @match_edges.unsafe_fetch(state_of(row))
           edge = edges[edge_index]
           if holds?(edge, haystack, at, search_start)
             pending_edge = edge_index
             found = at
             undecided = false
-          elsif @list_of_shadows.unsafe_fetch(row // @class_count)
+          elsif @list_of_shadows.unsafe_fetch(state_of(row))
             undecided = true
           end
         end
@@ -251,7 +251,7 @@ module Mica::Regex
           # byte loops back with this very step (`ascii_loop?`), a run of
           # them is skipped eight bytes at a time.
           if step >> 2 == row
-            if @list_of_ascii_loops.unsafe_fetch(row // @class_count)
+            if @list_of_ascii_loops.unsafe_fetch(state_of(row))
               at = Core::ByteScan.skip_ascii(haystack, at, tight_bound) if at < tight_bound
             end
             while at < tight_bound && steps[row &+ class_of[bytes[at]]] == step
@@ -309,11 +309,21 @@ module Mica::Regex
       true
     end
 
+    # The DFA state whose row starts at table offset *row* (a multiple of
+    # the class count, never negative).
+    @[AlwaysInline]
+    private def state_of(row : Int32) : Int32
+      row.unsafe_div(@class_count)
+    end
+
+    # Writes *at* into the slots *edge* saves. The builder keeps every
+    # slot below the program's slot count, the size of *slots*.
+    @[AlwaysInline]
     private def write(edge : Edge, at : Int32, slots : Slice(Int64)) : Nil
       saved = edge.slots
       while saved != 0
         slot = saved.trailing_zeros_count
-        slots[slot] = at.to_i64
+        slots.unsafe_put(slot, at.to_i64)
         saved &= saved - 1
       end
     end
