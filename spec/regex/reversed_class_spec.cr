@@ -46,6 +46,9 @@ describe "Mica::Regex reversed classes" do
 
   it_satisfies "REGEX-R3-reversed-classes", "keeps reverse DFA states small next to non-ASCII text" do
     program = program_of("\\b\\w{12,}\\b")
+    # Every match start comes from the reverse DFA, not from the capped
+    # backtracker a plan tries for its first starts (see "First searches").
+    program.end_first_searches
     plain = Mica::Regex::ReverseNFA.new(program)
     widened = Mica::Regex::ReverseNFA.new(program, reverse_classes: true)
     widened.node_count.should be > plain.node_count

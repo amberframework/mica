@@ -83,43 +83,36 @@ module Mica::Regex
     # `Program#list_of_shared_tables`); a `Sparse` state names one by its
     # position plus one, in a byte, so at most `MAX_SHARED_TABLES`.
     @list_of_shared_tables = [] of Array(Program::Transition)
-    # The copies of large classes the program reads in place
-    # (`Program::ClassCopy`), numbered from `COPY_BASE` while compiling.
-    # (Made on the first copy, so a program without any allocates none.)
-    @list_of_class_copies : Array(Program::ClassCopy)? = nil
-    @copied_state_count = 0
-    # The memoized classes a counted repetition repeats (see `in_place?`).
-    @list_of_in_place_sets : Array(CodePointSet)? = nil
-    # The states the held list may take before it grows to the bound.
-    @held_capacity : Int32
-    # The preflight's bound on states, where the held list grows to.
-    @state_bound : Int32
-
-    # While compiling, the state numbers of class copies start here, past
-    # any held state; `relocate_copies` moves them to follow the held
-    # states once their number is known.
-    private COPY_BASE = 1 << 30
-    # The held states allocated up front: a program bound to more starts
-    # with this many and grows to its bound only when it holds more, so
-    # one whose states are mostly class copies allocates no more.
-    private FIRST_HELD_STATES = 512
+    # The runs of class copies held as their block (`Program::ClassRun`),
+    # in state order, and the states they stand for: state numbers count
+    # them, `@list_of_states` does not hold them.
+    @list_of_runs = [] of Program::ClassRun
+    @run_states = 0
+    # The room `@list_of_states` was allocated with.
+    @physical_capacity : Int32
+    # The states of the runs `transitions_bound` found ahead (see
+    # `class_run`).
+    @run_states_ahead = 0_i64
+    # The ASCII class whose run block (`run_block`) was built last, and the
+    # block, so a run's two lookups build it once.
+    @ascii_run_set : CodePointSet? = nil
+    @ascii_run_block : {Array(Program::State), Array(Program::Transition), Int32}? = nil
 
     private def initialize(@pattern : Hir::Pattern, @estimate : Int64, @limits : CompileLimits,
                            @ledger : AllocationLedger, @meter : Core::WorkMeter)
-      @state_bound = @estimate.clamp(1_i64, @limits.max_program_states).to_i32
-      @held_capacity = @state_bound > FIRST_HELD_STATES && repeats_a_large_class? ? FIRST_HELD_STATES : @state_bound
+      capacity = @estimate.clamp(1_i64, @limits.max_program_states).to_i32
       @ledger.charge_object(instance_sizeof(Compiler), "the compiler", 0)
-      @ledger.charge_array(@held_capacity, sizeof(Program::State), "the program states", 0)
-      # The states at the preflight's bound: the held list grown to it, or
-      # the class copies written out on the first search that reads one
-      # (`Program#state_at`).
-      if @held_capacity < @state_bound
-        @ledger.charge_array(@state_bound, sizeof(Program::State), "the program states written out", 0)
-      end
-      @list_of_states = Array(Program::State).new(@held_capacity)
+      @ledger.charge_array(capacity, sizeof(Program::State), "the program states", 0)
       # A program of few states has few transitions; it skips the bound
-      # and grows its list as it emits.
+      # and grows its list as it emits. The bound's walk also finds the
+      # runs ahead (a run is at least `RUN_MIN_STATES`).
       transition_bound = @estimate >= PRESIZE_MIN_STATES ? transitions_bound : 0_i64
+      # The states in runs (`class_run`) are never written, so the list
+      # starts without room for the runs found ahead; it grows to the full
+      # bound, charged again, only when a run found ahead is emitted as
+      # states after all (see `check_state_room`).
+      @physical_capacity = Math.max(capacity - Math.min(@run_states_ahead, capacity.to_i64).to_i32, 1)
+      @list_of_states = Array(Program::State).new(@physical_capacity)
       if PRESIZED_TRANSITIONS <= transition_bound <= @limits.max_program_states
         @ledger.charge_array(transition_bound, sizeof(Program::Transition), "the program transitions", 0)
         @list_of_transitions = Array(Program::Transition).new(transition_bound.to_i32)
@@ -163,6 +156,9 @@ module Mica::Regex
           total = Preflight.add(total, Preflight.multiply(OTHER_LINE_BREAKS.range_count.to_i64 * 4, copies))
         when Hir::Repetition
           maximum = node.maximum
+          # A run's transitions sit in its table, not in the program's
+          # list: an exact count (`x{n}`) adds none.
+          next if copies == 1 && run_ahead?(node) && maximum == node.minimum
           repeated = if maximum
                        maximum.to_i64
                      else
@@ -228,7 +224,6 @@ module Mica::Regex
       run_tasks
       body = @list_of_values.pop
       start = emit_save(0, body)
-      start = relocate_copies(start)
       workspace_charge = check_pike_bytes
       group_names = @pattern.list_of_group_names
       literal_set = LiteralSet.extract(@pattern, @meter)
@@ -236,55 +231,7 @@ module Mica::Regex
       @ledger.charge_object(instance_sizeof(Program), "the program", 0)
       Program.new(@list_of_states, @list_of_transitions, start, @pattern.capture_count, group_names,
         @pattern.options, @limits.max_pike_bytes - workspace_charge, @pattern.source_end, literal_set,
-        @list_of_class_blocks, @list_of_shared_tables, @list_of_class_copies || Program::NO_CLASS_COPIES)
-    end
-
-    # Numbers the class copies after the held states: every reference to a
-    # copy's state (from held states, own transitions, class blocks and
-    # other copies' exits) moves from `COPY_BASE` to the held count.
-    # Returns *start*, moved the same way.
-    private def relocate_copies(start : Int32) : Int32
-      copies = @list_of_class_copies || return start
-      shift = @list_of_states.size - COPY_BASE
-      states = @list_of_states.to_unsafe
-      @list_of_states.size.times do |index|
-        charge_work
-        state = states[index]
-        if state.next_state >= COPY_BASE || state.alternate >= COPY_BASE
-          states[index] = state.copy_with(next_state: copied(state.next_state, shift), alternate: copied(state.alternate, shift))
-        end
-      end
-      transitions = @list_of_transitions.to_unsafe
-      @list_of_transitions.size.times do |index|
-        transition = transitions[index]
-        transitions[index] = transition.copy_with(target: transition.target + shift) if transition.target >= COPY_BASE
-      end
-      copies.map! do |copy|
-        copy.copy_with(first_state: copy.first_state + shift, exit: copied(copy.exit, shift))
-      end
-      @list_of_class_blocks.map! do |block|
-        block.copy_with(first_state: copied(block.first_state, shift), end_state: copied(block.end_state, shift),
-          entry: copied(block.entry, shift), exit: copied(block.exit, shift))
-      end
-      copied(start, shift)
-    end
-
-    private def copied(target : Int32, shift : Int32) : Int32
-      target >= COPY_BASE ? target + shift : target
-    end
-
-    # Grows the held states to the preflight's bound when *added* more do
-    # not fit (see `FIRST_HELD_STATES`), charging the new list first: a
-    # program that also has class copies may then hold both it and the
-    # written-out states (`Program#state_at`), charged when compiling
-    # began.
-    private def reserve_held_states(added : Int32) : Nil
-      return if @list_of_states.size + added <= @held_capacity
-      @ledger.charge_array(@state_bound, sizeof(Program::State), "the program states", 0)
-      grown = Array(Program::State).new(@state_bound)
-      grown.concat(@list_of_states)
-      @list_of_states = grown
-      @held_capacity = @state_bound
+        @list_of_class_blocks, @list_of_shared_tables, @list_of_runs)
     end
 
     private def charge_literal_set(literal_set : LiteralSet) : Nil
@@ -405,7 +352,6 @@ module Mica::Regex
     private def compile_repetition(node : Hir::Repetition, next_state : Int32) : Nil
       maximum = node.maximum
       reserve_class_copies(node, maximum)
-      mark_in_place(node, maximum)
       if maximum.nil?
         loop_split = emit(Program::StateKind::Split)
         push_task(TaskKind::LoopFinish, node, next_state, loop_split)
@@ -439,11 +385,88 @@ module Mica::Regex
         copy = compile_item(child, current)
         current = node.greedy? ? emit_split(copy, next_state) : emit_split(next_state, copy)
       end
+      if child.is_a?(Hir::Class) && (run = class_run(child.code_point_set, node.minimum, current))
+        return run
+      end
       node.minimum.times do
         charge_work
         current = compile_item(child, current)
       end
       current
+    end
+
+    # The fewest states a run of class copies stands for (see
+    # `Program::ClassRun`); fewer are emitted as states.
+    private RUN_MIN_STATES = 32
+
+    # A run's block: its states (targets relative to the block, `EXIT` for
+    # the exit), the table its `Sparse` states read (targets relative to the
+    # state, `Program::SHARED_EXIT` for the exit; empty when it has none),
+    # and its entry. A large class has its memoized block; an ASCII class
+    # its one byte state, as `compile_ascii_class` emits it, its ranges in
+    # a table of the program's own. Nil for any other class.
+    private def run_block(set : CodePointSet) : {Array(Program::State), Array(Program::Transition), Int32}?
+      return nil if set.empty?
+      if ClassMemo.memoized?(set)
+        block = memo_block(set)
+        table = block.shared_table || return nil
+        return block.list_of_states.size < 2 ? nil : {block.list_of_states, table, block.entry}
+      end
+      return nil unless set.list_of_bounds[-1] < 0x80
+      if set.same?(@ascii_run_set) && (cached = @ascii_run_block)
+        return cached
+      end
+      built = ascii_run_block(set)
+      @ascii_run_set = set
+      @ascii_run_block = built
+      built
+    end
+
+    private def ascii_run_block(set : CodePointSet) : {Array(Program::State), Array(Program::Transition), Int32}
+      bounds = set.list_of_bounds
+      range_count = bounds.size // 2
+      @ledger.charge_array(1, sizeof(Program::State), "a class run block", 0)
+      if range_count == 1
+        state = Program::State.new(Program::StateKind::ByteRange, bounds[0].to_u8, bounds[1].to_u8, ClassMemo::EXIT,
+          NONE, 0)
+        return {[state], [] of Program::Transition, 0}
+      end
+      @ledger.charge_array(range_count, sizeof(Program::Transition), "a class run table", 0)
+      table = Array(Program::Transition).new(range_count) do |index|
+        Program::Transition.new(bounds[index * 2].to_u8, bounds[index * 2 + 1].to_u8, Program::SHARED_EXIT)
+      end
+      {[Program::State.new(Program::StateKind::Sparse, 0_u8, 0_u8, NONE, range_count, 0)], table, 0}
+    end
+
+    # Emits *copies* copies of class *set* as a `Program::ClassRun`, the
+    # first copy's exit leading to *next_state*, and returns the entry of
+    # the last copy (the one a match reads first); nil when the class has
+    # no run block (`run_block`), its table cannot be shared, or the copies
+    # stand for fewer than `RUN_MIN_STATES` states. The run is checked,
+    # charged and numbered as its copies emitted one by one would be
+    # (`compile_recorded_class`, `instantiate_shared`), and it builds the
+    # program they would (an ASCII class's ranges then sit in a table of
+    # the program's own rather than in its transition list); only its
+    # states are not written.
+    private def class_run(set : CodePointSet, copies : Int32, next_state : Int32) : Int32?
+      return nil if copies < 2
+      block_states, table, entry = run_block(set) || return nil
+      return nil if copies.to_i64 * block_states.size < RUN_MIN_STATES
+      table_id = 0_u8
+      unless table.empty?
+        table_id = shared_table_id(table) || return nil
+      end
+      added = copies.to_i64 * block_states.size
+      check_state_room(added.to_i32, written: false)
+      @meter.enforce { Core::Position.new(0_i64) } if @meter.charge(added + copies)
+      if block_states.size > 1
+        copies.times { @ledger.charge_append(sizeof(Program::ClassBlock), "a class block", 0) }
+      end
+      @ledger.charge_append(sizeof(Program::ClassRun), "a class run", 0)
+      run = Program::ClassRun.new(state_total, copies, block_states, table_id, entry, next_state)
+      @list_of_runs << run
+      @run_states += run.size
+      run.last_entry
     end
 
     private def compile_item(node : Hir::Node, next_state : Int32) : Int32
@@ -472,15 +495,19 @@ module Mica::Regex
     private def finish_loop(node : Hir::Repetition, loop_split : Int32, exit : Int32) : Nil
       consumed_start = @list_of_values.pop
       first = loop_split + 1
-      last = @list_of_states.size
+      last = state_total
       fresh_start = consumed_start
       if nullable_body?(consumed_start, first, last, loop_split)
         fresh_start = copy_fresh_body(consumed_start, first, last, loop_split, exit)
       end
       preferred, other = node.greedy? ? {fresh_start, exit} : {exit, fresh_start}
-      @list_of_states[loop_split] = Program::State.new(Program::StateKind::Split, 0_u8, 0_u8, preferred, other, 0)
+      put_state(loop_split, Program::State.new(Program::StateKind::Split, 0_u8, 0_u8, preferred, other, 0))
+      child = node.child
       if node.minimum == 0
         push_value(loop_split)
+      elsif child.is_a?(Hir::Class) && (run = class_run(child.code_point_set, node.minimum - 1, fresh_start))
+        # `\w{25,}`: the copies before the loop are one run.
+        push_value(run)
       else
         push_value(fresh_start)
         push_task(TaskKind::MandatoryStep, node, NONE, node.minimum - 1)
@@ -493,7 +520,7 @@ module Mica::Regex
       return true if start == loop_split
       # A body that starts by reading a byte (a class, a literal) has no
       # epsilon path at all, so its states need no walk.
-      return false if first <= start < last && @list_of_states[start].kind.in?(Program::StateKind::ByteRange, Program::StateKind::Sparse)
+      return false if first <= start < last && state_at(start).kind.in?(Program::StateKind::ByteRange, Program::StateKind::Sparse)
       size = last - first
       grow(GrowingList::Visited, size, sizeof(Bool))
       visited = @list_of_visited
@@ -513,7 +540,7 @@ module Mica::Regex
         next if visited[current - first]
         visited[current - first] = true
         charge_work
-        state = @list_of_states[current]
+        state = state_at(current)
         case state.kind
         when .split?
           push_value(state.alternate)
@@ -529,9 +556,9 @@ module Mica::Regex
     # Emits the fresh copy of the body *first*...*last* and returns the copy
     # of *start*.
     private def copy_fresh_body(start : Int32, first : Int32, last : Int32, loop_split : Int32, exit : Int32) : Int32
-      offset = @list_of_states.size - first
+      offset = state_total - first
       (first...last).each do |index|
-        state = @list_of_states[index]
+        state = state_at(index)
         case state.kind
         when .split?
           add_state(state.copy_with(next_state: fresh_target(state.next_state, first, last, offset, loop_split, exit),
@@ -584,15 +611,9 @@ module Mica::Regex
     # Compiles *set* (see `compile_class`) and records its states as a
     # `Program::ClassBlock` when they are more than one.
     private def compile_recorded_class(set : CodePointSet, next_state : Int32) : Int32
-      first_state = @list_of_states.size
-      copies = @copied_state_count
+      first_state = state_total
       entry = compile_class(set, next_state)
-      end_state = @list_of_states.size
-      if @copied_state_count > copies
-        # The class was copied in place: its states are the last copy's.
-        first_state = COPY_BASE + copies
-        end_state = COPY_BASE + @copied_state_count
-      end
+      end_state = state_total
       if end_state - first_state > 1
         @ledger.charge_append(sizeof(Program::ClassBlock), "a class block", 0)
         @list_of_class_blocks << Program::ClassBlock.new(first_state, end_state, entry, next_state)
@@ -607,12 +628,12 @@ module Mica::Regex
     # its memoized minimal automaton (`ClassMemo`).
     private def compile_class(set : CodePointSet, next_state : Int32) : Int32
       return emit(Program::StateKind::Fail) if set.empty?
-      return instantiate(memo_block(set), next_state, in_place?(set)) if ClassMemo.memoized?(set)
+      return instantiate(memo_block(set), next_state) if ClassMemo.memoized?(set)
       return compile_class_from_trie(set, next_state) unless set.same?(@repeated_small_set)
       if block = @repeated_small_block
         return instantiate(block, next_state)
       end
-      first_state = @list_of_states.size
+      first_state = state_total
       first_transition = @list_of_transitions.size
       entry = compile_class_from_trie(set, next_state)
       @repeated_small_block = capture_block(first_state, first_transition, entry, next_state)
@@ -624,12 +645,12 @@ module Mica::Regex
     # *next_state*, charged before it is copied.
     private def capture_block(first_state : Int32, first_transition : Int32, entry : Int32,
                               next_state : Int32) : ClassMemo::Block
-      state_count = @list_of_states.size - first_state
+      state_count = state_total - first_state
       transition_count = @list_of_transitions.size - first_transition
       @ledger.charge_array(state_count, sizeof(Program::State), "a repeated class", 0)
       @ledger.charge_array(transition_count, sizeof(Program::Transition), "a repeated class", 0)
       list_of_states = Array(Program::State).new(state_count) do |offset|
-        state = @list_of_states[first_state + offset]
+        state = state_at(first_state + offset)
         state.copy_with(next_state: relative_target(state.next_state, first_state, next_state),
           argument: state.kind.sparse? ? state.argument - first_transition : state.argument)
       end
@@ -649,18 +670,17 @@ module Mica::Regex
     # leading to *next_state*, and returns its entry state. The block is
     # checked against the limits and charged as a whole, as emitting its
     # states one by one would check and charge them.
-    private def instantiate(block : ClassMemo::Block, next_state : Int32, in_place : Bool = false) : Int32
+    private def instantiate(block : ClassMemo::Block, next_state : Int32) : Int32
       if table = block.shared_table
         if table_id = shared_table_id(table)
-          return in_place ? copy_in_place(block, table_id, next_state) : hold_shared(block, table_id, next_state)
+          return instantiate_shared(block, table_id, next_state)
         end
       end
-      first_state = @list_of_states.size
+      first_state = state_total
       first_transition = @list_of_transitions.size
       block_states = block.list_of_states
       block_transitions = block.list_of_transitions
       check_state_room(block_states.size)
-      reserve_held_states(block_states.size)
       @ledger.charge(sizeof(Program::Transition).to_i64 * AllocationLedger::GROWTH_FACTOR * block_transitions.size,
         "a class transition", 0)
       @meter.enforce { Core::Position.new(0_i64) } if @meter.charge(block_states.size)
@@ -674,8 +694,9 @@ module Mica::Regex
         transition = transitions[index]
         transitions[index] = transition.copy_with(target: absolute_target(transition.target, first_state, next_state))
       end
+      physical_first = @list_of_states.size
       @list_of_states.concat(block_states)
-      states = @list_of_states.to_unsafe + first_state
+      states = @list_of_states.to_unsafe + physical_first
       block_states.size.times do |index|
         state = states[index]
         states[index] = state.copy_with(next_state: absolute_target(state.next_state, first_state, next_state),
@@ -699,39 +720,19 @@ module Mica::Regex
       @list_of_shared_tables.size.to_u8
     end
 
-    # Adds a copy of a memoized class block that a counted repetition
-    # repeats (see `in_place?`), its exit leading to *next_state* and its
-    # `Sparse` states reading their transitions from shared table
-    # *table_id*, and returns its entry state. The program reads the copy's
-    # states from the block in place (`Program::ClassCopy`), so a copy
-    # costs one record however many states the class has: `\w{25}` holds
-    # 25 records, not 25 copies of `\w`'s 354 states.
-    private def copy_in_place(block : ClassMemo::Block, table_id : UInt8, next_state : Int32) : Int32
-      block_states = block.list_of_states
-      check_state_room(block_states.size)
-      @meter.enforce { Core::Position.new(0_i64) } if @meter.charge(block_states.size)
-      first_state = COPY_BASE + @copied_state_count
-      @ledger.charge_append(sizeof(Program::ClassCopy), "a class copy", 0)
-      list_of_copies = @list_of_class_copies ||= [] of Program::ClassCopy
-      list_of_copies << Program::ClassCopy.new(first_state, block_states, table_id, next_state)
-      @copied_state_count += block_states.size
-      block.entry + first_state
-    end
-
     # Emits a memoized class block's states after the current ones, its
     # exit leading to *next_state*, with its `Sparse` states reading their
     # transitions from shared table *table_id* (one memory copy of the
     # states, relocated in place; no transitions are copied), and returns
-    # its entry state. The engines read held states fastest, so every copy
-    # a counted repetition does not repeat is held.
-    private def hold_shared(block : ClassMemo::Block, table_id : UInt8, next_state : Int32) : Int32
-      first_state = @list_of_states.size
+    # its entry state.
+    private def instantiate_shared(block : ClassMemo::Block, table_id : UInt8, next_state : Int32) : Int32
+      first_state = state_total
       block_states = block.list_of_states
       check_state_room(block_states.size)
-      reserve_held_states(block_states.size)
       @meter.enforce { Core::Position.new(0_i64) } if @meter.charge(block_states.size)
+      physical_first = @list_of_states.size
       @list_of_states.concat(block_states)
-      states = @list_of_states.to_unsafe + first_state
+      states = @list_of_states.to_unsafe + physical_first
       block_states.size.times do |index|
         state = states[index]
         states[index] = if state.kind.sparse?
@@ -741,60 +742,6 @@ module Mica::Regex
                         end
       end
       block.entry + first_state
-    end
-
-    # True when a counted repetition may repeat a large class (see
-    # `mark_in_place`), so the program may hold far fewer states than the
-    # preflight's bound. One walk of the `Hir`, an operation per node.
-    private def repeats_a_large_class? : Bool
-      @ledger.charge_array(0, sizeof(Hir::Node), "the repetition walk stack", 0)
-      stack = [@pattern.root] of Hir::Node
-      while node = stack.pop?
-        charge_work
-        case node
-        when Hir::Repetition
-          child = node.child
-          if (node.maximum || node.minimum) >= 2
-            return true if child.is_a?(Hir::Class) && ClassMemo.memoized?(child.code_point_set)
-            return true if child.is_a?(Hir::Alternation)
-          end
-          push_walk(stack, child)
-        when Hir::Capture
-          push_walk(stack, node.child)
-        when Hir::Concatenation
-          node.list_of_children.each { |child| push_walk(stack, child) }
-        when Hir::Alternation
-          node.list_of_branches.each { |branch| push_walk(stack, branch) }
-        end
-      end
-      false
-    end
-
-    private def push_walk(stack : Array(Hir::Node), node : Hir::Node) : Nil
-      @ledger.charge_append(sizeof(Hir::Node), "the repetition walk stack", 0)
-      stack << node
-    end
-
-    # Marks a large class that *node* repeats in two or more copies
-    # (`\w{25,}`, `\p{L}{2,8}`) to be read in place (`copy_in_place`).
-    private def mark_in_place(node : Hir::Repetition, maximum : Int32?) : Nil
-      return if (maximum || node.minimum) < 2
-      child = node.child
-      set = if child.is_a?(Hir::Class)
-              child.code_point_set
-            elsif child.is_a?(Hir::Alternation)
-              merged_class(child)
-            end
-      return unless set && ClassMemo.memoized?(set) && !in_place?(set)
-      @ledger.charge_append(sizeof(CodePointSet), "a repeated class", 0)
-      list_of_sets = @list_of_in_place_sets ||= [] of CodePointSet
-      list_of_sets << set
-    end
-
-    # True when *set*'s copies are read in place (see `mark_in_place`).
-    private def in_place?(set : CodePointSet) : Bool
-      list_of_sets = @list_of_in_place_sets
-      !list_of_sets.nil? && list_of_sets.any?(&.same?(set))
     end
 
     # Marks a repeated small class to be copied rather than rebuilt. A
@@ -983,16 +930,84 @@ module Mica::Regex
     # would be a compiler defect, and it is reported as one.
     private def add_state(state : Program::State) : Int32
       check_state_room(1)
-      reserve_held_states(1)
       charge_work
       @list_of_states << state
-      @list_of_states.size - 1
+      state_total - 1
+    end
+
+    # Gives `@list_of_states` room for the preflight's whole bound, charged
+    # as a new list: a run counted ahead (`run_ahead?`) was emitted
+    # as states (its class's table could not be shared).
+    private def grow_to_bound : Nil
+      bound = @estimate.clamp(1_i64, @limits.max_program_states).to_i32
+      return if @physical_capacity >= bound
+      @ledger.charge_array(bound, sizeof(Program::State), "the program states", 0)
+      grown = Array(Program::State).new(bound)
+      grown.concat(@list_of_states)
+      @list_of_states = grown
+      @physical_capacity = bound
+    end
+
+    # True when *node*, compiled once, will make a run (`class_run`) of its
+    # copies: its mandatory copies (`x{n}`, `x{n,m}`), or all but the one
+    # before the loop (`x{n,}`, see `finish_loop`). It then adds the states
+    # the size preflight counted for them (`Preflight.set_states` per copy)
+    # to `@run_states_ahead`. Called from `transitions_bound` for the
+    # repetitions it counts once, so it never counts more than the runs the
+    # compiler makes, unless a run's table cannot be shared.
+    private def run_ahead?(node : Hir::Repetition) : Bool
+      child = node.child
+      return false unless child.is_a?(Hir::Class)
+      copies = node.maximum ? node.minimum : node.minimum - 1
+      return false if copies < 2
+      set = child.code_point_set
+      block_states, _, _ = run_block(set) || return false
+      return false if copies.to_i64 * block_states.size < RUN_MIN_STATES
+      @run_states_ahead += copies.to_i64 * Preflight.set_states(set, @ledger, @meter)
+      true
+    end
+
+    # The number of states emitted so far, runs included (the next state's
+    # number).
+    @[AlwaysInline]
+    private def state_total : Int32
+      @list_of_states.size + @run_states
+    end
+
+    # Emitted state *index*, in a run or not.
+    private def state_at(index : Int32) : Program::State
+      @list_of_states[physical_index(index) || return run_state_at(index)]
+    end
+
+    # Replaces emitted state *index*, which is not in a run.
+    private def put_state(index : Int32, state : Program::State) : Nil
+      physical = physical_index(index) || raise SyntaxError.new("internal error: state #{index} is in a class run",
+        Core::Position.new(0_i64))
+      @list_of_states[physical] = state
+    end
+
+    # Where state *index* sits in `@list_of_states`, or nil when it is in a
+    # run.
+    private def physical_index(index : Int32) : Int32?
+      offset = 0
+      @list_of_runs.each do |run|
+        break if index < run.first_state
+        return nil if index < run.end_state
+        offset += run.size
+      end
+      index - offset
+    end
+
+    private def run_state_at(index : Int32) : Program::State
+      @list_of_runs.each { |run| return run.state_at(index) if run.first_state <= index < run.end_state }
+      raise SyntaxError.new("internal error: state #{index} is in no class run", Core::Position.new(0_i64))
     end
 
     # Raises unless *added* more states fit under `max_program_states` and
     # within the preflight bound.
-    private def check_state_room(added : Int32) : Nil
-      count = @list_of_states.size.to_i64 + @copied_state_count + added
+    private def check_state_room(added : Int32, written : Bool = true) : Nil
+      count = state_total.to_i64 + added
+      grow_to_bound if written && @list_of_states.size.to_i64 + added > @physical_capacity
       limit = @limits.max_program_states
       if count > limit
         raise CompileLimitError.new("max_program_states", limit, "A program of #{count} states", Core::Position.new(0_i64))
@@ -1033,7 +1048,7 @@ module Mica::Regex
     # has none. A search on a program with groups runs both phases in its
     # capture workspace, so no second workspace is ever alive beside it.
     private def check_pike_bytes : Int64
-      states = @list_of_states.size.to_i64 + @copied_state_count
+      states = state_total.to_i64
       slots = (@pattern.capture_count.to_i64 + 1) * 2
       captures = @pattern.capture_count > 0
       bytes = PikeVM.workspace_charge(states, slots, captures)

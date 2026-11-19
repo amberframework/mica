@@ -80,6 +80,10 @@ module Mica::Regex
     @hot_lease = Atomic(SearchLease?).new(nil)
 
     def initialize(@program : Program)
+      # A program with class runs (`Program::ClassRun`) writes its states
+      # out here, once, so the plan's engines read each state from one
+      # array (`Program#state_at`); its first searches built nothing.
+      @program.list_of_states
       @short_searches = Atomic(Int32).new(@program.first_search_count)
       @backtracked_starts = Atomic(Int32).new(@program.first_searches_ended? ? FirstSearch::SEARCHES : 0)
       @byte_classes = ByteClasses.new(@program)

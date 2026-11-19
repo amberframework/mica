@@ -63,6 +63,11 @@ module Mica::Regex
     # `search` never returns `LazyDFA::GAVE_UP` once it reads to the end.
     getter? decisive : Bool
 
+    # Per state: true when every ASCII byte leads back to the state with no
+    # assertion and no slot (`(?s:.)*`, `[^\n]*`), so `captures` steps over
+    # a run of ASCII bytes there without reading the table.
+    @list_of_ascii_loops : Array(Bool)
+
     def initialize(@byte_classes : ByteClasses, @table : Array(Int32), @match_edges : Array(Int32),
                    @list_of_edges : Array(Edge), @list_of_shadows : Array(Bool))
       @class_count = @byte_classes.class_count
@@ -74,6 +79,16 @@ module Mica::Regex
         step |= STEP_TAKES_EDGE if edge.looks != 0 || edge.slots != 0
         step |= STEP_REACHES_MATCH if matches_before_end?(edge.target)
         step
+      end
+      @list_of_ascii_loops = Array(Bool).new(@match_edges.size) { |state| ascii_loop?(state) }
+    end
+
+    private def ascii_loop?(state : Int32) : Bool
+      row = state * @class_count
+      class_of = @byte_classes.table
+      (0...0x80).all? do |byte|
+        step = @steps[row + class_of[byte]]
+        step >= 0 && step & STEP_TAKES_EDGE == 0 && step >> 2 == row
       end
     end
 
@@ -98,22 +113,28 @@ module Mica::Regex
       steps = @steps.to_unsafe
       class_of = @byte_classes.table
       bytes = haystack.to_unsafe
-      state = 0
+      row = 0
       at = start
       charged = start
       # Bytes before `allowed_end` are allowed by the meter
       # (`SearchMeter#readable`) and charged once read.
       allowed_end = start
+      steps = @steps.to_unsafe
+      class_of = @byte_classes.table
+      bytes = haystack.to_unsafe
       while at < finish
         if at >= allowed_end
           meter.charge(at - charged, at)
           charged = at
           allowed_end = at + meter.readable(Math.min(finish - at, PrefilterScan::CHARGE_CHUNK), at)
         end
+        bound = Math.min(finish, allowed_end)
+        if @list_of_ascii_loops.unsafe_fetch(row // @class_count)
+          at = Core::ByteScan.skip_ascii(haystack, at, bound)
+          next if at >= bound
+        end
         # Steps with no slots or assertions in a tight loop, one table
         # load per byte: match paths matter only at *finish*.
-        row = state * @class_count
-        bound = Math.min(finish, allowed_end)
         while at < bound
           step = steps[row &+ class_of[bytes[at]]]
           break unless step >= 0 && step & STEP_TAKES_EDGE == 0
@@ -127,17 +148,16 @@ module Mica::Regex
           end
           row = step >> 2
         end
-        state = row // @class_count
         next if at >= bound
-        index = @table.unsafe_fetch(row + class_of[bytes[at]])
-        return false if index < 0
-        edge = @list_of_edges.unsafe_fetch(index)
-        return false unless take(edge, haystack, at, search_start, slots)
-        state = edge.target
-        at += 1
+        cell = row &+ class_of[bytes[at]]
+        step = steps[cell]
+        return false if step < 0
+        return false unless take(@list_of_edges.unsafe_fetch(@table.unsafe_fetch(cell)), haystack, at, search_start, slots)
+        row = step >> 2
+        at &+= 1
       end
       meter.charge(finish - charged + 1, charged)
-      index = @match_edges.unsafe_fetch(state)
+      index = @match_edges.unsafe_fetch(row // @class_count)
       return false if index < 0
       take(@list_of_edges.unsafe_fetch(index), haystack, finish, search_start, slots)
     end

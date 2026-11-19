@@ -74,12 +74,78 @@ module Mica::Regex
     # (see `ReverseNFA`).
     record ClassBlock, first_state : Int32, end_state : Int32, entry : Int32, exit : Int32
 
-    # A copy of a large class's memoized automaton (`ClassMemo::Block`) that
-    # the program reads in place rather than holding its states: states
-    # `first_state` up to `first_state + list_of_template_states.size` are
-    # the template's, its `Sparse` states reading shared table `table_id`
-    # and its exit leading to `exit` (see `state_at`).
-    record ClassCopy, first_state : Int32, list_of_template_states : Array(State), table_id : UInt8, exit : Int32
+    # *copies* copies of one class, one after another from *first_state*,
+    # held as the class's block (a large class's `ClassMemo::Block`, shared
+    # with every program, or an ASCII class's one byte state) rather than
+    # as states: `x{n}` (`\p{L}{256}` is 256 copies of about 300 states).
+    # Copy k starts at
+    # `first_state + k * block size`; copy 0 leads to *exit*, and each
+    # later copy to the entry of the copy before it, as the compiler emits
+    # a counted item from the last copy back. Its `Sparse` states read
+    # shared table *table_id*. A copy's states are exactly the ones
+    # `Compiler#instantiate_shared` would have emitted (see `state_at`).
+    record ClassRun, first_state : Int32, copies : Int32, list_of_block_states : Array(State), table_id : UInt8,
+      entry : Int32, exit : Int32 do
+      # The states the run stands for.
+      def size : Int32
+        copies * list_of_block_states.size
+      end
+
+      # The number after the run's last state.
+      def end_state : Int32
+        first_state + size
+      end
+
+      # The entry of the copy a match reads first (the last emitted).
+      def last_entry : Int32
+        first_state + (copies - 1) * list_of_block_states.size + entry
+      end
+
+      # State *index*, which must lie in the run.
+      def state_at(index : Int32) : State
+        block_size = list_of_block_states.size
+        relative = index - first_state
+        copy = relative // block_size
+        copy_first = first_state + copy * block_size
+        state = list_of_block_states.unsafe_fetch(relative - copy * block_size)
+        exit_target = copy == 0 ? exit : copy_first - block_size + entry
+        return state.copy_with(low: table_id, next_state: exit_target) if state.kind.sparse?
+        target = state.next_state
+        target = if target == ClassMemo::EXIT
+                   exit_target
+                 elsif target != ClassMemo::NONE
+                   target + copy_first
+                 else
+                   target
+                 end
+        state.copy_with(next_state: target)
+      end
+
+      # The class blocks of the run's copies, in emission order.
+      def each_class_block(& : ClassBlock ->) : Nil
+        block_size = list_of_block_states.size
+        # A class of one state is not recorded (see `list_of_class_blocks`).
+        return if block_size < 2
+        copies.times do |copy|
+          copy_first = first_state + copy * block_size
+          exit_target = copy == 0 ? exit : copy_first - block_size + entry
+          yield ClassBlock.new(copy_first, copy_first + block_size, copy_first + entry, exit_target)
+        end
+      end
+    end
+
+    # The states not in a `ClassRun`, in order.
+    @list_of_physical_states : Array(State)
+    # Every state, once built (see `list_of_states`).
+    @materialized : Array(State)?
+    @materialized_blocks : Array(ClassBlock)?
+    # The class blocks the compiler recorded outside runs.
+    @list_of_recorded_blocks : Array(ClassBlock)
+    # The program's runs, in state order.
+    getter list_of_runs : Array(ClassRun)
+    @state_count : Int32
+    # Guards `materialize` (made only for a program with runs).
+    @materialize_mutex : Mutex? = nil
     # The ranges of every `Sparse` state.
     getter list_of_transitions : Array(Transition)
     # The state every search starts from.
@@ -99,8 +165,6 @@ module Mica::Regex
     getter source_end : Ast::SourceEnd
     # The literals every match starts with (see `LiteralSet`), or nil.
     getter literal_set : LiteralSet?
-    # The classes of more than one state, in emission order.
-    getter list_of_class_blocks : Array(ClassBlock)
     # The transition tables of the large classes the program uses, shared
     # with every program that uses them (`ClassMemo::Block`), so a copy
     # of `\w` emits its states but none of its transitions. Never changed.
@@ -110,106 +174,133 @@ module Mica::Regex
     # `next_state` (the state after the class).
     SHARED_EXIT = Int32::MIN
 
-    # The states the program holds: numbers 0 up to `held_state_count`.
-    # The class copies (`list_of_class_copies`) number after them.
-    @list_of_held_states : Array(State)
-    # The copies of large classes the program reads in place, in state
-    # order, numbered from `held_state_count` on.
-    getter list_of_class_copies : Array(ClassCopy)
-    @state_count : Int32
-
-    def initialize(@list_of_held_states : Array(State), @list_of_transitions : Array(Transition), @start_state : Int32,
+    # *list_of_states* holds every state outside *list_of_runs*.
+    def initialize(list_of_states : Array(State), @list_of_transitions : Array(Transition), @start_state : Int32,
                    @capture_count : Int32, @list_of_group_names : Array(Ast::GroupName), @options : CompileOptions,
                    @backtracker_allowance : Int64, @source_end : Ast::SourceEnd = Ast::SourceEnd::Closed,
                    @literal_set : LiteralSet? = nil,
-                   @list_of_class_blocks : Array(ClassBlock) = [] of ClassBlock,
+                   list_of_class_blocks : Array(ClassBlock) = [] of ClassBlock,
                    @list_of_shared_tables : Array(Array(Transition)) = [] of Array(Transition),
-                   @list_of_class_copies : Array(ClassCopy) = NO_CLASS_COPIES)
-      @state_count = @list_of_held_states.size
-      if last_copy = @list_of_class_copies.last?
-        @state_count = last_copy.first_state + last_copy.list_of_template_states.size
+                   @list_of_runs : Array(ClassRun) = [] of ClassRun)
+      @list_of_physical_states = list_of_states
+      @list_of_recorded_blocks = list_of_class_blocks
+      @state_count = list_of_states.size + @list_of_runs.sum(&.size)
+      if @list_of_runs.empty?
+        @materialized = list_of_states
+        @materialized_blocks = list_of_class_blocks
+      else
+        @materialize_mutex = Mutex.new
       end
     end
 
-    # Every state, the class copies written out, built on the first read
-    # of a copy's state (see `state_at`) and published through the atomic,
-    # so a thread that sees it sees it whole.
-    @expanded_states = Atomic(Array(State)?).new(nil)
-    # One lock for every program's expansion (it runs once per program
-    # with copies, so a lock per program would cost each compile an
-    # allocation for nothing).
-    @@expansion_mutex = Mutex.new
-
-    # The class copies of a program that has none (shared, never changed).
-    NO_CLASS_COPIES = [] of ClassCopy
-
-    # The number of states the program holds (`list_of_class_copies` adds
-    # the rest).
-    def held_state_count : Int32
-      @list_of_held_states.size
+    # Every state, indexed by number. A program with runs (`ClassRun`)
+    # builds this on first use, which the plan makes (its first
+    # searches read states through `state_at` and build nothing).
+    @[AlwaysInline]
+    def list_of_states : Array(State)
+      @materialized || materialize
     end
 
-    # Returns state *index*, which must be below `state_count`. A class
-    # copy's state comes from the program's states written out in full
-    # (`expanded_states`): compiling a program costs no more than its held
-    # states and copy records, and the copies are written out once, by the
-    # first search that reads one, which then reads them as fast as held
-    # states. The bytes they take were charged to the compilation's ledger
-    # as the preflight bound, so this stays within `max_compile_bytes`.
+    # The classes of more than one state, in emission order (built with
+    # `list_of_states`).
+    def list_of_class_blocks : Array(ClassBlock)
+      if blocks = @materialized_blocks
+        return blocks
+      end
+      materialize
+      @materialized_blocks || raise Mica::Error.new("internal error: the program's class blocks were not built")
+    end
+
+    # State *index*, read without building `list_of_states`.
     @[AlwaysInline]
     def state_at(index : Int32) : State
-      held = @list_of_held_states
-      return held.unsafe_fetch(index) if index < held.size
-      (@expanded_states.get(:acquire) || expand_states).unsafe_fetch(index)
+      if states = @materialized
+        states.unsafe_fetch(index)
+      else
+        run_state_at(index)
+      end
     end
 
-    # Writes the class copies out after the held states (see `state_at`).
-    private def expand_states : Array(State)
-      @@expansion_mutex.synchronize do
-        if built = @expanded_states.get(:acquire)
+    # :nodoc:
+    # True while the program's runs have not been built into
+    # `list_of_states` (for specs).
+    def runs_pending? : Bool
+      @materialized.nil?
+    end
+
+    # Yields every state with its number, in order, without building
+    # `list_of_states`: a run's states are worked out from its block.
+    def each_state(& : State, Int32 ->) : Nil
+      if states = @materialized
+        states.each_with_index { |state, index| yield state, index }
+        return
+      end
+      index = 0
+      physical = 0
+      @list_of_runs.each do |run|
+        while index < run.first_state
+          yield @list_of_physical_states.unsafe_fetch(physical), index
+          physical += 1
+          index += 1
+        end
+        while index < run.end_state
+          yield run.state_at(index), index
+          index += 1
+        end
+      end
+      while physical < @list_of_physical_states.size
+        yield @list_of_physical_states.unsafe_fetch(physical), index
+        physical += 1
+        index += 1
+      end
+    end
+
+    private def run_state_at(index : Int32) : State
+      offset = 0
+      @list_of_runs.each do |run|
+        break if index < run.first_state
+        return run.state_at(index) if index < run.end_state
+        offset += run.size
+      end
+      @list_of_physical_states[index - offset]
+    end
+
+    # Builds every state and class block from the physical states and the
+    # runs, once; threads racing here wait for the first.
+    private def materialize : Array(State)
+      mutex = @materialize_mutex || raise Mica::Error.new("internal error: a program without runs has every state")
+      mutex.synchronize do
+        if built = @materialized
           return built
         end
-        # One memory copy per block, relocated in place.
-        list = Array(State).new(state_count)
-        list.concat(@list_of_held_states)
-        @list_of_class_copies.each do |copy|
-          list.concat(copy.list_of_template_states)
-          states = list.to_unsafe + copy.first_state
-          copy.list_of_template_states.size.times do |offset|
-            states[offset] = state_of_copy(copy, offset)
+        states = Array(State).new(@state_count)
+        blocks = Array(ClassBlock).new(@list_of_recorded_blocks.size + @list_of_runs.sum(&.copies))
+        physical = 0
+        recorded = 0
+        @list_of_runs.each do |run|
+          while states.size < run.first_state
+            states << @list_of_physical_states[physical]
+            physical += 1
           end
+          (run.first_state...run.end_state).each { |index| states << run.state_at(index) }
+          while recorded < @list_of_recorded_blocks.size && @list_of_recorded_blocks[recorded].first_state < run.first_state
+            blocks << @list_of_recorded_blocks[recorded]
+            recorded += 1
+          end
+          run.each_class_block { |block| blocks << block }
         end
-        @expanded_states.set(list, :release)
-        list
-      end
-    end
-
-    # Every state with its number, in order.
-    def each_state(& : State, Int32 ->) : Nil
-      @list_of_held_states.each_with_index { |state, index| yield state, index }
-      @list_of_class_copies.each do |copy|
-        copy.list_of_template_states.size.times do |offset|
-          index = copy.first_state + offset
-          yield state_of_copy(copy, offset), index
+        while physical < @list_of_physical_states.size
+          states << @list_of_physical_states[physical]
+          physical += 1
         end
+        while recorded < @list_of_recorded_blocks.size
+          blocks << @list_of_recorded_blocks[recorded]
+          recorded += 1
+        end
+        @materialized_blocks = blocks
+        @materialized = states
+        states
       end
-    end
-
-    # Every state, indexed by number (built on each call: for specs and
-    # diagnostics; the engines read `state_at`).
-    def list_of_states : Array(State)
-      list = Array(State).new(state_count)
-      each_state { |state, _| list << state }
-      list
-    end
-
-    @[AlwaysInline]
-    private def state_of_copy(copy : ClassCopy, offset : Int32) : State
-      template = copy.list_of_template_states.unsafe_fetch(offset)
-      return template.copy_with(low: copy.table_id, next_state: copy.exit) if template.kind.sparse?
-      target = template.next_state
-      return template if target == ClassMemo::NONE
-      template.copy_with(next_state: target == ClassMemo::EXIT ? copy.exit : copy.first_state + target)
     end
 
     # Published through an atomic, so a thread that sees the plan sees it
@@ -309,6 +400,9 @@ module Mica::Regex
       if found = @required_bytes.get(:acquire)
         return found
       end
+      # A large program with runs would build every state first, which
+      # costs more than the first search it serves.
+      return nil if runs_pending? && state_count >= FirstSearch::LARGE_PROGRAM_STATES
       allowance = REQUIRED_BYTES_BASE_EDGES + REQUIRED_BYTES_EDGES_PER_BYTE * span_bytes
       return nil unless edges_within?(allowance)
       list_of_required_bytes

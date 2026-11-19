@@ -81,6 +81,41 @@ describe Mica::Regex::FirstSearch do
     end
   end
 
+  it_satisfies "REGEX-R3-first-search", "searches a program too large for the bitset with its visited pairs in a hash set" do
+    list_of_cases = {
+      {"\\p{L}{50}", "ͱͳͷΐάέήίΰαβγδεζηθικλμνξοπρςστυφχψωϊϋόύώϙϛϝϟϡϸϻͱͳͷΐάέή", 0},
+      {"\\p{L}{256}", "δ" * 256, 0},
+      {"(\\p{L}{14})|(\\p{L}{13})|(\\p{L}{5})", "a bc défghij klmnopqrstuvwxyzab", 2},
+      {"\\b\\w{12,}\\b", "short words " * 20 + "then extraordinarily long ones", 0},
+      {"\\p{L}{20}\\d", "ab" * 200 + "c" * 20 + "7", 0},
+    }
+    list_of_cases.each do |source, haystack, offset|
+      program = fresh_expression(source).program
+      Mica::Regex::BoundedBacktracker.fits?(program, haystack.bytesize - offset).should be_false
+      Mica::Regex::BoundedBacktracker.fits_capped?(program, haystack.bytesize - offset).should be_true
+      first = fresh_expression(source)
+      aged = fresh_expression(source)
+      aged.program.end_first_searches
+      expected = aged.match_at_byte_index(haystack, offset, limits: LIMITS)
+      found = first.match_at_byte_index(haystack, offset, limits: LIMITS)
+      plan_built?(first).should be_false
+      found.try(&.to_a).should eq(expected.try(&.to_a))
+      found.try(&.byte_begin(0)).should eq(expected.try(&.byte_begin(0)))
+    end
+  end
+
+  it_satisfies "REGEX-R3-first-search", "hands a large program's search to the plan once its capped visits run out" do
+    pattern = fresh_expression("\\p{L}{40}\\d")
+    aged = fresh_expression("\\p{L}{40}\\d")
+    aged.program.end_first_searches
+    haystack = "ab" * 2000
+    pattern.match(haystack, limits: LIMITS).should be_nil
+    aged.match(haystack, limits: LIMITS).should be_nil
+    plan_built?(pattern).should be_true
+    found = pattern.match(haystack + "7", limits: LIMITS).should_not be_nil
+    found.byte_begin(0).should eq(haystack.bytesize - 40)
+  end
+
   it_satisfies "REGEX-R3-first-search", "reads the deadline and validates the haystack before it searches" do
     pattern = fresh_expression("a")
     expect_raises(Mica::DeadlineExceededError) do

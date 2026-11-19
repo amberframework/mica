@@ -125,6 +125,40 @@ describe "Mica::Regex R3 engines" do
         span(source, haystack).first.should eq(span(source, haystack, Mica::Regex::Engine::TwoPhase).first)
       end
     end
+
+    it_satisfies "REGEX-R3-one-pass", "steps over a run of ASCII bytes in a state every one loops back to" do
+      haystack = "line one\n" * 50 + "é ß 中 😀 tail\n" + "x" * 37
+      [
+        "(?s)^((.*)()()($))",
+        "(?s)\\A([^\\n]*)\\n(.*)",
+        "(?s)\\A(.*)\\z",
+        "\\A([a-z ]*)(\\d*)",
+      ].each do |source|
+        program(source).plan.one_pass.should_not be_nil
+        {haystack, haystack + "\n", "", "é", "abcdefgh", "abcdefghé"}.each do |subject|
+          span(source, subject).first.should eq(span(source, subject, Mica::Regex::Engine::TwoPhase).first)
+        end
+      end
+    end
+  end
+
+  describe "the forward lazy DFA" do
+    it_satisfies "REGEX-R3-dfa", "steps over a run of ASCII bytes in a state every one leads back to" do
+      haystack = "line one\n" * 50 + "é ß 中 😀 tail\n" + "x" * 37 + "\n"
+      [
+        "(?s)\\A.*$", "(?s)^((.*)()()($))", "\\A[^\\n]*\\n", "(?s)a.*é", "(?s).*😀", "[^é]+é", "\\b\\w+(?s:.)*\\z",
+        "(?m)^.*tail$",
+      ].each do |source|
+        {haystack, "", "é", "abcdefgh", "abcdefghé", "abcdefgh\n"}.each do |subject|
+          span(source, subject).first.should eq(span(source, subject, Mica::Regex::Engine::PikeVM).first)
+        end
+      end
+      # The flagged row is read again after a cache clear rebuilds it.
+      pool = Mica::Regex::CachePool.new(max_bytes: 1 << 20, max_cache_bytes: 1 << 13)
+      last_e = haystack.byte_index("é").should_not be_nil
+      found = searcher("(?s)\\A.*é", haystack * 4, pool: pool).find(0, Mica::Regex::MatchOptions::None, false)
+      found.try(&.to_a).should eq([0_i64, (haystack.bytesize * 3 + last_e + 2).to_i64])
+    end
   end
 
   describe "shared class tables" do
@@ -150,21 +184,26 @@ describe "Mica::Regex R3 engines" do
       end
     end
 
-    it_satisfies "REGEX-R3-differential", "reads each copy of a large class in place, holding one record per copy" do
+    it_satisfies "REGEX-R3-differential", "holds the copies before the loop of a large class's unbounded count as one run" do
       long_words = program("\\b\\w{25,}\\b")
       # A copy of `\w`: the states of its memoized automaton.
-      word = program("\\w{2}").list_of_class_copies.first.list_of_template_states.size
+      word = program("\\w{2}").list_of_runs.first.list_of_block_states.size
       word.should be > 300
-      long_words.list_of_class_copies.size.should eq(25)
-      long_words.held_state_count.should be < 16
-      long_words.state_count.should eq(long_words.held_state_count + 25 * word)
+      long_words.list_of_runs.size.should eq(1)
+      run = long_words.list_of_runs.first
+      run.copies.should eq(24)
+      run.list_of_block_states.size.should eq(word)
+      long_words.runs_pending?.should be_true
+      # The loop's copy is held; the run stands for the other 24.
+      long_words.state_count.should be > 25 * word
+      long_words.state_count.should be < 26 * word
+      count = 0
+      long_words.each_state { count += 1 }
+      count.should eq(long_words.state_count)
+      long_words.runs_pending?.should be_true
       long_words.list_of_states.size.should eq(long_words.state_count)
-      long_words.list_of_class_copies.each do |copy|
-        copy.list_of_template_states.size.should eq(word)
-        copy.first_state.should be >= long_words.held_state_count
-      end
       # A class no counted repetition repeats keeps its states in the program.
-      program("(w+)s+(w+)").list_of_class_copies.should be_empty
+      program("(\\w+)\\s+(\\w+)").list_of_runs.should be_empty
     end
 
     it_satisfies "REGEX-R3-differential", "finds the same spans on every engine path through class copies" do

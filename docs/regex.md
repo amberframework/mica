@@ -336,21 +336,26 @@ byte ranges in a trie, so a class emits at most the byte ranges the size
 preflight counted for it). A large class (16 ranges or more, such as `\w`
 or `\p{L}`, or any class reaching three-byte sequences, such as `.` or
 `[^"']`) is built once per process as a minimal automaton, its equal
-suffixes sharing states. A program copies its states (one memory copy,
-relocated in place), except the copies a counted repetition makes of
-such a class (`\w{25,}`, `\p{L}{2,8}`): each of those is one record
-(`Program::ClassCopy`: the automaton, the copy's first state number and
-its exit), numbered after the states the program holds. The first search
-that reads a copy's state (`Program#state_at`) writes the copies out
-once, so compiling costs what the first search needs and the engines
-then read every state from one array; the bytes the written-out states
-take are charged to the compilation as the preflight bound. Every copy's
-`Sparse` states read the class's transitions
-from one table shared by every program and copy
+suffixes sharing states. A program copies only its states (one memory
+copy, relocated in place): their `Sparse` states read the class's
+transitions from one table shared by every program and copy
 (`Program#list_of_shared_tables`, targets relative to the reading state),
-so a copy of `\w` adds 354 states (or one record) and no transitions,
-and `\b\w{25,}\b` compiles in about 2.5 µs instead of 15. The preflight
-counts its exact states, and every bound in m counts the copies' states.
+so a copy of `\w` adds 354 states and no transitions. The preflight
+counts its exact states.
+A counted class whose copies stand for at least 32 states, a large
+class or an ASCII one (`\p{L}{256}`: 256 copies of 300 states;
+`[0-9A-Za-z_]{256}`; `\w{25,}`: the 24 copies before its loop), is not
+even copied: the program holds the copies as one `Program::ClassRun`
+(the first state, the count, and the class's memoized block or, for an
+ASCII class, its one byte state with its ranges in a table of the
+program's own) and numbers its states as the copies would be numbered,
+so compiling `\p{L}{256}` takes about as long as `\p{L}`, and
+`\b\w{25,}\b` about as long as `\b\w+\b`. A first search reads the run's
+states through `Program#state_at` (or `Program#each_state`), which
+works each one out from the block, and the plan writes `list_of_states`
+out (for a large class, the program the copies written out compile to,
+state for state) when it is first built. The bytes the written-out
+states take are charged to the compilation as the preflight bound.
 A class of one escape or property lowers to a set shared by the process,
 and so does every written class of up to 32 items (`[0-9a-f]`, kept for
 up to 512 classes, the table emptied and refilled when full), each ASCII
@@ -495,8 +500,11 @@ reserved from the `CachePool`, when:
 
 - the span from the offset to the end is at most 256 bytes (64 when the
   pattern has prefix literals, whose plan is cheap and whose prefilter
-  skips to them faster than the backtracker tries each start), and fits
-  the backtracker's bitset gate (`BoundedBacktracker.fits?`);
+  skips to them faster than the backtracker tries each start), or any
+  length for a *large* program without prefix literals (at least
+  `FirstSearch::LARGE_PROGRAM_STATES`, 2,048 states, as `\p{L}{50}`'s
+  15,000), and the backtracker fits it (`BoundedBacktracker.fits_capped?`,
+  below);
 - validation, the required-byte scans (below) and the backtracker's most
   work over that span (one operation per visit and one per slot write, at
   most one of each per (state, position) pair) fit the call's work
@@ -514,12 +522,28 @@ costs. Later searches, iteration calls (`scan`, `gsub`, `split`) and
 longer haystacks build the plan, whose automata pay for themselves over
 many searches.
 
+A first search, and a backtracked start (below), marks the pairs it has
+visited in the backtracker's bitset when m × (L + 1) fits its 256 Ki bits.
+A large program's bitset would not fit (`\p{L}{256}` over 512 bytes needs
+about 39 M bits), so such a search marks them in a hash set instead,
+which holds at most `BoundedBacktracker::SPARSE_VISITS` (16,384) pairs:
+the search makes at most that many visits, then hands over as above, and
+its memory (the set at its largest and a job stack of that many entries)
+is checked against the backtracker allowance before it starts. It visits
+the same pairs in the same order as with the bitset. Its plan costs in
+proportion to the program's states, at least what that many visits cost,
+so a first search of a large program without prefix literals reads a span
+of up to `FirstSearch::MAX_LARGE_BYTES` (64 KiB); past it, the validation
+and scans every path makes cost more than the plan would save. A
+backtracked start reads at most `FirstSearch::MAX_BYTES` (256) bytes, so
+a long match end goes to the reverse DFA.
+
 The plan itself builds what a search reads when it first reads it: the
 start filter (read only by short searches) on first use, and the reverse
 DFA only once the plan has found `FirstSearch::SEARCHES` match starts
 without it. Until then, when the forward DFA has found a match end `e`,
 the bounded backtracker finds the start over `offset...e` (when the span
-is at most 256 bytes, fits the bitset gate and the call's remaining
+would suit a first search, its most work fits the call's remaining
 allowance, and the backtracker decides within its visit limit): the
 leftmost-first match of that span ends at `e`, as cutting bytes off after
 the match only removes matches.
@@ -722,6 +746,14 @@ do, into a `DFACache` leased for the search:
   one kind and not for the other.
 - **Byte classes** (`ByteClasses`) group bytes no state can tell apart, so
   a state has one transition per class.
+- **ASCII loops.** Once every ASCII byte's transition out of a forward
+  state is built and leads back to it, and the state is neither a match,
+  dead nor a start state (the loop of `(?s:.)*`), the entries of its own
+  row carry a flag, and the search steps over a run of ASCII bytes there
+  eight at a time without reading the table, within the bytes the meter
+  has allowed. `(?s)^((.*)()()($))` over 7 MB of source goes from about
+  14 ms to 1 ms. A row offset is a multiple of 8, which leaves the flag
+  its bit.
 - **Cost:** every byte read, every NFA state a new state's closure visits,
   and every state a cache clear discards is charged one operation. A cache
   that would pass `CachePool#max_cache_bytes` is cleared, and no
@@ -783,6 +815,10 @@ dropped. A pattern where two paths meet the same byte class, NFA state or
 match is not one-pass, and its captures come from the backtracker or the
 Pike VM. It is built on the first capture search, for programs of at most
 1,500 states and 64 slots, and runs only over the span phase 1 found.
+In a state that every ASCII byte leads back to with no slot and no
+assertion (the loop of `(?s:.)*` or `[^\n]*`), the capture pass steps
+over a run of ASCII bytes eight at a time without reading its table,
+within the bytes the meter has allowed.
 
 ## Literal acceleration
 

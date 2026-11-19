@@ -424,15 +424,16 @@ describe Mica::Regex::Syntax do
       end
     end
 
-    it_satisfies "REGEX-R1-preflight", "reads the copies of a repeated large class in place, matching as written out" do
+    it_satisfies "REGEX-R1-preflight", "compiles the copies of a repeated large class as written out" do
       limits = Mica::Regex::SearchLimits::TRUSTED_INPUT
       {".{3}" => "...", "x[^\"']{0,2}" => "x(?:[^\"'](?:[^\"'])?)?",
-       "\\w{0,2}" => "(?:\\w(?:\\w)?)?"}.each do |repeated, written|
+       "\\w{0,2}" => "(?:\\w(?:\\w)?)?", "\\w{3,}" => "\\w\\w\\w+",
+       "x\\pL{2,4}" => "x\\pL\\pL(?:\\pL(?:\\pL)?)?"}.each do |repeated, written|
         copied = Mica::Regex::Syntax.compile(repeated, dialect: :crystal, compile_limits: TRUSTED)
         rebuilt = Mica::Regex::Syntax.compile(written, dialect: :crystal, compile_limits: TRUSTED)
-        copied.list_of_class_copies.size.should be >= 2
-        rebuilt.list_of_class_copies.should be_empty
+        rebuilt.list_of_runs.should be_empty
         copied.state_count.should eq(rebuilt.state_count)
+        copied.list_of_states.should eq(rebuilt.list_of_states)
         copied.list_of_transitions.should eq(rebuilt.list_of_transitions)
         ["", "abc", "xé\"y", "x'é_9", "日本語!", "a\nb"].each do |haystack|
           spans = {copied, rebuilt}.map do |program|
