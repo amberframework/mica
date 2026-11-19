@@ -26,11 +26,14 @@ module Mica::Regex
   # passes it (the decision waits for the root, since `{0}` cancels its
   # child).
   module Preflight
-    # Returns the bound for *pattern*, whose classes and case-folded
-    # literals are already lowered. Raises `CompileLimitError` naming
+    # Returns the bound for *pattern*. Raises `CompileLimitError` naming
     # `max_program_states`.
+    #
+    # With *lower_sets*, each class and case-folded literal is lowered
+    # (`ClassLowering`) as the walk reaches it, so the front half walks the
+    # tree once for both; otherwise they must already be lowered.
     def self.estimate(pattern : Ast::Pattern, dialect : Dialect, limits : CompileLimits, ledger : AllocationLedger,
-                      meter : Core::WorkMeter) : Int64
+                      meter : Core::WorkMeter, *, lower_sets : Bool = false) : Int64
       # Every node pushes one value after popping its children's, so the
       # stack never holds more values than there are nodes.
       capacity = Math.max(pattern.node_count, 1)
@@ -45,6 +48,13 @@ module Mica::Regex
       Ast.each_post_order(pattern.root, pattern.node_count, ledger) do |node, child_count|
         offset = node.offset
         meter.enforce { Core::Position.new(offset.to_i64) } if meter.charge(1)
+        if lower_sets
+          if node.is_a?(Ast::CharClass)
+            node.lowered_set = ClassLowering.lower(node, dialect, limits, ledger, meter)
+          elsif node.is_a?(Ast::Literal)
+            node.folded_set = ClassLowering.fold_literal(node, dialect, limits, ledger, meter)
+          end
+        end
         nullable = node_nullable?(node, list_of_nullable, child_count)
         value = node_states(node, list_of_values, list_of_nullable, child_count, ledger, meter)
         child_count.times do
@@ -82,16 +92,18 @@ module Mica::Regex
       small_set_states(set)
     end
 
-    # The bound for a set below `ClassMemo::MIN_RANGES` ranges.
+    # The bound for a set counted from its UTF-8 sequences. The trie the
+    # compiler builds has no more states, and a memoized set's automaton
+    # (the trie with equal suffixes merged) has no more than the trie, so
+    # this bounds every set; `set_states` is exact for memoized ones.
     private def self.small_set_states(set : CodePointSet) : Int64
       return 1_i64 if set.empty?
-      if ClassMemo.memoized?(set)
-        raise ArgumentError.new("A set of #{set.range_count} ranges needs a ledger for its class bound")
-      end
       count_set_states(set)
     end
 
     private def self.count_set_states(set : CodePointSet) : Int64
+      # An ASCII set is one one-byte sequence per range.
+      return add(set.range_count.to_i64, set.range_count.to_i64 - 1) if set.list_of_bounds[-1] < 0x80
       sequences = 0_i64
       byte_ranges = 0_i64
       set.each_range do |first, last|

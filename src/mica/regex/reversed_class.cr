@@ -50,7 +50,6 @@ module Mica::Regex
     # class.
     private def self.shape_of(program : Program, block : Program::ClassBlock) : Array(Int32)?
       states = program.list_of_states
-      transitions = program.list_of_transitions
       shape = Array(Int32).new((block.end_state - block.first_state) * 4)
       (block.first_state...block.end_state).each do |index|
         state = states[index]
@@ -60,7 +59,7 @@ module Mica::Regex
         elsif state.kind.sparse?
           shape << 2 << state.alternate
           state.alternate.times do |offset|
-            transition = transitions[state.argument + offset]
+            transition = program.transition_at(index, state, offset)
             return nil unless add_edge(shape, transition.low, transition.high, transition.target, block)
           end
         else

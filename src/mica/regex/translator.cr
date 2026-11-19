@@ -37,18 +37,17 @@ module Mica::Regex
           ledger.charge_object(instance_sizeof(Hir::Class), "a Hir class", offset)
           return Hir::Class.new(set)
         end
+        code_point = node.code_point
+        return ASCII_LITERALS[code_point] if code_point < ASCII_LITERALS.size
         ledger.charge_object(instance_sizeof(Hir::Literal), "a Hir literal", offset)
-        Hir::Literal.new(node.code_point)
+        Hir::Literal.new(code_point)
       when Ast::CharClass
         set = node.lowered_set || raise SyntaxError.new("internal error: class not lowered before translation",
           Core::Position.new(offset.to_i64))
         ledger.charge_object(instance_sizeof(Hir::Class), "a Hir class", offset)
         Hir::Class.new(set)
       when Ast::AnyCharacter
-        bound_count = node.matches_newline? ? 2 : 4
         ledger.charge_object(instance_sizeof(Hir::Class), "a Hir class", offset)
-        ledger.charge_object(instance_sizeof(CodePointSet), "a Hir class", offset)
-        ledger.charge_array(bound_count, sizeof(Int32), "a Hir class", offset)
         Hir::Class.new(ClassLowering.any_character(node.matches_newline?))
       when Ast::LineBreak
         ledger.charge_object(instance_sizeof(Hir::LineBreak), "a Hir line break", offset)
@@ -77,6 +76,12 @@ module Mica::Regex
         raise SyntaxError.new("internal error: unknown syntax node #{node.class}", Core::Position.new(offset.to_i64))
       end
     end
+
+    # The `Hir` node of each ASCII literal, shared by every translation:
+    # nodes are never changed after they are made, and most patterns are
+    # mostly ASCII literals, so these are made once rather than once per
+    # character.
+    private ASCII_LITERALS = Array(Hir::Literal).new(0x80) { |code_point| Hir::Literal.new(code_point) }
 
     # Copies the results from index *first* to the top into an array of
     # exactly that size, charged first.

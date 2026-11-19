@@ -95,8 +95,7 @@ module Mica::Regex
                                 options : CompileOptions, ledger : AllocationLedger,
                                 meter : Core::WorkMeter) : {Ast::Pattern, Int64}
       parsed = parser_for(pattern, dialect, limits, options, ledger, meter).parse
-      lower_sets(parsed, dialect, limits, ledger, meter)
-      estimate = Preflight.estimate(parsed, dialect, limits, ledger, meter)
+      estimate = Preflight.estimate(parsed, dialect, limits, ledger, meter, lower_sets: true)
       meter.enforce_deadline { Core::Position.new(0_i64) }
       {parsed, estimate}
     end
@@ -110,19 +109,6 @@ module Mica::Regex
       bytes = pattern.is_a?(String) ? pattern.to_slice : pattern
       meter.enforce_deadline { Core::Position.new(0_i64) }
       Parser.new(bytes, options, limits, ledger, meter)
-    end
-
-    # Lowers every class and case-folded literal in the tree once, so the
-    # preflight counts exactly the sets the translator will use.
-    private def self.lower_sets(parsed : Ast::Pattern, dialect : Dialect, limits : CompileLimits,
-                                ledger : AllocationLedger, meter : Core::WorkMeter) : Nil
-      Ast.each_post_order(parsed.root, parsed.node_count, ledger) do |node, _child_count|
-        if node.is_a?(Ast::CharClass)
-          node.lowered_set = ClassLowering.lower(node, dialect, limits, ledger, meter)
-        elsif node.is_a?(Ast::Literal)
-          node.folded_set = ClassLowering.fold_literal(node, dialect, limits, ledger, meter)
-        end
-      end
     end
 
     # The ledger for one compilation, charged first with the fixed objects

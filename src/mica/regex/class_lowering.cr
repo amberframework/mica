@@ -42,7 +42,7 @@ module Mica::Regex
       items = char_class.list_of_items
       item = items.first?
       unless items.size == 1 && item && !item.item_kind.range? && !(char_class.options.ignore_case? && dialect.ecma262?)
-        return lower_items(char_class, dialect, limits, ledger, meter)
+        return lower_written_class(char_class, dialect, limits, ledger, meter)
       end
       key = {item, char_class.negated?}
       shared = @@shared_mutex.synchronize { @@shared_sets[key]? }
@@ -55,6 +55,48 @@ module Mica::Regex
     # are at most two per escape and property, so the table stays small.
     @@shared_mutex = Mutex.new
     @@shared_sets = {} of {Ast::ClassItem, Bool} => CodePointSet
+
+    # The most items a class may have for its lowering to be kept in
+    # `@@written_sets`, and the most classes kept there.
+    WRITTEN_CLASS_ITEMS =  32
+    WRITTEN_CLASSES     = 512
+
+    # What a written class lowers from: its items, negation, whether it is
+    # folded and restricted, and the dialect.
+    private alias WrittenClassKey = {Array(Ast::ClassItem), Bool, Bool, Bool, Dialect}
+
+    # Lowers a class of several items or of ranges (`[0-9a-f]`,
+    # `[\w.-]`). Under `IgnoreCase` its ranges are closed over their fold
+    # orbits, which reads the fold table member by member, and a pattern
+    # often writes the same class many times (`[0-9a-f]{8}-[0-9a-f]{4}`),
+    # so the sets of classes up to `WRITTEN_CLASS_ITEMS` items are kept
+    # for the process (up to `WRITTEN_CLASSES` of them; a full table is
+    # emptied and filled again, so the classes a process keeps compiling
+    # stay in it). The same set object comes back for
+    # the same class, so `ClassMemo` finds its automaton by identity. A
+    # kept set larger than the caller's `max_class_ranges` is lowered
+    # again, so the refusal is the same.
+    private def self.lower_written_class(char_class : Ast::CharClass, dialect : Dialect, limits : CompileLimits,
+                                         ledger : AllocationLedger, meter : Core::WorkMeter) : CodePointSet
+      items = char_class.list_of_items
+      return lower_items(char_class, dialect, limits, ledger, meter) if items.size > WRITTEN_CLASS_ITEMS
+      options = char_class.options
+      folding = options.ignore_case? && !dialect.xsd?
+      restricted = folding && options.caseless_restrict? && dialect.crystal?
+      key = {items, char_class.negated?, folding, restricted, dialect}
+      written = @@shared_mutex.synchronize { @@written_sets[key]? }
+      return written if written && written.range_count <= limits.max_class_ranges
+      set = lower_items(char_class, dialect, limits, ledger, meter)
+      @@shared_mutex.synchronize do
+        kept = @@written_sets[key]?
+        return kept if kept && kept.range_count <= limits.max_class_ranges
+        @@written_sets.clear if @@written_sets.size >= WRITTEN_CLASSES
+        @@written_sets[{items.dup, key[1], key[2], key[3], key[4]}] = set
+      end
+      set
+    end
+
+    @@written_sets = {} of WrittenClassKey => CodePointSet
 
     private def self.lower_items(char_class : Ast::CharClass, dialect : Dialect, limits : CompileLimits,
                                  ledger : AllocationLedger, meter : Core::WorkMeter) : CodePointSet
@@ -116,6 +158,7 @@ module Mica::Regex
       return nil unless options.ignore_case? && !dialect.xsd?
       code_point = literal.code_point
       restricted = options.caseless_restrict? && dialect.crystal?
+      return shared_ascii_fold(literal, restricted, limits, meter) if code_point < 0x80
       members = StaticArray(Int32, 8).new(0)
       count = 1
       members[0] = code_point
@@ -148,6 +191,42 @@ module Mica::Regex
       CodePointSet.from_bounds(bounds)
     end
 
+    # The folded set of an ASCII literal, shared by the process (see
+    # `ASCII_FOLDS`): a case-insensitive pattern folds most of its
+    # characters, and each would otherwise make a set of its own. The set
+    # is held to `max_class_ranges` and charged to *meter* as one made for
+    # the literal would be; nothing is allocated, so the ledger is not
+    # charged.
+    private def self.shared_ascii_fold(literal : Ast::Literal, restricted : Bool, limits : CompileLimits,
+                                       meter : Core::WorkMeter) : CodePointSet?
+      set = ASCII_FOLDS[literal.code_point * 2 + (restricted ? 1 : 0)]
+      return nil unless set
+      offset = literal.offset
+      meter.enforce { Core::Position.new(offset.to_i64) } if meter.charge(set.size.to_i32)
+      if set.range_count > limits.max_class_ranges
+        raise CompileLimitError.new("max_class_ranges", limits.max_class_ranges.to_i64,
+          "A class of #{set.range_count} ranges", Core::Position.new(offset.to_i64))
+      end
+      set
+    end
+
+    # The fold set of each ASCII code point, unrestricted then restricted
+    # (`CaselessRestrict`), or nil for one that matches only itself. Built
+    # once per process on first use and only read afterward.
+    private ASCII_FOLDS = Array(CodePointSet?).new(256) do |index|
+      code_point = index // 2
+      restricted = index.odd?
+      members = [code_point]
+      Unicode.each_fold_partner(code_point) do |partner|
+        members << partner unless restricted && partner >= 0x80
+      end
+      if members.size == 1
+        nil
+      else
+        CodePointSet.new(members.map { |member| {member, member} })
+      end
+    end
+
     # Returns the union of *list_of_sets*, charged to *ledger* and *meter*
     # as a class lowering at *offset* would be. The caller keeps the total
     # of their ranges within *limits*' `max_class_ranges`, so the union
@@ -165,10 +244,15 @@ module Mica::Regex
     end
 
     # Returns `.` (*matches_newline* false: everything but LF) or `\N`.
+    # The two sets are shared by the process (sets are never changed after
+    # they are made), so every `.` is the same set and finds its automaton
+    # in `ClassMemo` by identity.
     def self.any_character(matches_newline : Bool) : CodePointSet
-      return CodePointSet.from_bounds([0, CodePointSet::MAX_CODE_POINT]) if matches_newline
-      CodePointSet.from_bounds([0, 0x09, 0x0B, CodePointSet::MAX_CODE_POINT])
+      matches_newline ? ANY_CHARACTER : ANY_CHARACTER_BUT_NEWLINE
     end
+
+    private ANY_CHARACTER             = CodePointSet.from_bounds([0, CodePointSet::MAX_CODE_POINT])
+    private ANY_CHARACTER_BUT_NEWLINE = CodePointSet.from_bounds([0, 0x09, 0x0B, CodePointSet::MAX_CODE_POINT])
 
     # Sorts *list_of_ranges* in place and merges overlapping and adjacent
     # ranges into bounds.

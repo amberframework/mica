@@ -182,7 +182,7 @@ module Mica::Regex
           yield source, state.next_state, BYTE_EDGE, state.low, state.high
         when .sparse?
           state.alternate.times do |offset|
-            transition = program.list_of_transitions[state.argument + offset]
+            transition = program.transition_at(source, state, offset)
             yield source, transition.target, BYTE_EDGE, transition.low, transition.high
           end
         when .split?

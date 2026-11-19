@@ -16,19 +16,29 @@ module Mica::Regex
   # program is the same whether its blocks came from the memo or were
   # built for it.
   #
-  # Only sets of at least `MIN_RANGES` ranges are kept, and at most
+  # Only sets of at least `MIN_RANGES` ranges or reaching
+  # `MIN_WIDE_CODE_POINT` are kept, and at most
   # `MAX_ENTRIES`; after that, each large class's block is built for the
   # compilation that needs it.
   module ClassMemo
-    MIN_RANGES  =  16
-    MAX_ENTRIES = 256
+    MIN_RANGES = 16
+    # A set that reaches this code point is kept too, however few its
+    # ranges: its three- and four-byte sequences make a trie of many nodes
+    # (`.` and `[^"']` are two and three ranges, and twenty states).
+    MIN_WIDE_CODE_POINT = 0x800
+    MAX_ENTRIES         =   256
     # The target that stands for the state after the class.
     EXIT = -2
     # No target.
     NONE = -1
 
+    # A class automaton: its states and transitions with targets relative
+    # to the block (`EXIT` for the exit), and, for a block of the memo,
+    # the same transitions as a table programs share
+    # (`Program#list_of_shared_tables`): targets relative to the state
+    # that holds them, `Program::SHARED_EXIT` for the exit.
     record Block, list_of_states : Array(Program::State), list_of_transitions : Array(Program::Transition),
-      entry : Int32
+      entry : Int32, shared_table : Array(Program::Transition)? = nil
 
     # A set as a hash key: the hash is the set's digest, computed once when
     # the set was made, and equality is the same object (the shared sets of
@@ -55,7 +65,8 @@ module Mica::Regex
     @@blocks = {} of Key => Block
 
     def self.memoized?(set : CodePointSet) : Bool
-      set.range_count >= MIN_RANGES
+      bounds = set.list_of_bounds
+      bounds.size >= MIN_RANGES * 2 || (!bounds.empty? && bounds[-1] >= MIN_WIDE_CODE_POINT)
     end
 
     # Returns the block for *set* (a memoized set), building it under
@@ -111,7 +122,24 @@ module Mica::Regex
         ledger.charge_hash_entry(sizeof(UInt64) + sizeof(Int32), "a class block", 0)
         shared_nodes[digest] = state
       end
-      Block.new(list_of_states, list_of_transitions, node_states[0])
+      Block.new(list_of_states, list_of_transitions, node_states[0], shared_table(list_of_states, list_of_transitions, ledger))
+    end
+
+    # The transitions of a block as a shared table: each target relative
+    # to the `Sparse` state that holds it, the exit as `SHARED_EXIT`.
+    private def self.shared_table(list_of_states : Array(Program::State), list_of_transitions : Array(Program::Transition),
+                                  ledger : AllocationLedger) : Array(Program::Transition)
+      ledger.charge_array(list_of_transitions.size, sizeof(Program::Transition), "a shared class table", 0)
+      table = list_of_transitions.dup
+      list_of_states.each_with_index do |state, index|
+        next unless state.kind.sparse?
+        state.alternate.times do |offset|
+          position = state.argument + offset
+          target = table[position].target
+          table[position] = table[position].copy_with(target: target == EXIT ? Program::SHARED_EXIT : target - index)
+        end
+      end
+      table
     end
 
     # Emits trie nodes into a block's lists.

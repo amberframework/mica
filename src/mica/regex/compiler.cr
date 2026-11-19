@@ -79,6 +79,10 @@ module Mica::Regex
     @high_water = StaticArray(Int32, 4).new(0)
     @list_of_visited = [] of Bool
     @list_of_class_blocks = [] of Program::ClassBlock
+    # The shared tables the program's large classes use (see
+    # `Program#list_of_shared_tables`); a `Sparse` state names one by its
+    # position plus one, in a byte, so at most `MAX_SHARED_TABLES`.
+    @list_of_shared_tables = [] of Array(Program::Transition)
 
     private def initialize(@pattern : Hir::Pattern, @estimate : Int64, @limits : CompileLimits,
                            @ledger : AllocationLedger, @meter : Core::WorkMeter)
@@ -132,7 +136,13 @@ module Mica::Regex
           total = Preflight.add(total, Preflight.multiply(OTHER_LINE_BREAKS.range_count.to_i64 * 4, copies))
         when Hir::Repetition
           maximum = node.maximum
-          repeated = maximum ? maximum.to_i64 : Math.max(node.minimum, 1).to_i64 + 1
+          repeated = if maximum
+                       maximum.to_i64
+                     else
+                       # The fresh copy exists only for a body that can match
+                       # the empty string (see `finish_loop`).
+                       Math.max(node.minimum, 1).to_i64 + (consumes?(node.child, BOUND_DEPTH) ? 0 : 1)
+                     end
           push_bound_entry(stack, node.child, Preflight.multiply(copies, repeated))
         when Hir::Capture
           push_bound_entry(stack, node.child, copies)
@@ -145,13 +155,40 @@ module Mica::Regex
       total
     end
 
+    # How deep `consumes?` looks before it answers false.
+    private BOUND_DEPTH = 4
+
+    # True when every match of *node* consumes a byte, looking at most
+    # *depth* levels down (deeper, it answers false, which only widens the
+    # bound). Over-allocating the transitions of `\w+` by a second copy of
+    # `\w` doubled the bytes a small pattern allocated.
+    private def consumes?(node : Hir::Node, depth : Int32) : Bool
+      return false if depth == 0
+      case node
+      when Hir::Class, Hir::Literal, Hir::LineBreak
+        true
+      when Hir::Capture
+        consumes?(node.child, depth - 1)
+      when Hir::Concatenation
+        node.list_of_children.any? { |child| consumes?(child, depth - 1) }
+      when Hir::Alternation
+        node.list_of_branches.all? { |branch| consumes?(branch, depth - 1) }
+      when Hir::Repetition
+        node.minimum > 0 && consumes?(node.child, depth - 1)
+      else
+        false
+      end
+    end
+
     private def push_bound_entry(stack : Array({Hir::Node, Int64}), node : Hir::Node, copies : Int64) : Nil
       @ledger.charge_append(sizeof({Hir::Node, Int64}), "the transition bound stack", 0)
       stack << {node, copies}
     end
 
     private def class_transitions(set : CodePointSet) : Int64
-      return memo_block(set).list_of_transitions.size.to_i64 if ClassMemo.memoized?(set)
+      # A memoized class's transitions stay in its shared table.
+      return 0_i64 if ClassMemo.memoized?(set)
+      return set.range_count.to_i64 if set.empty? || set.list_of_bounds[-1] < 0x80
       byte_ranges = 0_i64
       set.each_range { |first, last| byte_ranges += Utf8Sequences.count(first, last)[1] }
       byte_ranges
@@ -171,7 +208,7 @@ module Mica::Regex
       @ledger.charge_object(instance_sizeof(Program), "the program", 0)
       Program.new(@list_of_states, @list_of_transitions, start, @pattern.capture_count, group_names,
         @pattern.options, @limits.max_pike_bytes - workspace_charge, @pattern.source_end, literal_set,
-        @list_of_class_blocks)
+        @list_of_class_blocks, @list_of_shared_tables)
     end
 
     private def charge_literal_set(literal_set : LiteralSet) : Nil
@@ -298,9 +335,47 @@ module Mica::Regex
         push_task(TaskKind::Compile, node.child, loop_split)
       elsif maximum == 0
         push_value(next_state)
+      elsif single_item?(node.child)
+        push_value(compile_counted_item(node, maximum, next_state))
       else
         push_value(next_state)
         push_task(TaskKind::OptionalStep, node, next_state, maximum - node.minimum)
+      end
+    end
+
+    # True when *node* compiles in one step, without tasks of its own.
+    private def single_item?(node : Hir::Node) : Bool
+      node.is_a?(Hir::Literal) || node.is_a?(Hir::Class)
+    end
+
+    # Compiles `x{n,m}` for a literal or class *x* in a loop, emitting what
+    # the `OptionalStep`, `OptionalFinish` and `MandatoryStep` tasks emit
+    # for it, in the same order: the optional copies from the last back,
+    # each behind a split to *next_state*, then the mandatory copies.
+    # `[\w.%+-]{1,256}` is hundreds of copies, and a task round per copy
+    # cost more than the copy.
+    private def compile_counted_item(node : Hir::Repetition, maximum : Int32, next_state : Int32) : Int32
+      child = node.child
+      current = next_state
+      (maximum - node.minimum).times do
+        charge_work
+        copy = compile_item(child, current)
+        current = node.greedy? ? emit_split(copy, next_state) : emit_split(next_state, copy)
+      end
+      node.minimum.times do
+        charge_work
+        current = compile_item(child, current)
+      end
+      current
+    end
+
+    private def compile_item(node : Hir::Node, next_state : Int32) : Int32
+      if node.is_a?(Hir::Literal)
+        compile_literal(node.code_point, next_state)
+      elsif node.is_a?(Hir::Class)
+        compile_recorded_class(node.code_point_set, next_state)
+      else
+        raise SyntaxError.new("internal error: #{node.class} is not a single item", Core::Position.new(0_i64))
       end
     end
 
@@ -339,6 +414,9 @@ module Mica::Regex
     # from *start* to *loop_split* through the body states *first*...*last*.
     private def nullable_body?(start : Int32, first : Int32, last : Int32, loop_split : Int32) : Bool
       return true if start == loop_split
+      # A body that starts by reading a byte (a class, a literal) has no
+      # epsilon path at all, so its states need no walk.
+      return false if first <= start < last && @list_of_states[start].kind.in?(Program::StateKind::ByteRange, Program::StateKind::Sparse)
       size = last - first
       grow(GrowingList::Visited, size, sizeof(Bool))
       visited = @list_of_visited
@@ -489,6 +567,11 @@ module Mica::Regex
     # checked against the limits and charged as a whole, as emitting its
     # states one by one would check and charge them.
     private def instantiate(block : ClassMemo::Block, next_state : Int32) : Int32
+      if table = block.shared_table
+        if table_id = shared_table_id(table)
+          return instantiate_shared(block, table_id, next_state)
+        end
+      end
       first_state = @list_of_states.size
       first_transition = @list_of_transitions.size
       block_states = block.list_of_states
@@ -498,21 +581,66 @@ module Mica::Regex
         "a class transition", 0)
       @meter.enforce { Core::Position.new(0_i64) } if @meter.charge(block_states.size)
       reserve_transitions(block_transitions.size)
-      block_transitions.each do |transition|
-        @list_of_transitions << transition.copy_with(target: absolute_target(transition.target, first_state, next_state))
+      # Copied whole (a memory copy), then relocated in place: a large
+      # class is hundreds of states and over a thousand transitions, so
+      # appending them one by one dominated compiling a pattern like `\w+`.
+      @list_of_transitions.concat(block_transitions)
+      transitions = @list_of_transitions.to_unsafe + first_transition
+      block_transitions.size.times do |index|
+        transition = transitions[index]
+        transitions[index] = transition.copy_with(target: absolute_target(transition.target, first_state, next_state))
       end
-      block_states.each do |state|
-        @list_of_states << state.copy_with(next_state: absolute_target(state.next_state, first_state, next_state),
+      @list_of_states.concat(block_states)
+      states = @list_of_states.to_unsafe + first_state
+      block_states.size.times do |index|
+        state = states[index]
+        states[index] = state.copy_with(next_state: absolute_target(state.next_state, first_state, next_state),
           argument: state.kind.sparse? ? state.argument + first_transition : state.argument)
       end
       block.entry + first_state
     end
 
-    # Makes room up front for the transitions of every copy of a repeated
-    # large class (`\p{L}{50}` copies one block fifty times), so they are
-    # appended without growing the list copy by copy, and marks a repeated
-    # small class to be copied rather than rebuilt. The room is charged
-    # here, before it is allocated, on top of the copies' own charges.
+    private MAX_SHARED_TABLES = 255
+
+    # The number a `Sparse` state uses for *table* (its position in the
+    # program's shared tables, plus one), adding it the first time; nil
+    # once `MAX_SHARED_TABLES` are in use, when the block is copied whole.
+    private def shared_table_id(table : Array(Program::Transition)) : UInt8?
+      if index = @list_of_shared_tables.index(&.same?(table))
+        return (index + 1).to_u8
+      end
+      return nil if @list_of_shared_tables.size >= MAX_SHARED_TABLES
+      @ledger.charge_append(sizeof(Array(Program::Transition)), "a shared class table", 0)
+      @list_of_shared_tables << table
+      @list_of_shared_tables.size.to_u8
+    end
+
+    # Emits a memoized class block's states after the current ones, its
+    # exit leading to *next_state*, with its `Sparse` states reading their
+    # transitions from shared table *table_id* (one memory copy of the
+    # states, relocated in place; no transitions are copied), and returns
+    # its entry state.
+    private def instantiate_shared(block : ClassMemo::Block, table_id : UInt8, next_state : Int32) : Int32
+      first_state = @list_of_states.size
+      block_states = block.list_of_states
+      check_state_room(block_states.size)
+      @meter.enforce { Core::Position.new(0_i64) } if @meter.charge(block_states.size)
+      @list_of_states.concat(block_states)
+      states = @list_of_states.to_unsafe + first_state
+      block_states.size.times do |index|
+        state = states[index]
+        states[index] = if state.kind.sparse?
+                          state.copy_with(low: table_id, next_state: next_state)
+                        else
+                          state.copy_with(next_state: absolute_target(state.next_state, first_state, next_state))
+                        end
+      end
+      block.entry + first_state
+    end
+
+    # Marks a repeated small class to be copied rather than rebuilt. A
+    # large (memoized) class needs nothing: its copies read its shared
+    # table and add no transitions.
     private def reserve_class_copies(node : Hir::Repetition, maximum : Int32?) : Nil
       child = node.child
       set = if child.is_a?(Hir::Class)
@@ -521,19 +649,12 @@ module Mica::Regex
               merged_class(child)
             end
       return unless set
+      return if ClassMemo.memoized?(set)
       copies = maximum || Math.max(node.minimum, 1)
-      unless ClassMemo.memoized?(set)
-        # A small class repeated is emitted once and copied after that.
-        if copies > 1 && !set.same?(@repeated_small_set)
-          @repeated_small_set = set
-          @repeated_small_block = nil
-        end
-        return
+      if copies > 1 && !set.same?(@repeated_small_set)
+        @repeated_small_set = set
+        @repeated_small_block = nil
       end
-      added = memo_block(set).list_of_transitions.size.to_i64 * copies
-      return if added > Int32::MAX // 2
-      @ledger.charge(AllocationLedger.granules(added * sizeof(Program::Transition)), "the class transitions of a repetition", 0)
-      reserve_transitions(added.to_i32)
     end
 
     # The one class an alternation of classes and single characters stands
@@ -598,6 +719,7 @@ module Mica::Regex
     end
 
     private def compile_class_from_trie(set : CodePointSet, next_state : Int32) : Int32
+      return compile_ascii_class(set, next_state) if set.list_of_bounds[-1] < 0x80
       trie = @class_trie
       trie.build(set, @ledger, @meter)
       # A set of surrogates only (`\p{Cs}`) has no UTF-8 sequences: like an
@@ -613,6 +735,24 @@ module Mica::Regex
         states[node_index] = emit_trie_node(node_index, next_state)
       end
       states[0]
+    end
+
+    # Compiles a non-empty set of ASCII code points straight to the state
+    # its trie would give: every range is a one-byte sequence, so the trie
+    # is a root whose edges all end the class. One range is a `ByteRange`,
+    # several a `Sparse` state, in range order. Case-insensitive literals
+    # (`S` is `[Ss]`) take this path once per character.
+    private def compile_ascii_class(set : CodePointSet, next_state : Int32) : Int32
+      bounds = set.list_of_bounds
+      range_count = bounds.size // 2
+      @meter.enforce { Core::Position.new(0_i64) } if @meter.charge(range_count)
+      return emit_byte_range(bounds[0].to_u8, bounds[1].to_u8, next_state) if range_count == 1
+      first_transition = @list_of_transitions.size
+      range_count.times do |index|
+        @ledger.charge_append(sizeof(Program::Transition), "a class transition", 0)
+        @list_of_transitions << Program::Transition.new(bounds[index * 2].to_u8, bounds[index * 2 + 1].to_u8, next_state)
+      end
+      add_state(Program::State.new(Program::StateKind::Sparse, 0_u8, 0_u8, NONE, range_count, first_transition))
     end
 
     private def emit_trie_node(node_index : Int32, next_state : Int32) : Int32

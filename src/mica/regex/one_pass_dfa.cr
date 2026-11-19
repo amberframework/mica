@@ -294,7 +294,7 @@ module Mica::Regex
             @list_of_shadows[dfa_state] = true if matched
             unless matched
               state.alternate.times do |offset|
-                transition = @program.list_of_transitions[state.argument + offset]
+                transition = @program.transition_at(current, state, offset)
                 return false unless add_edges(dfa_state, transition.low, transition.high, transition.target, slots,
                                       looks, class_count)
               end

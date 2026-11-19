@@ -156,7 +156,7 @@ module Mica::Regex
             at += 1
           when .sparse?
             break unless at < end_bound
-            target = @program.sparse_target(state, haystack.unsafe_fetch(at))
+            target = @program.sparse_target(current, state, haystack.unsafe_fetch(at))
             break if target < 0
             current = target
             at += 1
