@@ -1,0 +1,245 @@
+{
+  "description": "Patterns taken verbatim (unless noted) from Amber ecosystem source, searched over generated haystacks. Each entry runs once per size in sizes.",
+  "sizes": [
+    1024,
+    65536,
+    1048576,
+    104857600
+  ],
+  "patterns": [
+    {
+      "generator": "routes",
+      "name": "uuid-constraint",
+      "model": "grep",
+      "pattern": "\\A[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\z",
+      "case_insensitive": true,
+      "source": "amber v2-dev d5ad8090 src/amber/router/constraint_presets.cr:6",
+      "note": ""
+    },
+    {
+      "generator": "routes",
+      "name": "slug-constraint",
+      "model": "grep",
+      "pattern": "\\A[a-z0-9]+(?:-[a-z0-9]+)*\\z",
+      "case_insensitive": false,
+      "source": "amber v2-dev d5ad8090 src/amber/router/constraint_presets.cr:7",
+      "note": ""
+    },
+    {
+      "generator": "routes",
+      "name": "numeric-constraint",
+      "model": "grep",
+      "pattern": "\\A\\d+\\z",
+      "case_insensitive": false,
+      "source": "amber v2-dev d5ad8090 src/amber/router/constraint_presets.cr:5",
+      "note": ""
+    },
+    {
+      "generator": "routes",
+      "name": "host-port",
+      "model": "grep-captures",
+      "pattern": ".*:(\\d+)",
+      "case_insensitive": false,
+      "source": "amber v2-dev d5ad8090 src/amber/router/request.cr:36",
+      "note": ""
+    },
+    {
+      "generator": "contacts",
+      "name": "grant-email-validator",
+      "model": "grep",
+      "pattern": "\\A[\\w+\\-.]+@[a-z\\d\\-]+(\\.[a-z\\d\\-]+)*\\.[a-z]+\\z",
+      "case_insensitive": true,
+      "source": "grant main 623c4bc src/grant/validators/built_in.cr:40",
+      "note": ""
+    },
+    {
+      "generator": "contacts",
+      "name": "grant-url-validator",
+      "model": "grep",
+      "pattern": "\\Ahttps?:\\/\\/(www\\.)?[-a-zA-Z0-9@:%._\\+~#=]{1,256}\\.[a-zA-Z0-9()]{1,6}\\b([-a-zA-Z0-9()@:%_\\+.~#?&\\/\\/=]*)\\z",
+      "case_insensitive": false,
+      "source": "grant main 623c4bc src/grant/validators/built_in.cr:48",
+      "note": ""
+    },
+    {
+      "generator": "markdown",
+      "name": "html-entity",
+      "model": "count-captures",
+      "pattern": "&(?:([a-zA-Z0-9]{2,32};)|(#[xX][\\da-fA-F]+;?|#\\d+;?))",
+      "case_insensitive": false,
+      "source": "amber v2-dev d5ad8090 src/amber/markdown/html_entities.cr:19",
+      "note": ""
+    },
+    {
+      "generator": "markdown",
+      "name": "punctuation",
+      "model": "count",
+      "pattern": "[$+<=>^`|~\\p{P}]",
+      "case_insensitive": false,
+      "source": "amber v2-dev d5ad8090 src/amber/markdown/rule.cr:71",
+      "note": ""
+    },
+    {
+      "generator": "markdown",
+      "name": "whitespace-run",
+      "model": "count",
+      "pattern": "[ \\t\\n\\x0b\\x0c\\x0d]+",
+      "case_insensitive": false,
+      "source": "amber v2-dev d5ad8090 src/amber/markdown/rule.cr:69",
+      "note": ""
+    },
+    {
+      "generator": "markdown",
+      "name": "email-autolink",
+      "model": "count-captures",
+      "pattern": "<([a-zA-Z0-9.!#$%&'*+\\/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*)>",
+      "case_insensitive": false,
+      "source": "amber v2-dev d5ad8090 src/amber/markdown/rule.cr:65",
+      "note": "leading ^ removed so the pattern scans a whole document"
+    },
+    {
+      "generator": "markdown",
+      "name": "autolink",
+      "model": "count",
+      "pattern": "<[A-Za-z][A-Za-z0-9.+-]{1,31}:[^<>\\x00-\\x20]*>",
+      "case_insensitive": true,
+      "source": "amber v2-dev d5ad8090 src/amber/markdown/rule.cr:66",
+      "note": "leading ^ removed so the pattern scans a whole document"
+    },
+    {
+      "generator": "markdown",
+      "name": "thematic-break",
+      "model": "grep",
+      "pattern": "^(?:(?:\\*[ \\t]*){3,}|(?:_[ \\t]*){3,}|(?:-[ \\t]*){3,})[ \\t]*$",
+      "case_insensitive": false,
+      "source": "amber v2-dev d5ad8090 src/amber/markdown/rule.cr:18",
+      "note": ""
+    },
+    {
+      "generator": "markdown",
+      "name": "atx-heading",
+      "model": "grep",
+      "pattern": "^\\#{1,6}(?:[ \\t]+|$)",
+      "case_insensitive": false,
+      "source": "amber v2-dev d5ad8090 src/amber/markdown/rules/heading.cr:5",
+      "note": ""
+    },
+    {
+      "generator": "markdown",
+      "name": "footnote-definition",
+      "model": "grep-captures",
+      "pattern": "^\\[\\^([^\\s\\]]+)\\]:\\s+(.*)",
+      "case_insensitive": false,
+      "source": "amber v2-dev d5ad8090 src/amber/markdown/parsers/block.cr:239",
+      "note": ""
+    },
+    {
+      "generator": "logs",
+      "name": "backtrace-frame",
+      "model": "grep-captures",
+      "pattern": "^(?<file>[^:]+)(?:\\:(?<line>\\d+)(?:\\:(?<col>\\d+))?)? in '\\*?(?<method>.*?)'(?: at (?i-msx:(?<addr>0x[a-f0-9]+)))?$",
+      "case_insensitive": false,
+      "source": "amber v2-dev d5ad8090 src/amber/support/backtracer/configuration.cr:17",
+      "note": "ADDR_FORMAT interpolated as Crystal does (Regex#to_s)"
+    },
+    {
+      "generator": "logs",
+      "name": "app-frame",
+      "model": "grep",
+      "pattern": "^src\\/",
+      "case_insensitive": false,
+      "source": "amber v2-dev d5ad8090 src/amber/support/backtracer/configuration.cr:66",
+      "note": ""
+    },
+    {
+      "generator": "logs",
+      "name": "sql-number",
+      "model": "count",
+      "pattern": "\\b\\d+\\b",
+      "case_insensitive": false,
+      "source": "grant main 623c4bc src/grant/query_analysis.cr:146",
+      "note": ""
+    },
+    {
+      "generator": "logs",
+      "name": "sql-string-literal",
+      "model": "count",
+      "pattern": "'[^']*'",
+      "case_insensitive": false,
+      "source": "grant main 623c4bc src/grant/query_analysis.cr:147",
+      "note": ""
+    },
+    {
+      "generator": "logs",
+      "name": "sql-numbered-param",
+      "model": "count",
+      "pattern": "\\$\\d+",
+      "case_insensitive": false,
+      "source": "grant main 623c4bc src/grant/query_analysis.cr:148",
+      "note": ""
+    },
+    {
+      "generator": "logs",
+      "name": "sql-whitespace",
+      "model": "count",
+      "pattern": "\\s+",
+      "case_insensitive": false,
+      "source": "grant main 623c4bc src/grant/query_analysis.cr:149",
+      "note": ""
+    },
+    {
+      "generator": "logs",
+      "name": "sql-tokenizer",
+      "model": "count-captures",
+      "pattern": "([a-zA-Z0-9_$']+)",
+      "case_insensitive": false,
+      "source": "grant main 623c4bc src/adapter/base.cr:965",
+      "note": ""
+    },
+    {
+      "generator": "csv",
+      "name": "comma-separator",
+      "model": "count",
+      "pattern": ",\\s*",
+      "case_insensitive": false,
+      "source": "amber_cli main 51ccb6f src/amber_cli/commands/pipelines.cr:122",
+      "note": ""
+    },
+    {
+      "generator": "csv",
+      "name": "accept-separator",
+      "model": "count",
+      "pattern": ",|,\\s",
+      "case_insensitive": false,
+      "source": "amber v2-dev d5ad8090 src/amber/controller/helpers/responders.cr:18",
+      "note": ""
+    },
+    {
+      "generator": "identifiers",
+      "name": "non-alphanumeric-run",
+      "model": "count",
+      "pattern": "[^a-z0-9]+",
+      "case_insensitive": false,
+      "source": "amber_cli main 51ccb6f src/amber_cli/native/naming.cr:15",
+      "note": ""
+    },
+    {
+      "generator": "identifiers",
+      "name": "camel-case-boundary",
+      "model": "count-captures",
+      "pattern": "([a-z\\d])([A-Z])",
+      "case_insensitive": false,
+      "source": "amber_cli main 51ccb6f src/amber_cli/native/naming.cr:37",
+      "note": ""
+    },
+    {
+      "generator": "templates",
+      "name": "mustache-placeholder",
+      "model": "count-captures",
+      "pattern": "\\{\\{([^}]+)\\}\\}",
+      "case_insensitive": false,
+      "source": "amber_cli main 51ccb6f src/amber_cli/core/template_engine.cr:24",
+      "note": ""
+    }
+  ]
+}
