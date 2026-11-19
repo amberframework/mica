@@ -340,7 +340,13 @@ byte ranges in a trie, so a class emits at most the byte ranges the size
 preflight counted for it). A large class (16 ranges or more, such as `\w`
 or `\p{L}`, or any class reaching three-byte sequences, such as `.` or
 `[^"']`) is built once per process as a minimal automaton, its equal
-suffixes sharing states. A program copies only its states (one memory
+suffixes sharing states. The automata of `\w`, `\W`, `\d`, `\D`, `\p{L}`,
+`\P{L}`, `\p{Lowercase}` and `\p{Uppercase}` are built ahead of time by
+scripts/generate_class_blocks.cr into `ClassMemo::Prebuilt`, static data
+a process decodes in one pass the first time a pattern uses the class,
+where building `\w` from its trie takes about 70 us and 150 KiB of
+short-lived allocation; a spec checks each against the block its set
+builds. A program copies only its states (one memory
 copy, relocated in place): their `Sparse` states read the class's
 transitions from one table shared by every program and copy
 (`Program#list_of_shared_tables`, targets relative to the reading state),
@@ -397,7 +403,10 @@ fast paths leave alone, and `Engine::TwoPhase` still runs them as R2 did:
    see the whole haystack):
    - the **bounded backtracker** when m × (L + 1) ≤ 256 Ki bits, for
      L = e − s: a depth-first search in priority order that visits each
-     (state, position) pair once. Time O(m·(L + 1) + c); memory m·(L + 1)/8
+     (state, position) pair once (a greedy loop of one byte state, such as
+     `.*`, is followed in a tight loop that pushes the loop's exits at
+     every position it passes as one job, the visits and charges being
+     the same). Time O(m·(L + 1) + c); memory m·(L + 1)/8
      bytes of bitset, a job stack of at most m·(L + 1) + 1 entries (grown
      in doubling chunks as the search needs them, never copied) and c
      slots, used only when that fits what the Pike VM workspace leaves of

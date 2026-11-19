@@ -81,13 +81,15 @@ module Mica::Regex
     end
 
     # Returns the block for *set* (a memoized set), building it under
-    # *ledger* and *meter* the first time.
+    # *ledger* and *meter* the first time: decoded from `Prebuilt` when
+    # the set is one of the static sets generated there, else from its
+    # trie.
     def self.block_for(set : CodePointSet, ledger : AllocationLedger, meter : Core::WorkMeter) : Block
       lookup = Key.new(set)
       if block = @@mutex.synchronize { @@blocks[lookup]? }
         return block
       end
-      block = build(set, ledger, meter)
+      block = prebuilt_block?(set, ledger, meter) || build(set, ledger, meter)
       @@mutex.synchronize do
         if existing = @@blocks[lookup]?
           block = existing
@@ -96,6 +98,99 @@ module Mica::Regex
         end
       end
       block
+    end
+
+    # :nodoc:
+    # Builds *set*'s block from its trie, past the memo and `Prebuilt`
+    # (for scripts/generate_class_blocks.cr and the specs).
+    def self.build_from_trie(set : CodePointSet) : Block
+      build(set, AllocationLedger.new(Int64::MAX), Core::WorkMeter.new)
+    end
+
+    # :nodoc:
+    # *set*'s block from `Prebuilt`, or nil (for the specs).
+    def self.prebuilt_block_of?(set : CodePointSet) : Block?
+      prebuilt_block?(set, AllocationLedger.new(Int64::MAX), Core::WorkMeter.new)
+    end
+
+    # The bytes of one state in `Prebuilt::DATA`: kind, low, high, then
+    # next state, alternate and argument as little-endian Int16.
+    PREBUILT_STATE_BYTES = 9
+    # The bytes of one transition there: low, high, then the target as a
+    # little-endian Int16.
+    PREBUILT_TRANSITION_BYTES = 4
+
+    # Returns *set*'s block decoded from `Prebuilt` when the set is the
+    # static set (or the complement of one) a prebuilt block was generated
+    # for, else nil. A prebuilt block is the one `build` makes for that
+    # set (scripts/generate_class_blocks.cr writes it with `build`, and a
+    # spec checks them equal), read from static data in one pass of
+    # copies: `\w` and `\p{L}` cost tens of microseconds and over 100 KiB
+    # of short-lived allocation to build, once per process.
+    private def self.prebuilt_block?(set : CodePointSet, ledger : AllocationLedger,
+                                     meter : Core::WorkMeter) : Block?
+      bounds = set.list_of_bounds
+      Prebuilt::LIST_OF_ENTRIES.each do |prebuilt|
+        set_id, negated, range_count, entry, state_count, transition_count, offset = prebuilt
+        next unless bounds.size == range_count * 2
+        next unless static_set?(bounds, set_id, negated, meter)
+        return decode_prebuilt(entry, state_count, transition_count, offset, ledger, meter)
+      end
+      nil
+    end
+
+    # True when *bounds* are those of static set *set_id*, or of its
+    # complement when *negated*.
+    private def self.static_set?(bounds : Array(Int32), set_id : Int32, negated : Bool,
+                                 meter : Core::WorkMeter) : Bool
+      meter.enforce { Core::Position.new(0_i64) } if meter.charge(bounds.size)
+      static = Unicode.decoded_ranges(set_id)
+      unless negated
+        return false unless static.size == bounds.size
+        bounds.each_with_index { |bound, index| return false unless static[index] == bound }
+        return true
+      end
+      # The complement's ranges are the gaps between the static ranges.
+      index = 0
+      first = 0
+      static_index = 0
+      while static_index <= static.size
+        last = static_index == static.size ? CodePointSet::MAX_CODE_POINT : static[static_index] - 1
+        if first <= last
+          return false unless index + 1 < bounds.size && bounds[index] == first && bounds[index + 1] == last
+          index += 2
+        end
+        break if static_index == static.size
+        first = static[static_index + 1] + 1
+        static_index += 2
+      end
+      index == bounds.size
+    end
+
+    private def self.decode_prebuilt(entry : Int32, state_count : Int32, transition_count : Int32, offset : Int32,
+                                     ledger : AllocationLedger, meter : Core::WorkMeter) : Block
+      meter.enforce { Core::Position.new(0_i64) } if meter.charge(state_count + transition_count)
+      prebuilt_bytes = Prebuilt::DATA.to_slice
+      ledger.charge_array(state_count, sizeof(Program::State), "a class block", 0)
+      list_of_states = Array(Program::State).new(state_count)
+      state_count.times do
+        list_of_states << Program::State.new(Program::StateKind.new(prebuilt_bytes[offset]), prebuilt_bytes[offset + 1], prebuilt_bytes[offset + 2],
+          prebuilt_int(prebuilt_bytes, offset + 3), prebuilt_int(prebuilt_bytes, offset + 5), prebuilt_int(prebuilt_bytes, offset + 7))
+        offset += PREBUILT_STATE_BYTES
+      end
+      ledger.charge_array(transition_count, sizeof(Program::Transition), "a class block", 0)
+      list_of_transitions = Array(Program::Transition).new(transition_count)
+      transition_count.times do
+        list_of_transitions << Program::Transition.new(prebuilt_bytes[offset], prebuilt_bytes[offset + 1], prebuilt_int(prebuilt_bytes, offset + 2))
+        offset += PREBUILT_TRANSITION_BYTES
+      end
+      table = shared_table(list_of_states, list_of_transitions, ledger)
+      Block.new(list_of_states, list_of_transitions, entry, table, entry_targets(list_of_states[entry], table, ledger))
+    end
+
+    @[AlwaysInline]
+    private def self.prebuilt_int(prebuilt_bytes : Bytes, offset : Int32) : Int32
+      (prebuilt_bytes[offset].to_i16 | (prebuilt_bytes[offset + 1].to_i16 << 8)).to_i32
     end
 
     # Builds the minimal automaton of *set*: the trie's nodes are emitted
