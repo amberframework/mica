@@ -25,9 +25,10 @@ describe "Mica::Regex short searches" do
   describe "groups read on first use" do
     it_satisfies "REGEX-R3-short-search", "finds the match without its groups when only the backtracker or the Pike VM can read them" do
       email = planned_expression("\\A[\\w+\\-.]+@[a-z\\d\\-]+(\\.[a-z\\d\\-]+)*\\.[a-z]+\\z")
-      # The first match finds its span alone; nothing has read groups yet.
-      email.program.plan.defers_groups?.should be_true
-      email.match("ann@example.org", limits: LIMITS).should_not be_nil
+      # The program is anchored, so its first match builds the one-pass
+      # DFA and finds it cannot be had.
+      email.program.plan.defers_groups?.should be_false
+      email.match("ann@example.org", limits: LIMITS).try(&.[1]?).should be_nil
       email.program.plan.defers_groups?.should be_true
       match = email.match("john.smith@example.co.uk", limits: LIMITS).should_not be_nil
       match[0].should eq("john.smith@example.co.uk")
@@ -53,6 +54,14 @@ describe "Mica::Regex short searches" do
       pattern.program.plan.defers_groups?.should be_true
       pattern.match(haystack, limits: LIMITS).try(&.[2]).should eq("cd")
       pattern.program.plan.defers_groups?.should be_false
+    end
+
+    it_satisfies "REGEX-R3-short-search", "reads an anchored program's groups with its first match" do
+      line = planned_expression("(?s)^((.*)()()($))")
+      line.program.plan.defers_groups?.should be_false
+      line.match("ab\ncd", limits: LIMITS).try(&.[2]).should eq("ab\ncd")
+      line.program.plan.one_pass_built?.should be_true
+      line.program.plan.defers_groups?.should be_false
     end
 
     it_satisfies "REGEX-R3-short-search", "reads the groups of a match from where its search started" do
