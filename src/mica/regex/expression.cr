@@ -371,23 +371,26 @@ module Mica::Regex
     end
 
     # Splits *string* into its characters (the empty pattern), charging one
-    # operation per character to *meter*.
+    # operation per character to *meter* before its bytes are read. The
+    # searcher validated *string*, so each character's length is read from
+    # its lead byte.
     private def split_by_character(string : String, limit : Int32?, meter : SearchMeter, output : OutputMeter,
                                    & : String ->) : Nil
+      bytes = string.to_slice
       yielded = 0
       byte_index = 0
-      string.each_char do |char|
+      while byte_index < bytes.size
+        if limit && yielded + 1 == limit
+          output.add(bytes.size - byte_index)
+          yield string.byte_slice(byte_index)
+          return
+        end
         meter.charge(1, byte_index)
-        byte_index += char.bytesize
-        output.add(char.bytesize)
-        yield char.to_s
+        char_bytesize = Core::UTF8.sequence_length(bytes.unsafe_fetch(byte_index))
+        output.add(char_bytesize)
+        yield string.byte_slice(byte_index, char_bytesize)
+        byte_index += char_bytesize
         yielded += 1
-        break if limit && yielded + 1 == limit
-      end
-      if limit && yielded != string.size
-        rest = string[yielded..-1]
-        output.add(rest.bytesize)
-        yield rest
       end
     end
 

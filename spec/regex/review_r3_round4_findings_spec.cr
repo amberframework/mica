@@ -137,6 +137,22 @@ describe "Mica::Regex R3 fourth review findings" do
     end
   end
 
+  it_satisfies "REGEX-R2-limits", "splits by the empty pattern as String#split does, charging each character first" do
+    empty = Mica::Regex::Expression.new("", compile_limits: TRUSTED)
+    {"", "a", "aé中😀b", "дд д"}.each do |haystack|
+      {nil, 1, 2, 3, 10}.each do |limit|
+        {false, true}.each do |remove_empty|
+          expected = haystack.split(//, limit, remove_empty: remove_empty)
+          empty.split(haystack, limit, remove_empty: remove_empty, limits: REQUEST).should eq(expected)
+        end
+      end
+    end
+    haystack = "д" * 10_000
+    ceiling = haystack.bytesize.to_i64 + 5_000
+    error = expect_raises(Mica::Regex::SearchLimitError) { empty.split(haystack, limits: ceiling_limits(ceiling)) }
+    operations_of(error).should eq(ceiling + 1)
+  end
+
   it_satisfies "REGEX-R3-dfa", "has the forward lazy DFA's chunks allowed before it reads them" do
     expect_stops_at_the_allowance("[a-z]+[0-9]", "abcdefghij" * 2_000, Mica::Regex::Engine::NoAccelerators, false)
   end
