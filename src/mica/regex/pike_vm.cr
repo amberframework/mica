@@ -214,7 +214,7 @@ module Mica::Regex
             target = state.next_state
           when .sparse?
             next if at >= end_bound
-            target = @program.sparse_target(state, haystack.unsafe_fetch(at))
+            target = @program.sparse_target(state_index, state, haystack.unsafe_fetch(at))
             next if target < 0
           end
           next if target < 0

@@ -21,7 +21,7 @@ module Mica::Regex
       program.list_of_states.each do |state|
         mark.call(state.low.to_i32, state.high.to_i32) if state.kind.byte_range?
       end
-      program.list_of_transitions.each { |transition| mark.call(transition.low.to_i32, transition.high.to_i32) }
+      program.each_transition_range { |low, high| mark.call(low.to_i32, high.to_i32) }
       mark.call(0x0A, 0x0A)
       mark.call(0x30, 0x39)
       mark.call(0x41, 0x5A)

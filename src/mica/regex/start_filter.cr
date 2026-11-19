@@ -120,7 +120,7 @@ module Mica::Regex
           list_of_pending << state.next_state unless state.low == byte && state.high == byte
         when .sparse?
           state.alternate.times do |offset|
-            transition = program.list_of_transitions[state.argument + offset]
+            transition = program.transition_at(index, state, offset)
             list_of_pending << transition.target unless transition.low == byte && transition.high == byte
           end
         end
@@ -156,7 +156,7 @@ module Mica::Regex
           relax(distance, deque, state.next_state, here + 1, true)
         when .sparse?
           state.alternate.times do |offset|
-            relax(distance, deque, program.list_of_transitions[state.argument + offset].target, here + 1, true)
+            relax(distance, deque, program.transition_at(index, state, offset).target, here + 1, true)
           end
         end
       end
@@ -190,7 +190,7 @@ module Mica::Regex
           mark(state.low, state.high)
         when .sparse?
           state.alternate.times do |offset|
-            transition = program.list_of_transitions[state.argument + offset]
+            transition = program.transition_at(index, state, offset)
             mark(transition.low, transition.high)
           end
         end

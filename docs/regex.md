@@ -322,8 +322,12 @@ byte ranges in a trie, so a class emits at most the byte ranges the size
 preflight counted for it). A large class (16 ranges or more, such as `\w`
 or `\p{L}`, or any class reaching three-byte sequences, such as `.` or
 `[^"']`) is built once per process as a minimal automaton, its equal
-suffixes sharing states, and copied into each program that uses it (one
-memory copy, relocated in place); the preflight counts its exact states.
+suffixes sharing states. A program copies only its states (one memory
+copy, relocated in place): their `Sparse` states read the class's
+transitions from one table shared by every program and copy
+(`Program#list_of_shared_tables`, targets relative to the reading state),
+so a copy of `\w` adds 354 states and no transitions. The preflight
+counts its exact states.
 A class of one escape or property lowers to a set shared by the process,
 and so does every written class of up to 32 items (`[0-9a-f]`, kept for
 up to 512 classes, the table emptied and refilled when full), each ASCII
@@ -918,11 +922,11 @@ exception, within the work budget, deterministically.
 - The reverse-suffix and reverse-inner literal optimizations (roadmap
   6.2.2, with the 2·n reverse-byte budget), which would skip to a required
   literal that is not a prefix.
-- Compile time for `\w`, `\d` and `\p{...}`: the minimal class automata,
-  shared sets and copied blocks cut it by about half to three quarters,
-  but each copy of a large class still emits its hundreds of states, where
-  PCRE2 emits one opcode; a code-point-level class state is what brings it
-  to PCRE2's.
+- Compile time for repeated large classes (`\p{L}{100}`, `\b\w{25,}\b`):
+  shared transition tables leave one class (`\w`, `\p{L}`) at or under
+  PCRE2's compile time, but each copy still emits the class's hundreds of
+  states, where PCRE2 emits one opcode and a count; a code-point-level
+  class state is what brings repetitions to PCRE2's.
 - The invalid-UTF paths (`MatchInvalidUtf`, `NO_UTF_CHECK`) and the stdlib
   adapters with the 6.7 adapter matrix and the PCRE2 differential gate of
   ten million cases (R4).

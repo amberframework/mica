@@ -42,14 +42,13 @@ module Mica::Regex
     # successors' are, and a successor still on the stack is a loop.
     def self.longest_match(program : Program) : Int32?
       states = program.list_of_states
-      transitions = program.list_of_transitions
       # UNSEEN, ON_STACK, or the longest path in bytes.
       longest = Array(Int32).new(states.size, UNSEEN)
       list_of_pending = [program.start_state]
       while index = list_of_pending.last?
         if longest[index] == UNSEEN
           longest[index] = ON_STACK
-          return nil unless push_successors(program, states[index], longest, list_of_pending)
+          return nil unless push_successors(program, index, states[index], longest, list_of_pending)
           next
         end
         list_of_pending.pop
@@ -65,7 +64,7 @@ module Mica::Regex
                  when .sparse?
                    most = 0
                    state.alternate.times do |offset|
-                     most = Math.max(most, longest[transitions[state.argument + offset].target] + 1)
+                     most = Math.max(most, longest[program.transition_at(index, state, offset).target] + 1)
                    end
                    most
                  else
@@ -82,7 +81,7 @@ module Mica::Regex
 
     # Pushes the successors of *state* whose longest path is not known yet;
     # false when one is on the stack (a loop).
-    private def self.push_successors(program : Program, state : Program::State, longest : Array(Int32),
+    private def self.push_successors(program : Program, index : Int32, state : Program::State, longest : Array(Int32),
                                      list_of_pending : Array(Int32)) : Bool
       case state.kind
       when .byte_range?, .save?, .look?
@@ -91,9 +90,8 @@ module Mica::Regex
         push_successor(state.next_state, longest, list_of_pending) &&
           push_successor(state.alternate, longest, list_of_pending)
       when .sparse?
-        transitions = program.list_of_transitions
         (0...state.alternate).all? do |offset|
-          push_successor(transitions[state.argument + offset].target, longest, list_of_pending)
+          push_successor(program.transition_at(index, state, offset).target, longest, list_of_pending)
         end
       else
         true
@@ -142,14 +140,13 @@ module Mica::Regex
       none = [] of UInt8
       return none if reaches_match[program.start_state]
       list_of_final_bytes = [] of UInt8
-      transitions = program.list_of_transitions
-      states.each do |state|
+      states.each_with_index do |state, index|
         if state.kind.byte_range?
           next unless reaches_match[state.next_state]
           return none unless add_final_bytes(list_of_final_bytes, state.low, state.high)
         elsif state.kind.sparse?
           state.alternate.times do |offset|
-            transition = transitions[state.argument + offset]
+            transition = program.transition_at(index, state, offset)
             next unless reaches_match[transition.target]
             return none unless add_final_bytes(list_of_final_bytes, transition.low, transition.high)
           end

@@ -644,7 +644,7 @@ module Mica::Regex
         target = if state.kind.byte_range?
                    state.low <= byte <= state.high ? state.next_state : -1
                  else
-                   @program.sparse_target(state, byte.to_u8)
+                   @program.sparse_target(state_index, state, byte.to_u8)
                  end
         builder.add_target(target) if target >= 0
       end

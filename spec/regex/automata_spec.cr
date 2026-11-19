@@ -123,6 +123,30 @@ describe "Mica::Regex R3 engines" do
     end
   end
 
+  describe "shared class tables" do
+    it_satisfies "REGEX-R3-differential", "reads a large class's transitions from one table shared by every copy and program" do
+      wide = program("\\w+@\\w{2}")
+      wide.list_of_shared_tables.size.should eq(1)
+      wide.list_of_transitions.should be_empty
+      other = program("x\\w")
+      other.list_of_shared_tables[0].should be(wide.list_of_shared_tables[0])
+      # A small class keeps its transitions in the program's own list.
+      program("[a-cx-z]").list_of_shared_tables.should be_empty
+    end
+
+    it_satisfies "REGEX-R3-differential", "finds the same spans on every engine path through shared tables" do
+      haystack = "ab Привет мир_9 ŝtel 東京 x.y\nzz"
+      ["\\w+", "(\\w+)\\s+(\\w+)", "\\pL{2,3}", "(?:\\w*)*x", "(\\pL?)+", "(?:.|\\w*)*y", "[^a]+б?", "\\b\\w{3}\\b",
+       "(?:\\p{Lu}|\\p{Ll}){2}", "(?s:.)*?\\pL$"].each do |source|
+        expected = span(source, haystack, Mica::Regex::Engine::PikeVM).first
+        Mica::Regex::Engine.values.each do |engine|
+          next if engine.backtracker? && program(source).state_count * (haystack.bytesize + 1) > 1_000_000
+          span(source, haystack, engine).first.should eq(expected)
+        end
+      end
+    end
+  end
+
   describe "literal sets and prefilters" do
     it_satisfies "REGEX-R3-accelerators", "extracts prefix literals and knows when they are the whole match" do
       exact = program("foo|bar").literal_set.should_not be_nil
