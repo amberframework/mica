@@ -62,12 +62,12 @@ module Mica::Regex
     end
 
     # The bytes a new cache takes before its first state is built.
-    protected def self.initial_bytes(dfa : LazyDFA) : Int64
+    def self.initial_bytes(dfa : LazyDFA) : Int64
       fixed_bytes_of(dfa) + 2 * state_bytes_of(dfa, 1)
     end
 
     protected def self.fixed_bytes_of(dfa : LazyDFA) : Int64
-      16_i64 * dfa.node_count + 4_i64 * LazyDFA::START_FLAG_COUNT + 256
+      DFABuilder::BYTES_PER_STATE.to_i64 * dfa.node_count + 4_i64 * LazyDFA::START_FLAG_COUNT + 256
     end
 
     protected def self.state_bytes_of(dfa : LazyDFA, key_size : Int32) : Int64
@@ -242,31 +242,42 @@ module Mica::Regex
   end
 
   # :nodoc:
-  # Scratch space for building DFA states: a sparse set of visited NFA
+  # Scratch space for building DFA states: a stamped set of visited NFA
   # states, the closure stack, the consuming states in priority order, and
-  # the key being built with its own sparse set.
+  # the key being built with its own stamped set.
   class DFABuilder
-    @visited_dense : Array(Int32)
-    @visited_sparse : Array(Int32)
-    @visited_size = 0
-    @target_dense : Array(Int32)
-    @target_sparse : Array(Int32)
-    @target_size = 0
+    # A state is visited (or a target) in the current build when its stamp
+    # equals the current generation, so starting a build is one increment,
+    # and each set takes 4 bytes per NFA state.
+    @visited_stamps : Array(UInt32)
+    @visit_generation = 0_u32
+    @target_stamps : Array(UInt32)
+    @target_generation = 0_u32
     @stack = [] of Int32
     @outputs = [] of Int32
     @key = [] of Int32
 
+    # The bytes of the two stamp tables per NFA state.
+    BYTES_PER_STATE = 8
+
     def initialize(state_count : Int32)
-      @visited_dense = Array(Int32).new(state_count, 0)
-      @visited_sparse = Array(Int32).new(state_count, 0)
-      @target_dense = Array(Int32).new(state_count, 0)
-      @target_sparse = Array(Int32).new(state_count, 0)
+      @visited_stamps = Array(UInt32).new(state_count, 0_u32)
+      @target_stamps = Array(UInt32).new(state_count, 0_u32)
     end
 
     def reset : Nil
-      @visited_size = 0
+      @visit_generation = DFABuilder.next_generation(@visited_stamps, @visit_generation)
       @stack.clear
       @outputs.clear
+    end
+
+    # The generation after *generation* for *stamps*, clearing them when
+    # the counter wraps around.
+    protected def self.next_generation(stamps : Array(UInt32), generation : UInt32) : UInt32
+      generation &+= 1
+      return generation unless generation == 0
+      stamps.fill(0_u32)
+      1_u32
     end
 
     def push(state : Int32) : Nil
@@ -283,11 +294,8 @@ module Mica::Regex
 
     # Marks *state* visited; false when it already was.
     def visit(state : Int32) : Bool
-      member = @visited_sparse.unsafe_fetch(state)
-      return false if member < @visited_size && @visited_dense.unsafe_fetch(member) == state
-      @visited_sparse[state] = @visited_size
-      @visited_dense[@visited_size] = state
-      @visited_size += 1
+      return false if @visited_stamps.unsafe_fetch(state) == @visit_generation
+      @visited_stamps.unsafe_put(state, @visit_generation)
       true
     end
 
@@ -302,15 +310,12 @@ module Mica::Regex
     def begin_targets(flags : Int32) : Nil
       @key.clear
       @key << flags
-      @target_size = 0
+      @target_generation = DFABuilder.next_generation(@target_stamps, @target_generation)
     end
 
     def add_target(state : Int32) : Nil
-      member = @target_sparse.unsafe_fetch(state)
-      return if member < @target_size && @target_dense.unsafe_fetch(member) == state
-      @target_sparse[state] = @target_size
-      @target_dense[@target_size] = state
-      @target_size += 1
+      return if @target_stamps.unsafe_fetch(state) == @target_generation
+      @target_stamps.unsafe_put(state, @target_generation)
       @key << state
     end
 

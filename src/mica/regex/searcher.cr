@@ -401,7 +401,7 @@ module Mica::Regex
         cache.judge_retry(*retry_from)
       end
       if cache.widest_key > SearchPlan::WIDE_REVERSE_KEY && !reverse.with_reversed_classes?
-        plan.widen_reverse
+        plan.widen_reverse(@cache_pool.max_cache_bytes)
       end
       if start == LazyDFA::NO_MATCH
         raise Mica::Error.new("internal error: the reverse DFA found no start for the match ending at #{finish}")

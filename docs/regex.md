@@ -385,7 +385,7 @@ it did in R2) picks the fastest correct path for each search:
 |---|---|---|---|
 | 1 | **Literal search** | the pattern is a finite set of literals with no assertion (`LiteralSet#exact?`), and the search is not anchored | O(n) prefilter scan plus the literal bytes compared at each candidate |
 | 1 | **Lazy DFAs**: forward for `e`, reverse for `s` | every program without `\G`, unless `FirstLine` or `EndAnchored` is set | one table read per byte; O(m) per state built |
-| 1 | **Forward DFA from each start** ("Short matches"): finds `s` for a program whose matches span at most 256 bytes while its reverse cache thrashes, and searches it while its forward cache thrashes | the program has a match bound | at most `longest` + 1 table reads per start |
+| 1 | **Forward DFA from each start** ("Short matches"): finds `s` for a program whose matches span at most 512 bytes while its reverse cache thrashes, and searches it while its forward cache thrashes | the program has a match bound | at most `longest` + 1 table reads per start |
 | 1 | **Pike VM**, span layout | otherwise, and whenever a lazy DFA gives up | O(m·(n + 1)) |
 | 2 | **One-pass DFA** | captures asked for and the pattern is one-pass | O(L + c) |
 | 2 | Bounded backtracker, then Pike VM | as in R2 | as in R2 |
@@ -484,7 +484,7 @@ do, into a `DFACache` leased for the search:
 
 `ShortMatch` (built on a program's first need of it) bounds how many
 bytes a match can span, by one depth-first pass over the program: a loop
-that reads input, or a bound over 256 bytes, means no bound. It also
+that reads input, or a bound over 512 bytes, means no bound. It also
 collects the bytes a match can end with (the bytes read just before the
 match state is reached through steps that read nothing), when they are at
 most three and the program cannot match the empty string. A program with
@@ -513,10 +513,12 @@ a bound uses it twice:
   bytes before the next one are skipped. Every 256 such searches one
   retries the unanchored DFA; a retry that builds at least 32 states at
   fewer than 10 bytes each marks the cache thrashing again and doubles the
-  interval (up to 2^20 searches).
+  interval (up to 2^20 searches). `[a-q][^u-z]{13}x` over leipzig-3200
+  goes from 2.5 s to 18 ms (PCRE2-JIT: 127 ms), and `\p{L}{100}` over
+  every code point from 1.15 s to 41 ms.
 
-`Engine::EachStart` forces the second path on every unanchored search of
-a program with a bound, for the differential fuzzers and the conformance
+`Engine::EachStart` forces both paths on every unanchored search of a
+program with a bound, for the differential fuzzers and the conformance
 replay.
 
 ## One-pass DFA

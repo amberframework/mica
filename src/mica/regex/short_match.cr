@@ -14,7 +14,7 @@ module Mica::Regex
   # ```
   class ShortMatch
     # The longest match that qualifies, in bytes.
-    BOUND = 256
+    BOUND = 512
     # The most distinct final bytes kept; with more, `list_of_final_bytes`
     # is empty and no start is skipped.
     MAX_FINAL_BYTES = 3

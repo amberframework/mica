@@ -44,6 +44,8 @@ module Mica::Regex
     # on another thread that sees one sees it fully built.
     @reverse = Atomic(LazyDFA?).new(nil)
     @reverse_with_reversed_classes = Atomic(LazyDFA?).new(nil)
+    # Set once `widen_reverse` found the widened DFA too large.
+    @widen_refused = Atomic(Int32).new(0)
     @one_pass = Atomic(OnePassDFA?).new(nil)
     # Set (after @one_pass) once the one-pass build ran, as its result may
     # be nil.
@@ -115,11 +117,21 @@ module Mica::Regex
     # wider than `WIDE_REVERSE_KEY` NFA states calls it (large Unicode
     # classes next to non-ASCII text). Reversing a class costs milliseconds
     # the first time in a process, so only programs that need it pay.
-    def widen_reverse : Nil
+    #
+    # The widened DFA reads more NFA nodes, so its cache's fixed part is
+    # larger; when that part would take more than a quarter of
+    # *max_cache_bytes* (`\p{L}{256}` repeats one class 256 times), the
+    # plan keeps its reverse DFA and does not try again.
+    def widen_reverse(max_cache_bytes : Int64) : Nil
+      return if @widen_refused.get == 1
       current = @reverse.get
       return if current && current.with_reversed_classes?
       return if @program.list_of_class_blocks.empty?
       widened = reverse_with_reversed_classes || return
+      if DFACache.initial_bytes(widened) * 4 > max_cache_bytes
+        @widen_refused.set(1)
+        return
+      end
       @mutex.synchronize { @reverse.set(widened) }
     end
 
