@@ -15,13 +15,15 @@ module Mica::Regex
   # plan, whose automata pay for themselves over many searches.
   #
   # A first search runs only where the backtracker's whole cost is known
-  # to fit before the haystack is read: its bitset gate
-  # (`BoundedBacktracker.fits?`) for the span from the offset to the end,
-  # and the call's work allowance for validation plus every visit and
-  # slot write the backtracker can make, so it never stops on `max_work`
-  # where it began. The deadline is read before the haystack, as on every
-  # path. The search is O(m·(L + 1) + c) and allocates the backtracker's
-  # bitset (at most 32 KiB).
+  # to fit before the haystack is read: its bitset gate, or its hash set
+  # of visited pairs for a large program (`BoundedBacktracker.fits_capped?`),
+  # for the span from the offset to the end, and the call's work allowance
+  # for validation plus every visit and slot write the backtracker can
+  # make, so it never stops on `max_work` where it began. The deadline is
+  # read before the haystack, as on every path. The search is
+  # O(m·(L + 1) + c), at most `visit_limit` visits, and allocates the
+  # backtracker's bitset (at most 32 KiB) or hash set (within the
+  # backtracker allowance).
   module FirstSearch
     # How many single searches of a program run here before it builds its
     # plan.
@@ -42,6 +44,15 @@ module Mica::Regex
     VISITS_BASE      = 256_i64
     VISITS_PER_STATE =   8_i64
 
+    # The fewest states of a *large* program, whose first searches may read
+    # a span of any length (`\p{L}{50}` compiles to about 15,000). Its plan
+    # costs in proportion to its states, at least about what
+    # `BoundedBacktracker::SPARSE_VISITS` visits cost, and over a span too
+    # long for the bitset the backtracker marks visited pairs in a hash set
+    # and stops after that many visits whatever the span, so a longer span
+    # adds only the scans every path makes before it searches.
+    LARGE_PROGRAM_STATES = BoundedBacktracker::SPARSE_VISITS // VISITS_PER_STATE
+
     # The most visits a first search of *program* makes on the
     # backtracker.
     def self.visit_limit(program : Program) : Int64
@@ -55,10 +66,20 @@ module Mica::Regex
       return false unless program.first_searches_left?
       return false if byte_index < 0 || byte_index > haystack.bytesize
       span = haystack.bytesize - byte_index
-      return false if span > (program.literal_set ? MAX_LITERAL_BYTES : MAX_BYTES)
-      return false unless BoundedBacktracker.fits?(program, span)
+      return false unless span_fits?(program, span)
       return false unless fits_allowance?(program, haystack.bytesize, span, limits)
       program.count_first_search
+    end
+
+    # True when the backtracker may search a span of *span* bytes of
+    # *program* with its visits capped: up to `MAX_BYTES` (`MAX_LITERAL_BYTES`
+    # with prefix literals) within its bitset or its hash set, and any span
+    # of a large program without prefix literals (`LARGE_PROGRAM_STATES`)
+    # in its hash set.
+    def self.span_fits?(program : Program, span : Int32) : Bool
+      return false unless BoundedBacktracker.fits_capped?(program, span)
+      return true if span <= (program.literal_set ? MAX_LITERAL_BYTES : MAX_BYTES)
+      !program.literal_set && program.state_count >= LARGE_PROGRAM_STATES && !BoundedBacktracker.fits?(program, span)
     end
 
     # True when validating *haystack_bytes* bytes, the scans for the
@@ -69,7 +90,7 @@ module Mica::Regex
     # allowance.
     private def self.fits_allowance?(program : Program, haystack_bytes : Int32, span : Int32,
                                      limits : SearchLimits) : Bool
-      visits = program.state_count.to_i64 * (span.to_i64 + 1)
+      visits = BoundedBacktracker.capped_visits(program, span)
       scans = StartFilter::MAX_REQUIRED_BYTES.to_i64 * span
       needed = haystack_bytes.to_i64 + scans + 2_i64 * visits
       needed <= limits.max_work(program.state_count, haystack_bytes.to_i64)

@@ -618,8 +618,8 @@ module Mica::Regex
     private def backtracked_start(bytes : Bytes, finish : Int32, lower_bound : Int32) : Int32?
       plan = @plan || return nil
       span = finish - lower_bound
-      return nil unless span <= FirstSearch::MAX_BYTES && BoundedBacktracker.fits?(@program, span)
-      visits = @program.state_count.to_i64 * (span.to_i64 + 1)
+      return nil unless FirstSearch.span_fits?(@program, span)
+      visits = BoundedBacktracker.capped_visits(@program, span)
       return nil if 2_i64 * visits > @meter.work_meter.allowance - @meter.operations
       return nil unless @engine.backtracked_starts? || plan.backtrack_start?
       slots = @capture_slots

@@ -474,8 +474,11 @@ reserved from the `CachePool`, when:
 
 - the span from the offset to the end is at most 256 bytes (64 when the
   pattern has prefix literals, whose plan is cheap and whose prefilter
-  skips to them faster than the backtracker tries each start), and fits
-  the backtracker's bitset gate (`BoundedBacktracker.fits?`);
+  skips to them faster than the backtracker tries each start), or any
+  length for a *large* program without prefix literals (at least
+  `FirstSearch::LARGE_PROGRAM_STATES`, 2,048 states, as `\p{L}{50}`'s
+  15,000), and the backtracker fits it (`BoundedBacktracker.fits_capped?`,
+  below);
 - validation, the required-byte scans (below) and the backtracker's most
   work over that span (one operation per visit and one per slot write, at
   most one of each per (state, position) pair) fit the call's work
@@ -493,12 +496,25 @@ costs. Later searches, iteration calls (`scan`, `gsub`, `split`) and
 longer haystacks build the plan, whose automata pay for themselves over
 many searches.
 
+A first search, and a backtracked start (below), marks the pairs it has
+visited in the backtracker's bitset when m × (L + 1) fits its 256 Ki bits.
+A large program's bitset would not fit (`\p{L}{256}` over 512 bytes needs
+about 39 M bits), so such a search marks them in a hash set instead,
+which holds at most `BoundedBacktracker::SPARSE_VISITS` (16,384) pairs:
+the search makes at most that many visits, then hands over as above, and
+its memory (the set at its largest and a job stack of that many entries)
+is checked against the backtracker allowance before it starts. It visits
+the same pairs in the same order as with the bitset. Its plan costs in
+proportion to the program's states, at least what that many visits cost,
+so the span it reads is not limited: its other costs are the validation
+and scans every path makes.
+
 The plan itself builds what a search reads when it first reads it: the
 start filter (read only by short searches) on first use, and the reverse
 DFA only once the plan has found `FirstSearch::SEARCHES` match starts
 without it. Until then, when the forward DFA has found a match end `e`,
 the bounded backtracker finds the start over `offset...e` (when the span
-is at most 256 bytes, fits the bitset gate and the call's remaining
+would suit a first search, its most work fits the call's remaining
 allowance, and the backtracker decides within its visit limit): the
 leftmost-first match of that span ends at `e`, as cutting bytes off after
 the match only removes matches.

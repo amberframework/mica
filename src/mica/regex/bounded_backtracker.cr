@@ -24,6 +24,17 @@ module Mica::Regex
   # more than that bound plus one granule per chunk, and a search that
   # needs few jobs allocates few.
   #
+  # **Capped searches over a large program.** A first search and a
+  # backtracked match start (see "First searches" in docs/regex.md) stop
+  # after a set number of visits. When such a search's bitset would not
+  # fit (a program of thousands of states, as `\p{L}{50}` compiles to),
+  # it marks visited pairs in a hash set instead (`fits_capped?`), which
+  # holds at most `SPARSE_VISITS` pairs: the search then makes at most
+  # that many visits, and its memory (the set and a job stack of at most
+  # `SPARSE_VISITS` + 1 entries) is known before it starts
+  # (`sparse_allocation_charge`). The pairs it visits, and so its result,
+  # are the same as with the bitset.
+  #
   # Each visit and each slot undo entry is charged one operation to the
   # `SearchMeter`.
   #
@@ -37,11 +48,47 @@ module Mica::Regex
     # `MAX_VISITED_BITS` + 1 entries within 11, whatever was cut before.
     MAX_JOB_CHUNKS = 16
 
+    # The most visits a search that marks pairs in a hash set makes (see
+    # "Capped searches" above).
+    SPARSE_VISITS = 16_384_i64
+    # Slots in the hash set at its largest: twice `SPARSE_VISITS`, a power
+    # of two, so the set is at most half full.
+    SPARSE_SLOTS = 2_i64 * SPARSE_VISITS
+    # Slots in the hash set when a search first needs it.
+    FIRST_SPARSE_SLOTS = 1024
+
     # Returns true when a search of *program* over a span of *span_bytes*
     # bytes fits the bitset gate.
     def self.fits?(program : Program, span_bytes : Int32) : Bool
       return false unless visited_bits(program, span_bytes) <= MAX_VISITED_BITS
       allocation_charge(program, span_bytes) <= program.backtracker_allowance
+    end
+
+    # Returns true when a search of *program* over *span_bytes* bytes that
+    # makes at most `visit_limit` visits (a first search or a backtracked
+    # start) fits: within the bitset gate, or else with a hash set of
+    # visited pairs within the program's backtracker allowance.
+    def self.fits_capped?(program : Program, span_bytes : Int32) : Bool
+      fits?(program, span_bytes) || sparse_allocation_charge(program) <= program.backtracker_allowance
+    end
+
+    # The most visits a capped search of *program* over *span_bytes* bytes
+    # can make: one per (state, position) pair within the bitset gate, at
+    # most `SPARSE_VISITS` with a hash set.
+    def self.capped_visits(program : Program, span_bytes : Int32) : Int64
+      return visited_bits(program, span_bytes) if fits?(program, span_bytes)
+      SPARSE_VISITS
+    end
+
+    # Returns the bytes the collector hands out for a capped search that
+    # marks visited pairs in a hash set: the set at its largest (and the
+    # smaller sets it grew from), the job stack of `SPARSE_VISITS` + 1
+    # entries, the slots and this object.
+    def self.sparse_allocation_charge(program : Program) : Int64
+      set = AllocationLedger.granules(SPARSE_SLOTS * 2 * sizeof(UInt64))
+      jobs = AllocationLedger.granules((SPARSE_VISITS + 1) * sizeof(Job)) + (MAX_JOB_CHUNKS - 1) * AllocationLedger::GRANULE
+      slots = AllocationLedger.granules(program.slot_count.to_i64 * sizeof(Int64))
+      set + jobs + slots + AllocationLedger.granules(instance_sizeof(BoundedBacktracker))
     end
 
     # Returns the bytes the collector hands out for a backtracker of
@@ -67,6 +114,11 @@ module Mica::Regex
 
     @slots : Slice(Int64)
     @visited : Slice(UInt64)
+    # The visited pairs of a capped search whose bitset would not fit: an
+    # open-addressing set of `pair key + 1` (0 is empty), at most half full.
+    @sparse_visited = Slice(UInt64).new(0)
+    @sparse_count = 0
+    @sparse = false
     # The job stack: @chunk_count chunks allocated, holding @job_capacity
     # entries in all; the jobs in use fill the chunks before @chunk_index
     # and the first @in_chunk entries of @chunk (chunk @chunk_index, of
@@ -101,21 +153,28 @@ module Mica::Regex
                end_anchored : Bool, meter : SearchMeter, slots : Slice(Int64),
                first_line_end : Int32) : Bool
       span = end_bound - start
-      unless BoundedBacktracker.fits?(@program, span)
-        raise ArgumentError.new("A span of #{span} bytes does not fit the backtracker's bitset")
-      end
       columns = span + 1
       bits = @program.state_count.to_i64 * columns
-      words = ((bits + 63) // 64).to_i32
-      if @visited.size < words
-        GC.free(@visited.to_unsafe.as(Void*)) unless @visited.empty?
-        @visited = Slice(UInt64).new(words, 0_u64)
+      if BoundedBacktracker.fits?(@program, span)
+        @sparse = false
+        words = ((bits + 63) // 64).to_i32
+        if @visited.size < words
+          GC.free(@visited.to_unsafe.as(Void*)) unless @visited.empty?
+          @visited = Slice(UInt64).new(words, 0_u64)
+        else
+          @visited.fill(0_u64, 0, words)
+        end
+        # Each visit pushes at most one job, after the one each start pushes.
+        limit_jobs(bits + 1)
+        @visits_left = @visit_limit
+      elsif @visit_limit != Int64::MAX && BoundedBacktracker.fits_capped?(@program, span)
+        @sparse = true
+        clear_sparse
+        limit_jobs(SPARSE_VISITS + 1)
+        @visits_left = Math.min(@visit_limit, SPARSE_VISITS)
       else
-        @visited.fill(0_u64, 0, words)
+        raise ArgumentError.new("A span of #{span} bytes does not fit the backtracker's bitset")
       end
-      # Each visit pushes at most one job, after the one each start pushes.
-      limit_jobs(bits + 1)
-      @visits_left = @visit_limit
       @gave_up = false
       at = start
       while at <= end_bound
@@ -147,13 +206,14 @@ module Mica::Regex
         at = job.at.to_i32
         while true
           bit = current.to_i64 * columns + (at - start)
-          word = bit >> 6
-          mask = 1_u64 << (bit & 63)
-          if @visited[word] & mask != 0
-            state = @program.list_of_states.unsafe_fetch(current)
-            break
+          if @sparse
+            break unless mark_sparse?(bit)
+          else
+            word = bit >> 6
+            mask = 1_u64 << (bit & 63)
+            break if @visited[word] & mask != 0
+            @visited[word] |= mask
           end
-          @visited[word] |= mask
           if (@visits_left -= 1) < 0
             @gave_up = true
             return false
@@ -210,6 +270,55 @@ module Mica::Regex
       @list_of_chunks[last] = Pointer(Job).null
       @list_of_chunk_sizes[last] = 0_i64
       @chunk_count = last
+    end
+
+    # Empties the hash set of visited pairs, allocating its first table the
+    # first time.
+    private def clear_sparse : Nil
+      @sparse_count = 0
+      if @sparse_visited.empty?
+        @sparse_visited = Slice(UInt64).new(FIRST_SPARSE_SLOTS, 0_u64)
+      else
+        @sparse_visited.fill(0_u64)
+      end
+    end
+
+    # Marks pair *bit* visited in the hash set; returns false when it
+    # already was. The set doubles when it would pass half full; it never
+    # holds more than `SPARSE_VISITS` pairs, as each pair is one visit.
+    private def mark_sparse?(bit : Int64) : Bool
+      key = bit.to_u64! &+ 1
+      mask = @sparse_visited.size - 1
+      index = sparse_hash(key) & mask
+      while (found = @sparse_visited.unsafe_fetch(index)) != 0
+        return false if found == key
+        index = (index + 1) & mask
+      end
+      @sparse_visited[index] = key
+      @sparse_count += 1
+      grow_sparse if @sparse_count * 2 > @sparse_visited.size && @sparse_visited.size < SPARSE_SLOTS
+      true
+    end
+
+    @[AlwaysInline]
+    private def sparse_hash(key : UInt64) : Int32
+      ((key &* 0x9E3779B97F4A7C15_u64) >> 40).to_i32!
+    end
+
+    private def grow_sparse : Nil
+      old = @sparse_visited
+      grown = Slice(UInt64).new(old.size * 2, 0_u64)
+      mask = grown.size - 1
+      old.each do |key|
+        next if key == 0
+        index = sparse_hash(key) & mask
+        while grown.unsafe_fetch(index) != 0
+          index = (index + 1) & mask
+        end
+        grown[index] = key
+      end
+      GC.free(old.to_unsafe.as(Void*))
+      @sparse_visited = grown
     end
 
     private def clear_jobs : Nil
