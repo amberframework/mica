@@ -436,8 +436,11 @@ much as the cost per byte:
   candidate where an anchored match exists starts the leftmost match.
   When the pattern is one-pass, the searcher runs the one-pass DFA as a
   whole anchored search at each candidate, which finds the span and the
-  groups at once: no reverse DFA and no separate capture pass. An anchored
-  search that wants groups does the same at its offset. The one-pass DFA
+  groups at once: no reverse DFA and no separate capture pass; otherwise
+  it runs the forward lazy DFA anchored at each candidate, which finds the
+  end, and still needs no reverse DFA. An anchored search that wants
+  groups runs the one-pass DFA alone at its offset once an earlier capture
+  pass has built it. The one-pass DFA
   leaves out the paths that rank below a match path; when that match path
   does not hold (its `$` or `\b` fails) and nothing matches later, a
   left-out path could still match, so the search hands over to the lazy
@@ -447,7 +450,8 @@ much as the cost per byte:
   ineffective, the call stops trying, so the one-pass search adds at most
   O(n) to a call.
 - **Groups read on first use.** When only the bounded backtracker or the
-  Pike VM can read a pattern's groups (the pattern is not one-pass),
+  Pike VM can read a pattern's groups (the first capture pass found the
+  pattern is not one-pass),
   `match`, `match_at_byte_index` and `search` find the span alone and leave
   the groups to be read the first time one is asked for: a capture pass
   over the match alone, anchored at its start, cut at its end, searched

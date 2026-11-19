@@ -116,8 +116,18 @@ module Mica::Regex
     # backtracker or the Pike VM. When the one-pass DFA can, its O(L) pass
     # costs less than a later call would, and the groups are read with the
     # match.
+    #
+    # Until a search has built the one-pass DFA (the first capture pass
+    # does), this is false, so a search that never matches never pays for
+    # building it.
     def defers_groups? : Bool
-      @program.slot_count > 2 && one_pass.nil?
+      @program.slot_count > 2 && @one_pass_built.get == 1 && @one_pass.get.nil?
+    end
+
+    # The one-pass DFA when a search has built it already (see `one_pass`),
+    # or nil.
+    def built_one_pass : OnePassDFA?
+      @one_pass_built.get == 1 ? @one_pass.get : nil
     end
 
     # Takes an idle lease (its caches warm from earlier searches) or makes

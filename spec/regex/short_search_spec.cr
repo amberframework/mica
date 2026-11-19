@@ -21,6 +21,9 @@ describe "Mica::Regex short searches" do
   describe "groups read on first use" do
     it_satisfies "REGEX-R3-short-search", "finds the match without its groups when only the backtracker or the Pike VM can read them" do
       email = expression("\\A[\\w+\\-.]+@[a-z\\d\\-]+(\\.[a-z\\d\\-]+)*\\.[a-z]+\\z")
+      # The first match builds the one-pass DFA and finds it cannot be had.
+      email.program.plan.defers_groups?.should be_false
+      email.match("ann@example.org", limits: LIMITS).try(&.[1]?).should be_nil
       email.program.plan.defers_groups?.should be_true
       match = email.match("john.smith@example.co.uk", limits: LIMITS).should_not be_nil
       match[0].should eq("john.smith@example.co.uk")
@@ -39,6 +42,7 @@ describe "Mica::Regex short searches" do
       # \b depends on the byte before the search's offset, and the group
       # that took part depends on the alternation's priority.
       pattern = expression("\\b(a|ab)(b)?\\b|(ab)")
+      pattern.match("ab", limits: LIMITS)
       pattern.program.plan.defers_groups?.should be_true
       match = pattern.match_at_byte_index("zab ab", 1, limits: LIMITS).should_not be_nil
       {match.byte_begin(0), match.byte_end(0)}.should eq({1, 3})
@@ -98,8 +102,25 @@ describe "Mica::Regex short searches" do
         .should eq([{1, 2}, {4, 7}, {8, 9}])
     end
 
+    it_satisfies "REGEX-R3-short-search", "tries the forward lazy DFA anchored at each candidate when the pattern is not one-pass" do
+      separator = expression(",|,\\s")
+      separator.program.plan.one_pass.should be_nil
+      found = Mica::Regex::Searcher.open(separator.program, "a,b, c", LIMITS, nil, Mica::Regex::CachePool.default)
+      found.find(2, Mica::Regex::MatchOptions::None, false).try(&.to_a).should eq([3, 4])
+      found.last_path.should eq(Mica::Regex::Searcher::Path::LazyDFA)
+      found.finish
+      separator.scan("a,b, c,", limits: LIMITS).map { |match| {match.byte_begin, match.byte_end} }
+        .should eq([{1, 2}, {3, 4}, {6, 7}])
+      word = expression("\\b(?:ab|a)\\w*c")
+      word.program.plan.one_pass.should be_nil
+      word.match("xab ab abc", limits: LIMITS).try(&.to_s).should eq("abc")
+    end
+
     it_satisfies "REGEX-R3-short-search", "reads an anchored match and its groups in one pass" do
       route = expression("\\A([a-z]+)-(\\d+)\\z")
+      # The first capture pass builds the one-pass DFA; later anchored
+      # searches run on it alone.
+      route.match("get-1", limits: LIMITS).try(&.[2]).should eq("1")
       found = Mica::Regex::Searcher.open(route.program, "post-42", LIMITS, nil, Mica::Regex::CachePool.default)
       found.find(0, Mica::Regex::MatchOptions::None, true).try(&.to_a).should eq([0, 7, 0, 4, 5, 7])
       found.last_path.should eq(Mica::Regex::Searcher::Path::OnePass)
@@ -115,27 +136,30 @@ describe "Mica::Regex short searches" do
       pattern.match("aaaa", limits: LIMITS).try(&.to_a).should eq(["aaaa", "aa", nil])
     end
 
-    it_satisfies "REGEX-R3-short-search", "adds at most the haystack's size to a call when one-pass tries read past their matches" do
-      # Each match is one x, but the one-pass DFA reads on through the
-      # letters that follow it looking for a b. The call counts those bytes
-      # and stops trying the one-pass search once they pass the haystack's
-      # size, so it adds at most about n to what the lazy DFAs do alone.
-      pattern = expression("x(?:[a-z]*b)?")
-      {500, 1_000, 2_000}.each do |size|
-        haystack = "x" * size
-        list_of_operations = {Mica::Regex::Engine::Auto, Mica::Regex::Engine::NoAccelerators}.map do |engine|
-          searcher = Mica::Regex::Searcher.new(pattern.program, haystack, LIMITS, nil, engine)
-          offset = 0
-          count = 0
-          while found = searcher.find(offset, Mica::Regex::MatchOptions::None, false)
-            offset = found[1].to_i32
-            count += 1
+    it_satisfies "REGEX-R3-short-search", "adds at most the haystack's size to a call when tries at candidates read past their matches" do
+      # Each match is one x, but each try reads on through the letters that
+      # follow it looking for a longer match. The call counts those bytes
+      # and stops trying at candidates once they pass the haystack's size,
+      # so it adds at most about n to what the lazy DFAs do alone. The first
+      # pattern is one-pass, the second is not (it tries on the lazy DFA).
+      {"x(?:[a-z]*b)?", "x(?:[a-z]*b|[a-z]*c)?"}.each do |source|
+        pattern = expression(source)
+        {500, 1_000, 2_000}.each do |size|
+          haystack = "x" * size
+          list_of_operations = {Mica::Regex::Engine::Auto, Mica::Regex::Engine::NoAccelerators}.map do |engine|
+            searcher = Mica::Regex::Searcher.new(pattern.program, haystack, LIMITS, nil, engine)
+            offset = 0
+            count = 0
+            while found = searcher.find(offset, Mica::Regex::MatchOptions::None, false)
+              offset = found[1].to_i32
+              count += 1
+            end
+            count.should eq(size)
+            searcher.finish
+            searcher.meter.operations
           end
-          count.should eq(size)
-          searcher.finish
-          searcher.meter.operations
+          (list_of_operations[0] - list_of_operations[1]).should be <= 3 * size + 64
         end
-        (list_of_operations[0] - list_of_operations[1]).should be <= 3 * size + 64
       end
     end
   end
