@@ -30,8 +30,34 @@ module Mica::Regex
     end
 
     # Lowers *char_class* for *dialect*.
+    #
+    # A class of one escape or property (`\w`, `\p{L}`, `[^\d]`) that
+    # case folding leaves alone lowers to a set shared by the process:
+    # it is lowered once and the same set object comes back afterward, so
+    # the class costs no merge and its compiled automaton (`ClassMemo`) is
+    # found by the set's digest. A shared set larger than the caller's
+    # `max_class_ranges` is lowered again, so the refusal is the same.
     def self.lower(char_class : Ast::CharClass, dialect : Dialect, limits : CompileLimits, ledger : AllocationLedger,
                    meter : Core::WorkMeter) : CodePointSet
+      items = char_class.list_of_items
+      item = items.first?
+      unless items.size == 1 && item && !item.item_kind.range? && !(char_class.options.ignore_case? && dialect.ecma262?)
+        return lower_items(char_class, dialect, limits, ledger, meter)
+      end
+      key = {item, char_class.negated?}
+      shared = @@shared_mutex.synchronize { @@shared_sets[key]? }
+      return shared if shared && shared.range_count <= limits.max_class_ranges
+      set = lower_items(char_class, dialect, limits, ledger, meter)
+      @@shared_mutex.synchronize { @@shared_sets[key] ||= set }
+    end
+
+    # The shared sets of single-item classes, by item and negation. There
+    # are at most two per escape and property, so the table stays small.
+    @@shared_mutex = Mutex.new
+    @@shared_sets = {} of {Ast::ClassItem, Bool} => CodePointSet
+
+    private def self.lower_items(char_class : Ast::CharClass, dialect : Dialect, limits : CompileLimits,
+                                 ledger : AllocationLedger, meter : Core::WorkMeter) : CodePointSet
       ledger.charge_object(instance_sizeof(Context), "a class lowering", char_class.offset)
       context = Context.new(char_class.offset, limits, ledger, meter)
       options = char_class.options

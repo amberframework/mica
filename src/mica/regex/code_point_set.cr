@@ -34,8 +34,15 @@ module Mica::Regex
       new(bounds)
     end
 
+    # An FNV-1a digest of the bounds, computed once, so a set is a cheap
+    # hash key (`ClassMemo`).
+    getter digest : UInt64
+
     # Wraps *list_of_bounds*; see `from_bounds`.
     def initialize(@list_of_bounds : Array(Int32))
+      digest = 14695981039346656037_u64
+      @list_of_bounds.each { |bound| digest = (digest ^ bound.to_u32!) &* 1099511628211_u64 }
+      @digest = digest
     end
 
     # Returns the number of ranges.

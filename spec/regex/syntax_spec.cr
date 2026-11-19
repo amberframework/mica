@@ -294,8 +294,34 @@ describe Mica::Regex::Syntax do
     end
 
     it_satisfies "REGEX-R1-preflight", "counts class states from exact UTF-8 sequences" do
-      Mica::Regex::Preflight.set_states(Mica::Regex::CodePointSet.new([{0x61, 0x7A}])).should eq(1)
-      Mica::Regex::Preflight.set_states(Mica::Regex::CodePointSet.new([{0x00, 0x7F}, {0xE9, 0xE9}])).should eq(1 + 2 + 1)
+      ledger = Mica::Regex::AllocationLedger.new(TRUSTED.max_compile_bytes)
+      meter = Mica::Core::WorkMeter.new(Mica::Core::WorkBudget.unlimited)
+      Mica::Regex::Preflight.set_states(Mica::Regex::CodePointSet.new([{0x61, 0x7A}]), ledger, meter).should eq(1)
+      Mica::Regex::Preflight.set_states(Mica::Regex::CodePointSet.new([{0x00, 0x7F}, {0xE9, 0xE9}]), ledger, meter)
+        .should eq(1 + 2 + 1)
+    end
+
+    it_satisfies "REGEX-R1-preflight", "bounds a large class by its shared-suffix automaton, exactly" do
+      ledger = Mica::Regex::AllocationLedger.new(TRUSTED.max_compile_bytes)
+      meter = Mica::Core::WorkMeter.new(Mica::Core::WorkBudget.unlimited)
+      # Every other code point from U+0100: 64 ranges of one 2-byte sequence each.
+      list_of_ranges = (0...64).map { |index| {0x100 + index * 2, 0x100 + index * 2} }
+      set = Mica::Regex::CodePointSet.new(list_of_ranges)
+      Mica::Regex::ClassMemo.memoized?(set).should be_true
+      bound = Mica::Regex::Preflight.set_states(set, ledger, meter)
+      block = Mica::Regex::ClassMemo.block_for(set, ledger, meter)
+      bound.should eq(block.list_of_states.size)
+      # The trie has a lead-byte node (C4, C5) and a node of 32 second-byte
+      # ranges under each; the two are equal, so they share one state.
+      bound.should eq(2)
+      ledger.bytes.should be > 0
+    end
+
+    it_satisfies "REGEX-R1-preflight", "compiles the same program for a large class whether its automaton was memoized or not" do
+      first = Mica::Regex::Syntax.compile("p{L}{3}x|w+", dialect: :crystal, compile_limits: TRUSTED)
+      again = Mica::Regex::Syntax.compile("p{L}{3}x|w+", dialect: :crystal, compile_limits: TRUSTED)
+      again.list_of_states.should eq(first.list_of_states)
+      again.list_of_transitions.should eq(first.list_of_transitions)
     end
 
     it_satisfies "REGEX-R1-ledger", "refuses compiles that would pass max_compile_bytes" do

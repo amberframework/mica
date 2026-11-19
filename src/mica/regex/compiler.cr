@@ -41,19 +41,12 @@ module Mica::Regex
     private enum GrowingList
       Tasks
       Values
-      TrieNodes
-      TrieEdges
       TrieStates
       Visited
     end
 
     private record Task, task_kind : TaskKind, node : Hir::Node, next_state : Int32, count : Int32
 
-    # One edge of the byte trie a class is built from: a byte range and the
-    # trie node it leads to (`LEAF` for the end of a sequence).
-    private record TrieEdge, low : UInt8, high : UInt8, child : Int32, next_sibling : Int32
-
-    private LEAF = -1
     private NONE = -1
 
     # Compiles *pattern*, whose size preflight bounded its states by
@@ -67,12 +60,16 @@ module Mica::Regex
     @list_of_transitions : Array(Program::Transition)
     @list_of_tasks : Array(Task)
     @list_of_values : Array(Int32)
-    # The byte trie of the class being compiled, reused for every class:
-    # each node's first and last edge, and the edges themselves.
-    @list_of_trie_nodes : Array({Int32, Int32})
-    @list_of_trie_edges : Array(TrieEdge)
+    # The byte trie of the small class being compiled, reused for every
+    # class, and the state of each of its nodes.
+    @class_trie : ClassTrie
     @list_of_trie_states : Array(Int32)
-    @high_water = StaticArray(Int32, 6).new(0)
+    # The memoized class block instantiated last, and its set: the copies
+    # of a repeated class share one set object, so the memo is asked once
+    # per set rather than once per copy.
+    @last_memo_set : CodePointSet? = nil
+    @last_memo_block : ClassMemo::Block? = nil
+    @high_water = StaticArray(Int32, 4).new(0)
     @list_of_visited = [] of Bool
 
     private def initialize(@pattern : Hir::Pattern, @estimate : Int64, @limits : CompileLimits,
@@ -87,10 +84,8 @@ module Mica::Regex
       @list_of_tasks = [] of Task
       @ledger.charge_array(0, sizeof(Int32), "the compiler value stack", 0)
       @list_of_values = [] of Int32
-      @ledger.charge_array(0, sizeof({Int32, Int32}), "the class trie", 0)
-      @list_of_trie_nodes = [] of {Int32, Int32}
-      @ledger.charge_array(0, sizeof(TrieEdge), "the class trie", 0)
-      @list_of_trie_edges = [] of TrieEdge
+      ClassTrie.charge_new(@ledger)
+      @class_trie = ClassTrie.new
       @ledger.charge_array(0, sizeof(Int32), "the class trie", 0)
       @list_of_trie_states = [] of Int32
     end
@@ -358,53 +353,59 @@ module Mica::Regex
     # The line breaks of `\R` under `(*BSR_ANYCRLF)` other than `\r`.
     private LINE_FEED_ONLY = CodePointSet.from_bounds([0x0A, 0x0A])
 
-    # Compiles *set* into a byte trie: its UTF-8 sequences share their
-    # leading byte ranges, one state per trie node (a `ByteRange` for one
-    # edge, a `Sparse` for several), and every last byte goes to
-    # *next_state*.
+    # Compiles *set* into a byte automaton. A small set becomes its byte
+    # trie, its UTF-8 sequences sharing their leading byte ranges, one state
+    # per trie node (a `ByteRange` for one edge, a `Sparse` for several),
+    # every last byte going to *next_state*. A large set becomes a copy of
+    # its memoized minimal automaton (`ClassMemo`).
     private def compile_class(set : CodePointSet, next_state : Int32) : Int32
       return emit(Program::StateKind::Fail) if set.empty?
       return compile_class_from_trie(set, next_state) unless ClassMemo.memoized?(set)
-      if block = ClassMemo.block(set)
-        return instantiate(block, next_state)
+      block = @last_memo_block
+      unless block && set.same?(@last_memo_set)
+        block = ClassMemo.block_for(set, @ledger, @meter)
+        @last_memo_set = set
+        @last_memo_block = block
       end
-      first_state = @list_of_states.size
-      first_transition = @list_of_transitions.size
-      entry = compile_class_from_trie(set, next_state)
-      ClassMemo.store(set, ClassMemo::Block.new(
-        @list_of_states[first_state..].map { |state| relative_state(state, first_state, first_transition, next_state) },
-        @list_of_transitions[first_transition..].map do |transition|
-          transition.copy_with(target: relative_target(transition.target, first_state, next_state))
-        end,
-        entry - first_state))
-      entry
+      instantiate(block, next_state)
     end
 
     # Emits a memoized class block after the current states, its exit
-    # leading to *next_state*, and returns its entry state.
+    # leading to *next_state*, and returns its entry state. The block is
+    # checked against the limits and charged as a whole, as emitting its
+    # states one by one would check and charge them.
     private def instantiate(block : ClassMemo::Block, next_state : Int32) : Int32
       first_state = @list_of_states.size
       first_transition = @list_of_transitions.size
-      block.list_of_transitions.each do |transition|
-        @ledger.charge_append(sizeof(Program::Transition), "a class transition", 0)
+      block_states = block.list_of_states
+      block_transitions = block.list_of_transitions
+      check_state_room(block_states.size)
+      @ledger.charge(sizeof(Program::Transition).to_i64 * AllocationLedger::GROWTH_FACTOR * block_transitions.size,
+        "a class transition", 0)
+      @meter.enforce { Core::Position.new(0_i64) } if @meter.charge(block_states.size)
+      reserve_transitions(block_transitions.size)
+      block_transitions.each do |transition|
         @list_of_transitions << transition.copy_with(target: absolute_target(transition.target, first_state, next_state))
       end
-      block.list_of_states.each do |state|
-        add_state(state.copy_with(next_state: absolute_target(state.next_state, first_state, next_state),
-          argument: state.kind.sparse? ? state.argument + first_transition : state.argument))
+      block_states.each do |state|
+        @list_of_states << state.copy_with(next_state: absolute_target(state.next_state, first_state, next_state),
+          argument: state.kind.sparse? ? state.argument + first_transition : state.argument)
       end
       block.entry + first_state
     end
 
-    private def relative_state(state : Program::State, first_state : Int32, first_transition : Int32,
-                               next_state : Int32) : Program::State
-      state.copy_with(next_state: relative_target(state.next_state, first_state, next_state),
-        argument: state.kind.sparse? ? state.argument - first_transition : state.argument)
-    end
-
-    private def relative_target(target : Int32, first_state : Int32, next_state : Int32) : Int32
-      return target if target == NONE
-      target == next_state ? ClassMemo::EXIT : target - first_state
+    # Makes room for *added* more transitions in one step (at least
+    # doubling), rather than through the many smaller steps appending
+    # them one by one would take. The growth stays within what
+    # `AllocationLedger#charge_append` charged for them.
+    private def reserve_transitions(added : Int32) : Nil
+      size = @list_of_transitions.size
+      # `remaining_capacity` counts from the start of the buffer, so it
+      # includes the elements already held.
+      return if @list_of_transitions.remaining_capacity - size >= added
+      grown = Array(Program::Transition).new(Math.max(size + added, size * 2))
+      grown.concat(@list_of_transitions)
+      @list_of_transitions = grown
     end
 
     private def absolute_target(target : Int32, first_state : Int32, next_state : Int32) : Int32
@@ -413,84 +414,35 @@ module Mica::Regex
     end
 
     private def compile_class_from_trie(set : CodePointSet, next_state : Int32) : Int32
-      build_trie(set)
+      trie = @class_trie
+      trie.build(set, @ledger, @meter)
       # A set of surrogates only (`\p{Cs}`) has no UTF-8 sequences: like an
       # empty class, it never matches.
-      return emit(Program::StateKind::Fail) if @list_of_trie_nodes[0][0] == NONE
+      return emit(Program::StateKind::Fail) if trie.empty?
       states = @list_of_trie_states
       states.clear
-      grow(GrowingList::TrieStates, @list_of_trie_nodes.size, sizeof(Int32))
-      @list_of_trie_nodes.size.times { states << NONE }
+      grow(GrowingList::TrieStates, trie.node_count, sizeof(Int32))
+      trie.node_count.times { states << NONE }
       # Children are created after their parents, so emitting from the
       # last node back reaches every child before its parent.
-      (@list_of_trie_nodes.size - 1).downto(0) do |node_index|
+      (trie.node_count - 1).downto(0) do |node_index|
         states[node_index] = emit_trie_node(node_index, next_state)
       end
       states[0]
     end
 
-    private def build_trie(set : CodePointSet) : Nil
-      @list_of_trie_nodes.clear
-      @list_of_trie_edges.clear
-      add_trie_node
-      lows = StaticArray(UInt8, 4).new(0_u8)
-      highs = StaticArray(UInt8, 4).new(0_u8)
-      set.each_range do |first, last|
-        Utf8Sequences.each(first, last) do |length, low, high|
-          charge_work
-          Core::UTF8.encode(low, lows.to_slice)
-          Core::UTF8.encode(high, highs.to_slice)
-          node = 0
-          length.times do |depth|
-            final = depth == length - 1
-            node = add_trie_edge(node, lows[depth], highs[depth], final)
-          end
-        end
-      end
-    end
-
-    # Adds a node with no edges and returns its index.
-    private def add_trie_node : Int32
-      grow(GrowingList::TrieNodes, @list_of_trie_nodes.size + 1, sizeof({Int32, Int32}))
-      @list_of_trie_nodes << {NONE, NONE}
-      @list_of_trie_nodes.size - 1
-    end
-
-    # Follows (or adds) the edge *low*..*high* from *node* and returns the
-    # node it leads to (`LEAF` for a sequence's last byte). Sequences
-    # arrive in code point order, so an equal edge can only be the last one
-    # added to *node*.
-    private def add_trie_edge(node : Int32, low : UInt8, high : UInt8, final : Bool) : Int32
-      first_edge, last_edge = @list_of_trie_nodes[node]
-      if last_edge != NONE
-        edge = @list_of_trie_edges[last_edge]
-        return edge.child if edge.low == low && edge.high == high && !final && edge.child != LEAF
-      end
-      child = final ? LEAF : add_trie_node
-      grow(GrowingList::TrieEdges, @list_of_trie_edges.size + 1, sizeof(TrieEdge))
-      @list_of_trie_edges << TrieEdge.new(low, high, child, NONE)
-      edge_index = @list_of_trie_edges.size - 1
-      if last_edge == NONE
-        @list_of_trie_nodes[node] = {edge_index, edge_index}
-      else
-        previous = @list_of_trie_edges[last_edge]
-        @list_of_trie_edges[last_edge] = previous.copy_with(next_sibling: edge_index)
-        @list_of_trie_nodes[node] = {first_edge, edge_index}
-      end
-      child
-    end
-
     private def emit_trie_node(node_index : Int32, next_state : Int32) : Int32
-      first_edge, last_edge = @list_of_trie_nodes[node_index]
+      list_of_edges = @class_trie.list_of_edges
+      first_edge, last_edge = @class_trie.list_of_nodes[node_index]
       if first_edge == last_edge
-        edge = @list_of_trie_edges[first_edge]
+        edge = list_of_edges[first_edge]
         return emit_byte_range(edge.low, edge.high, trie_target(edge, next_state))
       end
       first_transition = @list_of_transitions.size
       count = 0
       edge_index = first_edge
       while edge_index != NONE
-        edge = @list_of_trie_edges[edge_index]
+        edge = list_of_edges[edge_index]
         @ledger.charge_append(sizeof(Program::Transition), "a class transition", 0)
         @list_of_transitions << Program::Transition.new(edge.low, edge.high, trie_target(edge, next_state))
         count += 1
@@ -499,8 +451,8 @@ module Mica::Regex
       add_state(Program::State.new(Program::StateKind::Sparse, 0_u8, 0_u8, NONE, count, first_transition))
     end
 
-    private def trie_target(edge : TrieEdge, next_state : Int32) : Int32
-      edge.child == LEAF ? next_state : @list_of_trie_states[edge.child]
+    private def trie_target(edge : ClassTrie::Edge, next_state : Int32) : Int32
+      edge.child == ClassTrie::LEAF ? next_state : @list_of_trie_states[edge.child]
     end
 
     private def look_kind(node : Hir::Look) : Program::LookKind
@@ -547,7 +499,16 @@ module Mica::Regex
     # array was allocated with the preflight's bound, so passing that bound
     # would be a compiler defect, and it is reported as one.
     private def add_state(state : Program::State) : Int32
-      count = @list_of_states.size.to_i64 + 1
+      check_state_room(1)
+      charge_work
+      @list_of_states << state
+      @list_of_states.size - 1
+    end
+
+    # Raises unless *added* more states fit under `max_program_states` and
+    # within the preflight bound.
+    private def check_state_room(added : Int32) : Nil
+      count = @list_of_states.size.to_i64 + added
       limit = @limits.max_program_states
       if count > limit
         raise CompileLimitError.new("max_program_states", limit, "A program of #{count} states", Core::Position.new(0_i64))
@@ -556,9 +517,6 @@ module Mica::Regex
         raise SyntaxError.new("internal error: the compiler emitted more states than the preflight bound #{@estimate}",
           Core::Position.new(0_i64))
       end
-      charge_work
-      @list_of_states << state
-      @list_of_states.size - 1
     end
 
     private def push_task(kind : TaskKind, node : Hir::Node, next_state : Int32, count : Int32 = 0) : Nil
