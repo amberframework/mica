@@ -311,10 +311,17 @@ checkpoint. A search never returns a partial or wrong result.
 `Compiler` turns `Hir` into a `Program`: a byte-level Thompson NFA in which
 every class and literal is a UTF-8 automaton (classes share their leading
 byte ranges in a trie, so a class emits at most the byte ranges the size
-preflight counted for it). The compiler expands repetitions, never
-recurses on the pattern (it keeps a task stack), charges every allocation
-to the ledger, checks `max_program_states` as it emits and `max_pike_bytes`
-when it finishes, and never emits more states than the preflight bound.
+preflight counted for it). A large class (16 ranges or more, such as `\w`
+or `\p{L}`) is built once per process as a minimal automaton, its equal
+suffixes sharing states, and copied into each program that uses it; the
+preflight counts its exact states. A class of one escape or property
+lowers to a set shared by the process, an alternation of classes and
+single characters around a large class compiles as their union, and a
+repeated small class is built once and copied. The compiler expands
+repetitions, never recurses on the pattern (it keeps a task stack),
+charges every allocation to the ledger, checks `max_program_states` as
+it emits and `max_pike_bytes` when it finishes, and never emits more
+states than the preflight bound.
 There is no unanchored `.*?` prefix: the engines start a thread at each
 character boundary instead.
 
@@ -657,7 +664,8 @@ counter: 64 MiB by default, each cache at most 2 MiB. A cache reserves
 64 KiB at a time before it grows; a Pike VM workspace reserves its exact
 charge (`PikeVM.workspace_charge`, bounded by `max_pike_bytes`) before its
 buffer is allocated. When a reservation does not fit, idle members are
-evicted, least recently used first. When none is idle, a lazy DFA gives
+evicted, least recently used first; an evicted lease drops its caches and
+reserves new ones when it is next used. When none is idle, a lazy DFA gives
 up and the search runs on the Pike VM; a Pike VM workspace the pool still
 cannot supply raises `SearchLimitError` naming `cache_pool_max_bytes`, so
 nothing is allocated past the cap and no wrong answer is returned. A call
@@ -887,9 +895,11 @@ exception, within the work budget, deterministically.
 - The reverse-suffix and reverse-inner literal optimizations (roadmap
   6.2.2, with the 2·n reverse-byte budget), which would skip to a required
   literal that is not a prefix.
-- Lazily compiled Unicode classes, or a compile memo keyed by pattern and
-  limits, to bring compile time for `\w`, `\d` and `\p{...}` down to
-  PCRE2's.
+- Compile time for `\w`, `\d` and `\p{...}`: the minimal class automata,
+  shared sets and copied blocks cut it by about half to three quarters,
+  but each copy of a large class still emits its hundreds of states, where
+  PCRE2 emits one opcode; a code-point-level class state is what brings it
+  to PCRE2's.
 - The invalid-UTF paths (`MatchInvalidUtf`, `NO_UTF_CHECK`) and the stdlib
   adapters with the 6.7 adapter matrix and the PCRE2 differential gate of
   ten million cases (R4).

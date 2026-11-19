@@ -57,10 +57,15 @@ module Mica::Regex
     # space, the start-state table and the two dead states) reserved from
     # *pool* before they are allocated, or nil when the pool cannot supply
     # them or they do not fit under its `max_cache_bytes`.
-    def self.reserve?(dfa : LazyDFA, pool : CachePool) : DFACache?
+    #
+    # *builder* is the scratch space the cache builds states in; a lease's
+    # forward and reverse caches share one (`SearchLease#builder`), as they
+    # never build at the same time. Each cache still reserves the scratch
+    # space as its own, so the pool's count stays an upper bound.
+    def self.reserve?(dfa : LazyDFA, pool : CachePool, builder : DFABuilder) : DFACache?
       reservation = CacheReservation.new(pool)
       return nil unless reservation.cover(initial_bytes(dfa), ceiling: pool.max_cache_bytes)
-      new(dfa, pool, reservation)
+      new(dfa, pool, reservation, builder)
     end
 
     # The bytes a new cache takes before its first state is built.
@@ -78,13 +83,12 @@ module Mica::Regex
       4_i64 * dfa.stride + 1 + 32 + 4_i64 * key_size + 48 + 8
     end
 
-    protected def initialize(@dfa : LazyDFA, @pool : CachePool, @reservation : CacheReservation)
+    protected def initialize(@dfa : LazyDFA, @pool : CachePool, @reservation : CacheReservation, @builder : DFABuilder)
       @transition_table = [] of Int32
       @list_of_marks = [] of UInt8
       @list_of_keys = [] of Array(Int32)
       @state_ids = {} of Array(Int32) => Int32
       @start_states = Array(Int32).new(LazyDFA::START_FLAG_COUNT, -1)
-      @builder = DFABuilder.new(@dfa.node_count)
       reset_states
     end
 
@@ -125,16 +129,10 @@ module Mica::Regex
       @retry_interval = Math.min(@retry_interval * 2, LAST_RETRY_INTERVAL)
     end
 
-    # Drops every state and gives the memory back to the pool (its lease
-    # is being evicted, see `SearchLease`).
+    # Gives every byte the cache reserved back to the pool. Its lease is
+    # being evicted and drops the cache (see `SearchLease`), so nothing is
+    # rebuilt: the lease reserves a new cache when it is next used.
     def evict : Nil
-      @thrashing = false
-      @retry_interval = FIRST_RETRY_INTERVAL
-      @transition_table = [] of Int32
-      @list_of_marks = [] of UInt8
-      @list_of_keys = [] of Array(Int32)
-      @state_ids = {} of Array(Int32) => Int32
-      reset_states
       @reservation.release_all
     end
 
@@ -266,6 +264,11 @@ module Mica::Regex
     def initialize(state_count : Int32)
       @visited_stamps = Array(UInt32).new(state_count, 0_u32)
       @target_stamps = Array(UInt32).new(state_count, 0_u32)
+    end
+
+    # The most NFA states (or reverse NFA nodes) a DFA built here may have.
+    def node_capacity : Int32
+      @visited_stamps.size
     end
 
     def reset : Nil

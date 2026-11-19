@@ -46,7 +46,7 @@ module Mica::Regex
         offset = node.offset
         meter.enforce { Core::Position.new(offset.to_i64) } if meter.charge(1)
         nullable = node_nullable?(node, list_of_nullable, child_count)
-        value = node_states(node, list_of_values, list_of_nullable, child_count, meter)
+        value = node_states(node, list_of_values, list_of_nullable, child_count, ledger, meter)
         child_count.times do
           list_of_values.pop
           list_of_nullable.pop
@@ -73,9 +73,21 @@ module Mica::Regex
 
     # Returns the class bound for *set*: byte ranges plus splits between
     # sequences, or 1 for an empty set.
-    def self.set_states(set : CodePointSet) : Int64
+    #
+    # A large set's bound is its memoized automaton's exact state count
+    # (`ClassMemo`), which the compiler emits; *ledger* and *meter* are
+    # charged when that automaton is built.
+    def self.set_states(set : CodePointSet, ledger : AllocationLedger, meter : Core::WorkMeter) : Int64
+      return ClassMemo.block_for(set, ledger, meter).list_of_states.size.to_i64 if ClassMemo.memoized?(set)
+      small_set_states(set)
+    end
+
+    # The bound for a set below `ClassMemo::MIN_RANGES` ranges.
+    private def self.small_set_states(set : CodePointSet) : Int64
       return 1_i64 if set.empty?
-      return ClassMemo.state_bound(set) { count_set_states(set) } if ClassMemo.memoized?(set)
+      if ClassMemo.memoized?(set)
+        raise ArgumentError.new("A set of #{set.range_count} ranges needs a ledger for its class bound")
+      end
       count_set_states(set)
     end
 
@@ -102,14 +114,14 @@ module Mica::Regex
           list_of_bounds << code_point << code_point
         end
       end
-      set_states(CodePointSet.from_bounds(list_of_bounds))
+      small_set_states(CodePointSet.from_bounds(list_of_bounds))
     end
 
     # The class bounds of `\N` (index 0) and of `.` matching newlines
     # (index 1), computed once per process.
     private ANY_CHARACTER_STATES = {
-      set_states(ClassLowering.any_character(false)),
-      set_states(ClassLowering.any_character(true)),
+      small_set_states(ClassLowering.any_character(false)),
+      small_set_states(ClassLowering.any_character(true)),
     }
 
     # The bounds of `\R` (index 0) and of `\R` under `(*BSR_ANYCRLF)`
@@ -122,12 +134,12 @@ module Mica::Regex
     # The bound for *node*, whose *child_count* children's bounds are on
     # top of *list_of_values*.
     private def self.node_states(node : Ast::Node, list_of_values : Array(Int64), list_of_nullable : Array(Bool),
-                                 child_count : Int32, meter : Core::WorkMeter) : Int64
+                                 child_count : Int32, ledger : AllocationLedger, meter : Core::WorkMeter) : Int64
       first_child = list_of_values.size - child_count
       case node
       when Ast::Literal
         if set = node.folded_set
-          set_states(set)
+          set_states(set, ledger, meter)
         else
           Utf8Sequences.encoded_length(node.code_point).to_i64
         end
@@ -136,7 +148,7 @@ module Mica::Regex
           Core::Position.new(node.offset.to_i64))
         offset = node.offset
         meter.enforce { Core::Position.new(offset.to_i64) } if meter.charge(set.range_count)
-        set_states(set)
+        set_states(set, ledger, meter)
       when Ast::AnyCharacter
         ANY_CHARACTER_STATES[node.matches_newline? ? 1 : 0]
       when Ast::LineBreak

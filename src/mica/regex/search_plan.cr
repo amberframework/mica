@@ -321,6 +321,7 @@ module Mica::Regex
     getter pool : CachePool
     @forward_cache : DFACache?
     @reverse_cache : DFACache?
+    @builder : DFABuilder?
     # The last haystack validated, held strongly: while it is held its
     # address cannot be reused by another string, so identity proves it is
     # the same (immutable) string. A searcher parked in the lease holds its
@@ -377,7 +378,7 @@ module Mica::Regex
     # The forward cache, made on first use; nil when the pool cannot supply
     # a new cache (the search then runs on the Pike VM).
     def forward_cache(dfa : LazyDFA) : DFACache?
-      @forward_cache ||= DFACache.reserve?(dfa, @pool)
+      @forward_cache ||= DFACache.reserve?(dfa, @pool, builder(dfa))
     end
 
     # The reverse cache, as `forward_cache`.
@@ -389,7 +390,18 @@ module Mica::Regex
         cache.evict
         cache = @reverse_cache = nil
       end
-      cache || (@reverse_cache = DFACache.reserve?(dfa, @pool))
+      cache || (@reverse_cache = DFACache.reserve?(dfa, @pool, builder(dfa)))
+    end
+
+    # The scratch space the caches build their states in: a search builds
+    # in one cache at a time, so the forward and the reverse cache share
+    # one, sized for the DFA with the most nodes (a reverse DFA that reads
+    # classes backward has more nodes than the program has states). A
+    # larger DFA gets a new builder; a cache made earlier keeps its own.
+    private def builder(dfa : LazyDFA) : DFABuilder
+      builder = @builder
+      return builder if builder && builder.node_capacity >= dfa.node_count
+      @builder = DFABuilder.new(dfa.node_count)
     end
 
     # True when *haystack* is the very `String` this lease validated last:
@@ -406,11 +418,16 @@ module Mica::Regex
       @plan.evict_if_idle(self)
     end
 
-    # Drops the caches' states and the kept Pike VM workspace, giving their
-    # bytes back to the pool. Runs only while the evictor holds the lease.
+    # Drops the caches (with their shared builder's scratch space) and the
+    # kept Pike VM workspace, giving their bytes back to the pool. Runs only
+    # while the evictor holds the lease; a cache is reserved afresh when the
+    # lease is next used.
     def evict : Nil
       @forward_cache.try(&.evict)
+      @forward_cache = nil
       @reverse_cache.try(&.evict)
+      @reverse_cache = nil
+      @builder = nil
       @pike.try(&.release)
     end
   end

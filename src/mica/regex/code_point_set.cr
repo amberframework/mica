@@ -34,8 +34,23 @@ module Mica::Regex
       new(bounds)
     end
 
+    # An FNV-1a digest of the bounds, computed once, so a set is a cheap
+    # hash key (`ClassMemo`).
+    getter digest : UInt64
+
+    # The number of code points in the set, counted once.
+    getter size : Int64
+
     # Wraps *list_of_bounds*; see `from_bounds`.
     def initialize(@list_of_bounds : Array(Int32))
+      digest = 14695981039346656037_u64
+      size = 0_i64
+      @list_of_bounds.each_with_index do |bound, index|
+        digest = (digest ^ bound.to_u32!) &* 1099511628211_u64
+        size += index.odd? ? bound.to_i64 + 1 : -bound.to_i64
+      end
+      @digest = digest
+      @size = size
     end
 
     # Returns the number of ranges.
@@ -75,13 +90,6 @@ module Mica::Regex
       range_count.times do |index|
         yield @list_of_bounds[index * 2], @list_of_bounds[index * 2 + 1]
       end
-    end
-
-    # Returns the number of code points in the set.
-    def size : Int64
-      total = 0_i64
-      each_range { |first, last| total += last - first + 1 }
-      total
     end
 
     def ==(other : CodePointSet) : Bool
