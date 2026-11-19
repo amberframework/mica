@@ -114,15 +114,25 @@ module Mica::Regex
     # Returns a searcher for one call of the default path over *haystack*:
     # the one the program's lease kept from an earlier call, started over,
     # or a new one. Pair it with `finish`.
+    # With *validated*, *haystack* is one an earlier call of the program
+    # validated (`Expression#read_groups`), and is not validated again.
     def self.open(program : Program, haystack : String, limits : SearchLimits, timeout : Time::Span?,
-                  cache_pool : CachePool) : Searcher
+                  cache_pool : CachePool, *, validated : Bool = false) : Searcher
       lease = program.plan.lease(cache_pool)
+      lease.remember_validated(haystack) if validated
       if searcher = lease.take_searcher
         searcher.resume(lease, haystack, limits, timeout)
         searcher
       else
         new(program, haystack, limits, timeout, Engine::Auto, cache_pool, lease)
       end
+    end
+
+    # True when this call should find matches without their groups and
+    # leave the groups to be read on first use (see
+    # `SearchPlan#defers_groups?`).
+    def defers_groups? : Bool
+      @engine.auto? && !!@plan.try(&.defers_groups?)
     end
 
     # Starts this (finished) searcher over for a new call on *lease*.
@@ -257,8 +267,21 @@ module Mica::Regex
       want_captures = captures && @program.slot_count > 2
       return nil unless find_span(bytes, byte_index, anchored, end_anchored, span, want_captures)
       return span unless want_captures
-      start = span[0].to_i32
-      finish = span[1].to_i32
+      capture_pass(bytes, byte_index, span[0].to_i32, span[1].to_i32, end_anchored)
+    end
+
+    # Returns the slots of the match *start*...*finish* that a search from
+    # *byte_index* found (see `GroupReader`): the capture pass alone.
+    def read_groups(byte_index : Int32, start : Int32, finish : Int32, options : MatchOptions) : Slice(Int64)
+      bytes = @haystack.to_slice
+      end_anchored = @program.options.end_anchored? || options.end_anchored?
+      capture_pass(bytes, byte_index, start, finish, end_anchored)
+    end
+
+    # Runs phase 2 over the span *start*...*finish* (see the type comment)
+    # and returns the capture slots.
+    private def capture_pass(bytes : Bytes, byte_index : Int32, start : Int32, finish : Int32,
+                             end_anchored : Bool) : Slice(Int64)
       slots = @capture_slots
       found = false
       if @engine.automata? && (one_pass = @program.plan.one_pass)
@@ -272,7 +295,7 @@ module Mica::Regex
                     Int32::MAX, true)
                 end
       end
-      unless found && slots[0] == span[0] && slots[1] == span[1]
+      unless found && slots[0] == start && slots[1] == finish
         raise Mica::Error.new("internal error: the capture pass did not find the span #{start}...#{finish}")
       end
       slots

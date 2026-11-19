@@ -82,13 +82,13 @@ module Mica::Regex
       return true if try_reserve(bytes)
       @mutex.synchronize do
         @list_of_members.reject! { |reference| reference.value.nil? }
-        list_of_idle_members = [] of PoolMember
+        list_of_candidates = [] of PoolMember
         @list_of_members.each do |reference|
           member = reference.value
-          list_of_idle_members << member if member && member.idle?
+          list_of_candidates << member if member
         end
-        list_of_idle_members.sort_by!(&.last_used_tick)
-        list_of_idle_members.each do |member|
+        list_of_candidates.sort_by!(&.last_used_tick)
+        list_of_candidates.each do |member|
           next unless member.evict_if_idle
           return true if try_reserve(bytes)
         end
@@ -117,9 +117,16 @@ module Mica::Regex
     end
 
     # :nodoc:
-    # The next tick of the pool clock (see `PoolMember#release_to_pool`).
+    # The next tick of the pool clock (see `PoolMember#note_use`).
+    #
+    # The clock advances with a relaxed load and store rather than an
+    # atomic add, which would cost a search more than the rest of its
+    # hand-back: two threads that hand back at once may share a tick, and
+    # then tie for eviction order. The ordering stays exact on one thread.
     def tick : Int64
-      @clock.add(1_i64) + 1
+      tick = @clock.get(:relaxed) &+ 1
+      @clock.set(tick, :relaxed)
+      tick
     end
 
     private def try_reserve(bytes : Int64) : Bool
@@ -136,51 +143,29 @@ module Mica::Regex
   # Memory a `CachePool` accounts for and may reclaim while no search holds
   # it: a `SearchLease`, with its lazy-DFA caches (`DFACache`) and the Pike
   # VM workspace (`PikeVM`) it keeps between calls.
-  # A member is BUSY while a search holds it, IDLE once handed back, and
-  # EVICTING while the pool drops its memory. An evicted member stays
-  # usable: it rebuilds what it needs, reserving again, when next used.
+  #
+  # Who holds a member is decided by where it sits, not by a flag of its
+  # own: an idle member waits in a slot its owner shares (a `SearchPlan`'s
+  # hot slot or idle list), and whoever takes it out of that slot (a search
+  # or the pool's evictor) holds it alone until it puts it back. A search
+  # therefore takes and returns a member with one atomic operation each.
+  # An evicted member stays usable: it rebuilds what it needs, reserving
+  # again, when next used.
   abstract class PoolMember
-    private IDLE     = 0
-    private BUSY     = 1
-    private EVICTING = 2
-
-    @use = Atomic(Int32).new(BUSY)
     @last_used_tick = Atomic(Int64).new(0_i64)
 
     # Drops the memory the member holds and gives its bytes back to the
-    # pool. Runs only while the member is EVICTING.
-    protected abstract def evict : Nil
+    # pool, when no search holds the member. Returns true when it did.
+    abstract def evict_if_idle : Bool
 
     # The pool tick of the member's last hand-back.
     def last_used_tick : Int64
-      @last_used_tick.get
+      @last_used_tick.get(:relaxed)
     end
 
-    # True when no search holds the member.
-    def idle? : Bool
-      @use.get == IDLE
-    end
-
-    # Takes the member for a search, waiting while the pool evicts it.
-    def acquire : Nil
-      until @use.compare_and_set(IDLE, BUSY)[1]
-        Fiber.yield
-      end
-    end
-
-    # Hands the member back at pool tick *tick*; the pool may now evict
-    # it.
-    def release_to_pool(tick : Int64) : Nil
-      @last_used_tick.set(tick)
-      @use.set(IDLE)
-    end
-
-    # Evicts the member when no search holds it. Returns true when it did.
-    def evict_if_idle : Bool
-      return false unless @use.compare_and_set(IDLE, EVICTING)[1]
-      evict
-      @use.set(IDLE)
-      true
+    # Records that the member was handed back at pool tick *tick*.
+    def note_use(tick : Int64) : Nil
+      @last_used_tick.set(tick, :relaxed)
     end
   end
 

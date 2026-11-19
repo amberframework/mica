@@ -30,17 +30,50 @@ module Mica::Regex
     # The byte index the search started from.
     getter byte_index : Int32
 
-    @slots : Slice(Int32)
+    # Group 0, held in the value itself, so a match of a pattern without
+    # groups allocates nothing.
+    @match_begin : Int32
+    @match_end : Int32
+    # Groups 1 to `group_size` as begin and end byte offsets (negative for
+    # a group that did not take part), in a buffer every copy of the match
+    # shares. They are read with the match, or, when `@reader` is set, on
+    # first use: each entry is `GROUP_UNREAD` until then.
+    @groups : Slice(Int32)
+    @reader : GroupReader?
 
     # Copies the first `2 * (group_size + 1)` entries of *slots* (byte
     # offsets, negative for a group that did not take part; a span-only
     # search fills only group 0).
     def initialize(@regex : Expression, @string : String, @byte_index : Int32, slots : Slice(Int64))
       @group_size = @regex.capture_count
-      count = (@group_size + 1) * 2
+      @match_begin = slots[0].to_i32
+      @match_end = slots[1].to_i32
+      @groups = MatchData.copy_groups(slots, @group_size)
+    end
+
+    # :nodoc:
+    # A match found without its groups; *reader* reads them when they are
+    # first asked for.
+    def initialize(@regex : Expression, @string : String, @byte_index : Int32, @match_begin : Int32,
+                   @match_end : Int32, reader : GroupReader)
+      @group_size = @regex.capture_count
+      @groups = Slice(Int32).new(@group_size * 2, GROUP_UNREAD)
+      @reader = reader
+    end
+
+    # :nodoc:
+    # Marks a group offset not read yet.
+    GROUP_UNREAD = Int32::MIN
+
+    # :nodoc:
+    # Groups 1 to *group_size* of *slots* (`Slice(Int32).empty` when there
+    # are none, which allocates nothing).
+    def self.copy_groups(slots : Slice(Int64), group_size : Int32) : Slice(Int32)
+      return Slice(Int32).empty if group_size == 0
+      count = group_size * 2
       copied = Slice(Int32).new(count, -1)
-      Math.min(count, slots.size).times { |index| copied[index] = slots[index].to_i32 }
-      @slots = copied
+      Math.min(count, slots.size - 2).times { |index| copied[index] = slots[index + 2].to_i32 }
+      copied
     end
 
     # Returns the number of groups, group 0 included.
@@ -197,18 +230,45 @@ module Mica::Regex
     end
 
     def ==(other : MatchData) : Bool
-      size == other.size && @regex == other.regex && @string == other.string && slots == other.slots
+      size == other.size && @regex == other.regex && @string == other.string &&
+        @match_begin == other.match_begin && @match_end == other.match_end && groups == other.groups
     end
 
     def hash(hasher)
       hasher = @regex.hash(hasher)
       hasher = @string.hash(hasher)
-      @slots.hash(hasher)
+      hasher = @match_begin.hash(hasher)
+      hasher = @match_end.hash(hasher)
+      groups.hash(hasher)
     end
 
     # :nodoc:
-    protected def slots : Slice(Int32)
-      @slots
+    protected def match_begin : Int32
+      @match_begin
+    end
+
+    # :nodoc:
+    protected def match_end : Int32
+      @match_end
+    end
+
+    # :nodoc:
+    # Groups 1 to `group_size` (begin and end pairs), read now if they are
+    # still pending.
+    protected def groups : Slice(Int32)
+      read_groups if @reader && @groups.includes?(GROUP_UNREAD)
+      @groups
+    end
+
+    # Reads the groups into the shared buffer. Every entry is one aligned
+    # 32-bit store of the same value whichever fiber stores it, so a reader
+    # that sees an entry other than `GROUP_UNREAD` sees its final value, and
+    # one that sees `GROUP_UNREAD` reads the groups itself.
+    private def read_groups : Nil
+      reader = @reader || return
+      found = @regex.read_groups(@string, @byte_index, @match_begin, @match_end, reader.options, reader.limits,
+        reader.timeout)
+      @groups.size.times { |index| @groups[index] = found[index + 2].to_i32 }
     end
 
     private def character_index(byte_index : Int32) : Int32
@@ -218,8 +278,18 @@ module Mica::Regex
 
     private def byte_range(n : Int, &)
       n += size if n < 0
-      first = @slots[n * 2]
-      last = @slots[n * 2 + 1]
+      if n == 0
+        first = @match_begin
+        last = @match_end
+      else
+        first = @groups[n * 2 - 2]
+        last = @groups[n * 2 - 1]
+        if first == GROUP_UNREAD || last == GROUP_UNREAD
+          read_groups
+          first = @groups[n * 2 - 2]
+          last = @groups[n * 2 - 1]
+        end
+      end
       if first < 0 || last < 0
         yield n
       else
@@ -277,4 +347,16 @@ module Mica::Regex
       raise IndexError.new("Capture group #{index} was not matched")
     end
   end
+end
+
+module Mica::Regex
+  # :nodoc:
+  # What reading the groups of a match found without them takes (see
+  # `Expression#match_at_byte_index`): the limits, timeout and options of
+  # the call that found it. Reading them is a capture pass over the match
+  # alone, anchored at its start and cut at its end, under those limits (a
+  # fresh allowance and, with a timeout, a fresh deadline): O(L + c) on the
+  # one-pass DFA, O(m·(L + 1) + c) on the backtracker, O(m·c·(L + 1)) on the
+  # Pike VM, for a match of L bytes.
+  record GroupReader, limits : SearchLimits, timeout : Time::Span?, options : MatchOptions
 end

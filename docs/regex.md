@@ -413,7 +413,36 @@ are immutable), so separate calls over one haystack, as `String#scan` and
 `gsub` make through `match_at_byte_index`, validate it once. It holds
 that string (as the parked searcher does), so its address cannot be
 reused while identity is compared. The lease is the `CachePool` member, so taking it and
-handing it back is one atomic state change each.
+handing it back is one atomic operation each (see "Short searches").
+
+## Short searches
+
+Many searches read a short haystack (a route segment, a form field, one
+log line) or find a short match, so the fixed cost of a call matters as
+much as the cost per byte:
+
+- **One atomic each way.** A call takes its program's hot lease with one
+  atomic exchange and puts it back with one compare-and-set. Who holds a
+  lease is decided by where it sits: in the hot slot or the idle list it is
+  idle, and whoever takes it out (a search, or the pool evicting it) holds
+  it alone. The pool's least-recently-used clock advances with a relaxed
+  load and store, so two threads that hand back at once may tie.
+- **No allocation for group 0.** `MatchData` holds the match's span in the
+  value itself; a pattern without groups allocates nothing per call. The
+  work budget of a repeated call reuses the one the searcher built last.
+- **Groups read on first use.** When only the bounded backtracker or the
+  Pike VM can read a pattern's groups (the pattern is not one-pass),
+  `match`, `match_at_byte_index` and `search` find the span alone and leave
+  the groups to be read the first time one is asked for: a capture pass
+  over the match alone, anchored at its start, cut at its end, searched
+  from the original offset (so look-behind and `\b` see the same bytes),
+  under the limits and timeout of the call that found it. The groups are
+  stored once in a buffer every copy of the `MatchData` shares. A caller
+  that only asks whether and where a validator matched never pays for
+  them. When the one-pass DFA can read the groups (O(L)), they are read
+  with the match. The iteration methods (`each_match`, `scan`, `gsub`,
+  `sub`, `split`) read groups with each match through the call's own
+  searcher.
 
 ## Lazy DFA
 

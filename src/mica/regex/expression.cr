@@ -104,11 +104,38 @@ module Mica::Regex
     # Returns the first match in *string* at or after byte *byte_index*, or
     # nil (also when *byte_index* is past the end). Raises `ArgumentError`
     # when *byte_index* is negative or inside a character.
+    #
+    # When the pattern's groups need more than the one-pass DFA to read
+    # (see `SearchPlan#defers_groups?`), the match is found without them
+    # and the groups are read the first time they are asked for: a capture
+    # pass over the match alone, under *limits* and *timeout* again (see
+    # `GroupReader`). A caller that only asks whether and where it
+    # matched never pays for them.
     def match_at_byte_index(string : String, byte_index : Int32 = 0, options : MatchOptions = MatchOptions::None, *,
                             limits : SearchLimits, timeout : Time::Span? = nil) : MatchData?
       searcher = Searcher.open(@program, string, limits, timeout, @cache_pool)
-      found = searcher.find(byte_index, options, true)
-      found ? MatchData.new(self, string, byte_index, found) : nil
+      if searcher.defers_groups?
+        found = searcher.find(byte_index, options, false)
+        return nil unless found
+        reader = GroupReader.new(limits, timeout, options)
+        MatchData.new(self, string, byte_index, found[0].to_i32, found[1].to_i32, reader)
+      else
+        found = searcher.find(byte_index, options, true)
+        found ? MatchData.new(self, string, byte_index, found) : nil
+      end
+    ensure
+      searcher.try(&.finish)
+    end
+
+    # :nodoc:
+    # The slots of the match *match_begin*...*match_end* that a search of
+    # *string* from *byte_index* found, read by a capture pass over the
+    # match alone (see `GroupReader`). *string* was validated by that
+    # search, so it is not validated again.
+    def read_groups(string : String, byte_index : Int32, match_begin : Int32, match_end : Int32,
+                    options : MatchOptions, limits : SearchLimits, timeout : Time::Span?) : Slice(Int64)
+      searcher = Searcher.open(@program, string, limits, timeout, @cache_pool, validated: true)
+      searcher.read_groups(byte_index, match_begin, match_end, options)
     ensure
       searcher.try(&.finish)
     end

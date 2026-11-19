@@ -110,32 +110,57 @@ module Mica::Regex
       @one_pass.get
     end
 
+    # True when a single search should leave the groups of its match to be
+    # read on first use (`GroupReader`): the program has groups and the
+    # one-pass DFA cannot read them, so reading them means the bounded
+    # backtracker or the Pike VM. When the one-pass DFA can, its O(L) pass
+    # costs less than a later call would, and the groups are read with the
+    # match.
+    def defers_groups? : Bool
+      @program.slot_count > 2 && one_pass.nil?
+    end
+
     # Takes an idle lease (its caches warm from earlier searches) or makes
-    # a new one for *pool*.
+    # a new one for *pool*. Taking the lease out of the hot slot or the idle
+    # list is what makes the caller its only holder (see `PoolMember`).
     def lease(pool : CachePool) : SearchLease
-      lease = @hot_lease.swap(nil) || @mutex.synchronize { @list_of_idle_leases.pop? }
-      if lease && lease.pool.same?(pool)
-        lease.acquire
-        return lease
-      end
+      lease = @hot_lease.swap(nil, :acquire) || @mutex.synchronize { @list_of_idle_leases.pop? }
+      return lease if lease && lease.pool.same?(pool)
       SearchLease.new(self, pool)
     end
 
     # Returns *lease* for a later search to reuse. At most `MAX_IDLE_LEASES`
     # are kept per program.
-    # The lease is handed to the pool (idle, evictable) before it is
-    # published as the hot lease; one that goes to the idle list instead
-    # drops its workspaces first, taken back from the pool meanwhile.
+    # The hot slot takes the lease as it is, workspaces and all; one that
+    # goes to the idle list instead drops its workspaces first.
     def give_back(lease : SearchLease) : Nil
-      tick = lease.pool.tick
-      lease.release_to_pool(tick)
-      return if @hot_lease.compare_and_set(nil, lease)[1]
-      lease.acquire
+      lease.note_use(lease.pool.tick)
+      return if @hot_lease.compare_and_set(nil, lease, :release, :relaxed)[1]
       lease.drop_workspaces
-      lease.release_to_pool(tick)
-      @mutex.synchronize do
+      kept = @mutex.synchronize do
         @list_of_idle_leases << lease if @list_of_idle_leases.size < MAX_IDLE_LEASES
       end
+      # A lease no slot keeps can no longer be evicted, so it gives its
+      # bytes back now.
+      lease.evict unless kept
+    end
+
+    # :nodoc:
+    # Evicts *lease* when it is idle here: taken out of the hot slot (and
+    # put back after), or evicted where it waits in the idle list, under
+    # the mutex every taker of the list holds. Returns false when a search
+    # holds it.
+    def evict_if_idle(lease : SearchLease) : Bool
+      if @hot_lease.compare_and_set(lease, nil, :acquire, :relaxed)[1]
+        lease.evict
+        give_back(lease)
+        return true
+      end
+      @mutex.synchronize do
+        return false unless @list_of_idle_leases.any?(&.same?(lease))
+        lease.evict
+      end
+      true
     end
 
     # Idle leases kept per program.
@@ -149,9 +174,10 @@ module Mica::Regex
   # so a program retains at most one set), and the last haystack the lease
   # validated.
   #
-  # The lease is the `CachePool` member: a search holds it BUSY (one
-  # atomic exchange to take it, one store to hand it back), and the pool
-  # evicts an idle lease's caches and kept Pike VM workspace together.
+  # The lease is the `CachePool` member: a search holds it from taking it
+  # out of the plan's hot slot (one atomic exchange) to putting it back
+  # (one compare-and-set), and the pool evicts an idle lease's caches and
+  # kept Pike VM workspace together.
   class SearchLease < PoolMember
     getter pool : CachePool
     @forward_cache : DFACache?
@@ -230,9 +256,13 @@ module Mica::Regex
       @validated = haystack
     end
 
+    def evict_if_idle : Bool
+      @plan.evict_if_idle(self)
+    end
+
     # Drops the caches' states and the kept Pike VM workspace, giving their
-    # bytes back to the pool. Runs only while the lease is idle and EVICTING.
-    protected def evict : Nil
+    # bytes back to the pool. Runs only while the evictor holds the lease.
+    def evict : Nil
       @forward_cache.try(&.evict)
       @reverse_cache.try(&.evict)
       @pike.try(&.release)

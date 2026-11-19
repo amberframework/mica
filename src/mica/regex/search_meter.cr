@@ -12,14 +12,28 @@ module Mica::Regex
     # The underlying meter (its `operations` are the work charged so far).
     getter work_meter : Core::WorkMeter
 
+    # The limits and state count `@budget` was made for: a restart under
+    # the same ones reuses it instead of building it again.
+    @budget_limits : SearchLimits
+    @budget_state_count : Int32
+    @budget : Core::WorkBudget
+
     def initialize(limits : SearchLimits, state_count : Int32, haystack_bytes : Int32, timeout : Time::Span?)
-      @work_meter = Core::WorkMeter.new(limits.work_budget(state_count, timeout))
+      @budget_limits = limits
+      @budget_state_count = state_count
+      @budget = limits.work_budget(state_count, timeout)
+      @work_meter = Core::WorkMeter.new(@budget)
       @work_meter.add_units(haystack_bytes)
     end
 
     # Starts the meter over for a new call (see `Core::WorkMeter#restart`).
     def restart(limits : SearchLimits, state_count : Int32, haystack_bytes : Int32, timeout : Time::Span?) : Nil
-      @work_meter.restart(limits.work_budget(state_count, timeout))
+      unless limits == @budget_limits && state_count == @budget_state_count && timeout == @budget.timeout
+        @budget_limits = limits
+        @budget_state_count = state_count
+        @budget = limits.work_budget(state_count, timeout)
+      end
+      @work_meter.restart(@budget)
       @work_meter.add_units(haystack_bytes)
     end
 
