@@ -89,7 +89,11 @@ module Mica::Regex
     def initialize(@meter : Core::WorkMeter)
     end
 
-    def sequence(node : Hir::Node, depth : Int32) : Array(LiteralEntry)?
+    # *limit* is the most entries the caller can use: an alternation gives
+    # each branch what is left of `LiteralSet::MAX_LITERALS`, and a branch
+    # whose entries already pass it returns nil early, as the alternation
+    # would after building them all (a concatenation's entries only grow).
+    def sequence(node : Hir::Node, depth : Int32, limit : Int32 = Int32::MAX) : Array(LiteralEntry)?
       @meter.charge(1)
       return nil if depth > LiteralSet::MAX_DEPTH
       if node.is_a?(Hir::Empty)
@@ -102,11 +106,11 @@ module Mica::Regex
       elsif node.is_a?(Hir::Class)
         class_sequence(node.code_point_set)
       elsif node.is_a?(Hir::Capture)
-        sequence(node.child, depth + 1)
+        sequence(node.child, depth + 1, limit)
       elsif node.is_a?(Hir::Repetition)
         repetition_sequence(node, depth)
       elsif node.is_a?(Hir::Concatenation)
-        concatenation_sequence(node.list_of_children, depth)
+        concatenation_sequence(node.list_of_children, depth, limit)
       elsif node.is_a?(Hir::Alternation)
         alternation_sequence(node.list_of_branches, depth)
       else
@@ -141,7 +145,8 @@ module Mica::Regex
       end
     end
 
-    private def concatenation_sequence(list_of_children : Array(Hir::Node), depth : Int32) : Array(LiteralEntry)?
+    private def concatenation_sequence(list_of_children : Array(Hir::Node), depth : Int32,
+                                       limit : Int32) : Array(LiteralEntry)?
       result = [LiteralEntry.new(Bytes.empty, true)]
       index = 0
       while index < list_of_children.size
@@ -158,6 +163,7 @@ module Mica::Regex
         return inexact(result) unless child_sequence
         crossed = cross(result, child_sequence)
         return inexact(result) unless crossed
+        return nil if crossed.size > limit
         result = crossed
       end
       result
@@ -188,8 +194,10 @@ module Mica::Regex
 
     private def alternation_sequence(list_of_branches : Array(Hir::Node), depth : Int32) : Array(LiteralEntry)?
       result = [] of LiteralEntry
-      list_of_branches.each do |branch|
-        branch_sequence = sequence(branch, depth + 1)
+      list_of_branches.each_with_index do |branch, index|
+        # Every later branch adds at least one entry.
+        limit = LiteralSet::MAX_LITERALS - result.size - (list_of_branches.size - 1 - index)
+        branch_sequence = sequence(branch, depth + 1, limit)
         return nil unless branch_sequence
         result.concat(branch_sequence)
         return nil if result.size > LiteralSet::MAX_LITERALS

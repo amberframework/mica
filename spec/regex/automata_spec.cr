@@ -148,6 +148,16 @@ describe "Mica::Regex R3 engines" do
       folded.list_of_literals.map { |literal| String.new(literal) }.should eq(["AB", "Ab", "aB", "ab"])
     end
 
+    it_satisfies "REGEX-R3-accelerators", "gives an alternation no set once its branches cannot fit, and every fitting one" do
+      program("(?i)sherlock holmes|john watson").literal_set.should be_nil
+      fitting = program("(?i)ab|cd").literal_set.should_not be_nil
+      fitting.list_of_literals.size.should eq(8)
+      # 32 entries and 2 fit; 64 and 2 do not.
+      program("(?i)(abcde)|z").literal_set.try(&.list_of_literals.size).should eq(34)
+      program("(?i)(abcdef)|z").literal_set.should be_nil
+      program("(?i)z|(abcdef)").literal_set.should be_nil
+    end
+
     it_satisfies "REGEX-R3-accelerators", "keeps each literal once, first occurrence first, in short and long sets" do
       short = program("ab|cd|ab|ef").literal_set.should_not be_nil
       short.list_of_literals.map { |literal| String.new(literal) }.should eq(["ab", "cd", "ef"])
