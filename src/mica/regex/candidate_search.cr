@@ -125,6 +125,7 @@ module Mica::Regex
     # Tries each position whose byte can start a match (`StartFilter`).
     private def run_at_start_bytes(one_pass : OnePassDFA, filter : StartFilter, bytes : Bytes, slots : Slice(Int64),
                                    scratch : Slice(Int64)) : Int32
+      filter.prepare_second_bytes(@program)
       last = bytes.size - filter.minimum_bytes
       at = @byte_index
       while at <= last

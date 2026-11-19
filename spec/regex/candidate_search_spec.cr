@@ -62,6 +62,15 @@ private def candidate_answer(pattern : Mica::Regex::Expression, haystack : Strin
   {finish, search.spent}
 end
 
+# The start filter of *source* with its second bytes collected, as a
+# candidate search collects them.
+private def prepared_filter(source : String) : Mica::Regex::StartFilter
+  program = planned_expression(source).program
+  filter = program.plan.start_filter
+  filter.prepare_second_bytes(program)
+  filter
+end
+
 private def bytes_allocated(&) : Int64
   before = GC.stats.total_bytes
   yield
@@ -86,13 +95,13 @@ describe "Mica::Regex candidate searches" do
   end
 
   it_satisfies "REGEX-R3-short-search", "tries only positions whose next byte a match can have second" do
-    camel = planned_expression("([a-z\\d])([A-Z])").program.plan.start_filter
+    camel = prepared_filter("([a-z\\d])([A-Z])")
     camel.second?('A'.ord.to_u8).should be_true
     camel.second?('b'.ord.to_u8).should be_false
-    pixels = planned_expression("\\d+px").program.plan.start_filter
+    pixels = prepared_filter("\\d+px")
     {pixels.second?('7'.ord.to_u8), pixels.second?('p'.ord.to_u8), pixels.second?('x'.ord.to_u8)}.should eq({true, true, false})
     # A match can be one byte long, so every byte may follow.
-    short = planned_expression("a|bc").program.plan.start_filter
+    short = prepared_filter("a|bc")
     short.second?('z'.ord.to_u8).should be_true
   end
 
