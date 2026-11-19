@@ -134,7 +134,9 @@ module Mica::Regex
     # returns `LazyDFA::GAVE_UP` there.
     def search(haystack : Bytes, start : Int32, search_start : Int32, slots : Slice(Int64), scratch : Slice(Int64),
                meter : SearchMeter?, stop : Int32 = Int32::MAX) : {Int32, Int32}
-      scratch.fill(PikeVM::UNSET)
+      # Slot counts are small: plain loops beat the `memset` and `memcpy`
+      # calls of `fill` and `copy_from`.
+      scratch.size.times { |index| scratch.unsafe_put(index, PikeVM::UNSET) }
       at = start
       charged = start
       size = haystack.size
@@ -156,7 +158,7 @@ module Mica::Regex
         if reaches_match || (at >= size && @match_edges.unsafe_fetch(row // @class_count) >= 0)
           edge = edges[@match_edges.unsafe_fetch(row // @class_count)]
           if holds?(edge, haystack, at, search_start)
-            slots.copy_from(scratch.to_unsafe, slots.size)
+            slots.size.times { |index| slots.unsafe_put(index, scratch.unsafe_fetch(index)) }
             write(edge, at, slots)
             found = at
             undecided = false

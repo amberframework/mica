@@ -27,6 +27,9 @@ module Mica::Regex
     getter list_of_required_bytes = [] of UInt8
     # One bit per byte value that can start a non-empty match.
     @start_bytes = StaticArray(UInt64, 4).new(0_u64)
+    # The same bits one byte per value, for scans that test every byte
+    # (`starts?`): one load and no shift.
+    @start_table = StaticArray(Bool, 256).new(false)
 
     # The most single-byte states `required_byte` considers.
     private MAX_REQUIRED_CANDIDATES = 8
@@ -41,6 +44,7 @@ module Mica::Regex
       return unless @minimum_bytes > 0
       collect_start_bytes(program)
       @list_of_required_bytes = program.list_of_required_bytes
+      256.times { |byte| @start_table[byte] = @start_bytes[byte >> 6] & (1_u64 << (byte & 63)) != 0 }
       list_of_start_bytes = (0..255).select { |byte| starts?(byte.to_u8) }
       @single_start = list_of_start_bytes.first if list_of_start_bytes.size == 1
     end
@@ -166,8 +170,10 @@ module Mica::Regex
       list_of_pending << target
     end
 
-    private def starts?(byte : UInt8) : Bool
-      @start_bytes.unsafe_fetch(byte >> 6) & (1_u64 << (byte & 63)) != 0
+    # True when a non-empty match can start with *byte*.
+    @[AlwaysInline]
+    def starts?(byte : UInt8) : Bool
+      @start_table.unsafe_fetch(byte)
     end
 
     # The fewest bytes on any path from the start state to the match state:

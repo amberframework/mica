@@ -81,9 +81,25 @@ module Mica::Regex
         bits &= bits - 1
         literal = @literals.unsafe_fetch(index)
         meter.charge(literal.size, at)
-        return index if at + literal.size <= haystack.size && haystack[at, literal.size] == literal
+        return index if Prefilter.literal_fits_at?(haystack, at, literal)
       end
       -1
+    end
+
+    # True when *literal* occurs in *haystack* at *at*. Literals are short
+    # (see `LiteralSet`), so a byte loop beats a `memcmp` call; the first
+    # byte is already known to match, and a one-byte literal needs no
+    # compare.
+    @[AlwaysInline]
+    protected def self.literal_fits_at?(haystack : Bytes, at : Int32, literal : Bytes) : Bool
+      size = literal.size
+      return false if at + size > haystack.size
+      index = 1
+      while index < size
+        return false unless haystack.unsafe_fetch(at + index) == literal.unsafe_fetch(index)
+        index += 1
+      end
+      true
     end
 
     # :nodoc:
@@ -221,24 +237,28 @@ module Mica::Regex
     # each is read (`SearchMeter#readable`), so a search over budget stops
     # before the first byte it cannot pay for.
     private def next_needle(slot : Int32, needle : UInt8, from : Int32, meter : SearchMeter) : Int32
-      found_at = @found_at[slot]
-      return found_at if from >= @scanned_from[slot] && found_at >= from
-      return Int32::MAX if from >= @haystack.size
-      index = nil
+      found_at = @found_at.unsafe_fetch(slot)
+      return found_at if from >= @scanned_from.unsafe_fetch(slot) && found_at >= from
+      size = @haystack.size
+      return Int32::MAX if from >= size
+      index = Int32::MAX
       at = from
-      while at < @haystack.size
-        stop = at + meter.readable(Math.min(CHARGE_CHUNK, @haystack.size - at), at)
-        if found = @haystack[at, stop - at].index(needle)
-          index = at + found
-          meter.charge(found + 1, at)
+      bytes = @haystack.to_unsafe
+      while at < size
+        window = meter.readable(Math.min(CHARGE_CHUNK, size - at), at)
+        found = LibC.memchr(bytes + at, needle.to_i32, window)
+        unless found.null?
+          offset = (found.as(UInt8*) - (bytes + at)).to_i32
+          index = at + offset
+          meter.charge(offset + 1, at)
           break
         end
-        meter.charge(stop - at, at)
-        at = stop
+        meter.charge(window, at)
+        at += window
       end
-      meter.charge(1, @haystack.size) unless index
+      meter.charge(1, size) if index == Int32::MAX
       @scanned_from[slot] = from
-      @found_at[slot] = index || Int32::MAX
+      @found_at[slot] = index
     end
 
     # The packed search, charging each byte it reads once, at each

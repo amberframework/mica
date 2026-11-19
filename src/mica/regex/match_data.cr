@@ -35,11 +35,19 @@ module Mica::Regex
     @match_begin : Int32
     @match_end : Int32
     # Groups 1 to `group_size` as begin and end byte offsets (negative for
-    # a group that did not take part), in a buffer every copy of the match
-    # shares. They are read with the match, or, when `@reader` is set, on
-    # first use: each entry is `GROUP_UNREAD` until then.
+    # a group that did not take part). A match read with its groups keeps
+    # up to `INLINE_GROUP_SLOTS` offsets in the value itself (`@inline_groups`),
+    # so a match of up to four groups allocates nothing; more go in
+    # `@groups`. A match whose groups are read on first use (`@reader` set)
+    # keeps them in `@groups`, a buffer every copy of the match shares: each
+    # entry is `GROUP_UNREAD` until then.
+    @inline_groups : StaticArray(Int32, INLINE_GROUP_SLOTS)
     @groups : Slice(Int32)
     @reader : GroupReader?
+
+    # :nodoc:
+    # The group offsets a match keeps in the value itself.
+    INLINE_GROUP_SLOTS = 8
 
     # Copies the first `2 * (group_size + 1)` entries of *slots* (byte
     # offsets, negative for a group that did not take part; a span-only
@@ -48,7 +56,17 @@ module Mica::Regex
       @group_size = @regex.capture_count
       @match_begin = slots[0].to_i32
       @match_end = slots[1].to_i32
-      @groups = MatchData.copy_groups(slots, @group_size)
+      @inline_groups = uninitialized StaticArray(Int32, INLINE_GROUP_SLOTS)
+      count = @group_size * 2
+      if count <= INLINE_GROUP_SLOTS
+        @groups = Slice(Int32).empty
+        available = Math.min(count, slots.size - 2)
+        count.times do |index|
+          @inline_groups[index] = index < available ? slots.unsafe_fetch(index + 2).to_i32 : -1
+        end
+      else
+        @groups = MatchData.copy_groups(slots, @group_size)
+      end
     end
 
     # :nodoc:
@@ -57,6 +75,7 @@ module Mica::Regex
     def initialize(@regex : Expression, @string : String, @byte_index : Int32, @match_begin : Int32,
                    @match_end : Int32, reader : GroupReader)
       @group_size = @regex.capture_count
+      @inline_groups = uninitialized StaticArray(Int32, INLINE_GROUP_SLOTS)
       @groups = Slice(Int32).new(@group_size * 2, GROUP_UNREAD)
       @reader = reader
     end
@@ -233,7 +252,12 @@ module Mica::Regex
 
     def ==(other : MatchData) : Bool
       size == other.size && @regex == other.regex && @string == other.string &&
-        @match_begin == other.match_begin && @match_end == other.match_end && groups == other.groups
+        @match_begin == other.match_begin && @match_end == other.match_end && same_groups?(other)
+    end
+
+    private def same_groups?(other : MatchData) : Bool
+      (@group_size * 2).times { |index| return false unless group_offset(index) == other.group_offset(index) }
+      true
     end
 
     def hash(hasher)
@@ -241,7 +265,8 @@ module Mica::Regex
       hasher = @string.hash(hasher)
       hasher = @match_begin.hash(hasher)
       hasher = @match_end.hash(hasher)
-      groups.hash(hasher)
+      (@group_size * 2).times { |index| hasher = group_offset(index).hash(hasher) }
+      hasher
     end
 
     # :nodoc:
@@ -255,11 +280,16 @@ module Mica::Regex
     end
 
     # :nodoc:
-    # Groups 1 to `group_size` (begin and end pairs), read now if they are
-    # still pending.
-    protected def groups : Slice(Int32)
-      read_groups if @reader && @groups.includes?(GROUP_UNREAD)
-      @groups
+    # Entry *index* of groups 1 to `group_size` (begin and end pairs), read
+    # now if it is still pending.
+    protected def group_offset(index : Int32) : Int32
+      return @inline_groups[index] if @groups.empty?
+      offset = @groups[index]
+      if offset == GROUP_UNREAD
+        read_groups
+        offset = @groups[index]
+      end
+      offset
     end
 
     # Reads the groups into the shared buffer. Every entry is one aligned
@@ -285,13 +315,8 @@ module Mica::Regex
         first = @match_begin
         last = @match_end
       else
-        first = @groups[n * 2 - 2]
-        last = @groups[n * 2 - 1]
-        if first == GROUP_UNREAD || last == GROUP_UNREAD
-          read_groups
-          first = @groups[n * 2 - 2]
-          last = @groups[n * 2 - 1]
-        end
+        first = group_offset(n * 2 - 2)
+        last = group_offset(n * 2 - 1)
       end
       if first < 0 || last < 0
         yield n

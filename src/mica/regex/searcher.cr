@@ -242,7 +242,9 @@ module Mica::Regex
       # search too short to reach a clock checkpoint.
       @meter.enforce_deadline(0)
       lease = @lease
-      unless lease && lease.validated?(@haystack)
+      if lease && lease.validated?(@haystack)
+        @plan.try(&.remember_short_validated(@haystack))
+      else
         # Validation reads every byte once: one operation per byte. A lease
         # remembers the last `String` it validated, so an iteration of
         # separate calls over one haystack validates it once.
@@ -252,6 +254,7 @@ module Mica::Regex
           raise Mica::EncodingError.new("The haystack is not valid UTF-8", Core::Position.new(offset.to_i64))
         end
         lease.try(&.remember_validated(@haystack))
+        @plan.try(&.remember_short_validated(@haystack))
       end
     end
 

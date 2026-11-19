@@ -29,7 +29,12 @@
 #   stopping at the first match) and on the R2 path (the Pike VM);
 # - iteration as `String#scan` does it, one searcher for the whole call
 #   (so later searches start inside the haystack, reuse the prefilter's
-#   progress and the warm DFA caches), default path against R2's.
+#   progress and the warm DFA caches), default path against R2's;
+# - iteration by separate `match_at_byte_index` calls over generated
+#   haystacks longer than a short search reads (`LONG_HAYSTACKS` per
+#   pattern), so the calls take the candidate search (`CandidateSearch`)
+#   once the plan has validated the haystack, each call against R2's
+#   two-phase search from the same offset.
 #
 # Every path must report the same match (span and captures) for every
 # case. Shared by spec/regex/engine_differential_spec.cr and
@@ -46,6 +51,10 @@ module EngineDifferential
            "\\W", "\\s", "\\R", "\\N", "(?i:A)", "[[:alpha:]]", "\\p{L}", "ab", "bé", "(?:aa|ba|é\\n)", "(?i:ab)",
            "[[:<:]]", "[[:>:]]", "(?aW:\\b)", "(?aW:\\B)", "(?aW:[[:<:]])", "(?aW:[[:>:]])", "(?aW:\\w)",
            "[[:<:]]*", "[[:>:]]+", "[[:<:]]?", "[[:>:]]{0,2}", "[[:<:]]*?", "(?aW:[[:<:]]?)", "(?aW:[[:>:]]*)"]
+  # Long haystacks per pattern, and their length range in characters.
+  LONG_HAYSTACKS    = 2
+  LONG_LENGTH_RANGE = 260..420
+
   QUANTIFIERS = ["*", "+", "?", "*?", "+?", "??", "{2}", "{0,2}", "{1,3}?", "{2,}", "{0,}?"]
   FLAGS       = ["", "", "", "", "(?m)", "(?s)", "(?i)", "(?ms)", "(?U)"]
 
@@ -110,6 +119,12 @@ module EngineDifferential
         disagreements << "#{seed}:#{index} #{source.inspect} on #{haystack.inspect}: #{problem}" if problem
         break if disagreements.size >= 100
       end
+      LONG_HAYSTACKS.times do
+        haystack = long_haystack(random)
+        calls, problem = check_calls(expression, haystack)
+        cases += calls
+        disagreements << "#{seed}:#{index} #{source.inspect} on long #{haystack.inspect}: #{problem}" if problem
+      end
     end
     Report.new(count, refused, cases, disagreements)
   end
@@ -156,6 +171,35 @@ module EngineDifferential
     check_each_start(program, haystack, two_phase, iterated_two_phase)
   end
 
+  # A random string over ALPHABET longer than a short search reads.
+  def self.long_haystack(random : Random) : String
+    String.build do |io|
+      random.rand(LONG_LENGTH_RANGE).times { io << ALPHABET.sample(random) }
+    end
+  end
+
+  # Iterates over *haystack* by separate `match_at_byte_index` calls, as
+  # `String#scan` does, checking each against R2's two-phase search from
+  # the same offset. Returns the calls made and the first disagreement.
+  def self.check_calls(expression : Mica::Regex::Expression, haystack : String) : {Int64, String?}
+    program = expression.program
+    calls = 0_i64
+    offset = 0
+    while offset <= haystack.bytesize
+      calls += 1
+      public_match = public_slots(expression, haystack, offset)
+      searcher = Mica::Regex::Searcher.new(program, haystack, SEARCH_LIMITS, nil, Mica::Regex::Engine::TwoPhase)
+      two_phase = searcher.find(offset, Mica::Regex::MatchOptions::None, true).try(&.to_a)
+      searcher.finish
+      return {calls, "call at #{offset}: #{public_match} vs two-phase #{two_phase}"} unless public_match == two_phase
+      break unless two_phase
+      first = two_phase[0].to_i32
+      last = two_phase[1].to_i32
+      offset = last > first ? last : first + (first < haystack.bytesize ? Char::Reader.new(haystack, first).current_char.bytesize : 1)
+    end
+    {calls, nil}
+  end
+
   # Returns how the path from each start (`Engine::EachStart`) disagrees
   # with the two-phase results *two_phase* and *iterated_two_phase*, or nil.
   private def self.check_each_start(program : Mica::Regex::Program, haystack : String, two_phase : Array(Int64)?,
@@ -190,8 +234,9 @@ module EngineDifferential
 
   # The slots of `Expression#match_at_byte_index`'s match (-1 for a group
   # that did not take part), read through its `MatchData`.
-  private def self.public_slots(expression : Mica::Regex::Expression, haystack : String) : Array(Int64)?
-    match = expression.match_at_byte_index(haystack, 0, limits: SEARCH_LIMITS)
+  private def self.public_slots(expression : Mica::Regex::Expression, haystack : String,
+                                offset : Int32 = 0) : Array(Int64)?
+    match = expression.match_at_byte_index(haystack, offset, limits: SEARCH_LIMITS)
     return nil unless match
     list_of_slots = [] of Int64
     match.size.times do |group|
