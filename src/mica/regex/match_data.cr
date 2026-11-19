@@ -38,12 +38,14 @@ module Mica::Regex
     # a group that did not take part). A match read with its groups keeps
     # up to `INLINE_GROUP_SLOTS` offsets in the value itself (`@inline_groups`),
     # so a match of up to four groups allocates nothing; more go in
-    # `@groups`. A match whose groups are read on first use (`@reader` set)
-    # keeps them in `@groups`, a buffer every copy of the match shares: each
-    # entry is `GROUP_UNREAD` until then.
+    # `@groups`. A match whose groups are read on first use keeps its
+    # `GroupReader` and its offsets in one buffer every copy of the match
+    # shares (`@deferred`, null otherwise): each offset is `GROUP_UNREAD`
+    # until then. Only the buffer's address is in the value, so the value
+    # stays small to copy.
     @inline_groups : StaticArray(Int32, INLINE_GROUP_SLOTS)
     @groups : Slice(Int32)
-    @reader : GroupReader?
+    @deferred : Pointer(GroupReader)
 
     # :nodoc:
     # The group offsets a match keeps in the value itself.
@@ -57,6 +59,7 @@ module Mica::Regex
       @match_begin = slots[0].to_i32
       @match_end = slots[1].to_i32
       @inline_groups = uninitialized StaticArray(Int32, INLINE_GROUP_SLOTS)
+      @deferred = Pointer(GroupReader).null
       count = @group_size * 2
       if count <= INLINE_GROUP_SLOTS
         @groups = Slice(Int32).empty
@@ -76,8 +79,20 @@ module Mica::Regex
                    @match_end : Int32, reader : GroupReader)
       @group_size = @regex.capture_count
       @inline_groups = uninitialized StaticArray(Int32, INLINE_GROUP_SLOTS)
-      @groups = Slice(Int32).new(@group_size * 2, GROUP_UNREAD)
-      @reader = reader
+      @groups = Slice(Int32).empty
+      @deferred = MatchData.deferred_buffer(reader, @group_size * 2)
+    end
+
+    # A buffer that holds *reader* and then *offset_count* offsets, each
+    # `GROUP_UNREAD`. A `GroupReader` holds no references (limits, a
+    # timeout and options are plain values), so the buffer is allocated
+    # pointer-free, as a `Slice(Int32)` of groups was.
+    protected def self.deferred_buffer(reader : GroupReader, offset_count : Int32) : Pointer(GroupReader)
+      buffer = GC.malloc_atomic(sizeof(GroupReader) + offset_count * sizeof(Int32)).as(GroupReader*)
+      buffer.value = reader
+      offsets = (buffer + 1).as(Int32*)
+      offset_count.times { |index| offsets[index] = GROUP_UNREAD }
+      buffer
     end
 
     # :nodoc:
@@ -284,24 +299,28 @@ module Mica::Regex
     # now if it is still pending.
     @[AlwaysInline]
     protected def group_offset(index : Int32) : Int32
+      deferred = @deferred
+      unless deferred.null?
+        offsets = (deferred + 1).as(Int32*)
+        offset = offsets[index]
+        return offset unless offset == GROUP_UNREAD
+        read_groups(deferred.value, offsets)
+        return offsets[index]
+      end
       groups = @groups
-      return @inline_groups.unsafe_fetch(index) if groups.empty?
-      offset = groups[index]
-      return offset unless offset == GROUP_UNREAD
-      read_groups
-      @groups[index]
+      groups.empty? ? @inline_groups.unsafe_fetch(index) : groups[index]
     end
 
-    # Reads the groups into the shared buffer. Every entry is one aligned
-    # 32-bit store of the same value whichever fiber stores it, so a reader
-    # that sees an entry other than `GROUP_UNREAD` sees its final value, and
-    # one that sees `GROUP_UNREAD` reads the groups itself.
-    private def read_groups : Nil
-      reader = @reader || return
+    # Reads the groups into the shared *offsets* (`2 * group_size` of
+    # them). Every entry is one aligned 32-bit store of the same value
+    # whichever fiber stores it, so a reader that sees an entry other than
+    # `GROUP_UNREAD` sees its final value, and one that sees `GROUP_UNREAD`
+    # reads the groups itself.
+    private def read_groups(reader : GroupReader, offsets : Pointer(Int32)) : Nil
       @regex.program.plan.note_groups_read
       found = @regex.read_groups(@string, @byte_index, @match_begin, @match_end, reader.options, reader.limits,
         reader.timeout)
-      @groups.size.times { |index| @groups[index] = found[index + 2].to_i32 }
+      (@group_size * 2).times { |index| offsets[index] = found[index + 2].to_i32 }
     end
 
     private def character_index(byte_index : Int32) : Int32

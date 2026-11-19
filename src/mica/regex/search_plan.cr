@@ -71,6 +71,7 @@ module Mica::Regex
     @short_validated = Atomic(String?).new(nil)
     # 1 once a caller read groups that a search had left to read later.
     @groups_read = Atomic(Int32).new(0)
+    @fixed_match_bytes = Atomic(Int32).new(FIXED_LENGTH_UNKNOWN)
     @short_match = Atomic(ShortMatch?).new(nil)
     @short_match_built = Atomic(Int32).new(0)
     @start_filter = Atomic(StartFilter?).new(nil)
@@ -334,6 +335,29 @@ module Mica::Regex
       end
       @short_match.get
     end
+
+    # The most states a program may have for `fixed_match_bytes` to
+    # analyze it (one O(m) pass, made once).
+    FIXED_LENGTH_STATES = 2_048
+
+    # The length in bytes every match has, or -1 when matches can differ
+    # in length (or the program has more than `FIXED_LENGTH_STATES`
+    # states): the longest match (`ShortMatch.longest_match`) is as long as
+    # the shortest (`StartFilter#minimum_bytes`). A match that ends at a
+    # known position then starts this many bytes before it. Worked out on
+    # first use and kept.
+    def fixed_match_bytes : Int32
+      length = @fixed_match_bytes.get(:relaxed)
+      return length unless length == FIXED_LENGTH_UNKNOWN
+      length = -1
+      if @program.state_count <= FIXED_LENGTH_STATES && (longest = ShortMatch.longest_match(@program))
+        length = longest if longest == start_filter.minimum_bytes
+      end
+      @fixed_match_bytes.set(length, :relaxed)
+      length
+    end
+
+    private FIXED_LENGTH_UNKNOWN = -2
 
     # Takes an idle lease (its caches warm from earlier searches) or makes
     # a new one for *pool*. Taking the lease out of the hot slot or the idle

@@ -650,13 +650,19 @@ module Mica::Regex
     end
 
     # The start of the leftmost-first match that ends at *finish*, no lower
-    # than *lower_bound*. When every match is short (`SearchPlan#short_match`)
+    # than *lower_bound*. When every match has one length
+    # (`SearchPlan#fixed_match_bytes`) it is that many bytes before
+    # *finish*. When every match is short (`SearchPlan#short_match`)
     # it is the first start, from `ShortMatch#longest` bytes before
     # *finish*, where the forward DFA run anchored finds any match: no
     # earlier start has one, as the match is leftmost. Otherwise the
     # reverse DFA finds it.
     private def match_start(lease : SearchLease, dfa : LazyDFA, cache : DFACache?, bytes : Bytes, finish : Int32,
                             lower_bound : Int32) : Int32
+      # Every match has the same length: the start is that far back.
+      if @engine.auto? && (length = @program.plan.fixed_match_bytes) >= 0 && finish - length >= lower_bound
+        return finish - length
+      end
       if (@engine.auto? || @engine.backtracked_starts?) && (start = backtracked_start(bytes, finish, lower_bound))
         return start
       end
