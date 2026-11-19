@@ -149,11 +149,9 @@ module Mica::Regex
           bit = current.to_i64 * columns + (at - start)
           word = bit >> 6
           mask = 1_u64 << (bit & 63)
-          if @visited[word] & mask != 0
-            state = @program.state_at(current)
-            break
-          end
-          @visited[word] |= mask
+          visited = @visited.to_unsafe + word
+          break if visited.value & mask != 0
+          visited.value |= mask
           if (@visits_left -= 1) < 0
             @gave_up = true
             return false
