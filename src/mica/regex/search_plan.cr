@@ -44,6 +44,11 @@ module Mica::Regex
     # Set (after @one_pass) once the one-pass build ran, as its result may
     # be nil.
     @one_pass_built = Atomic(Int32).new(0)
+    # Short searches seen before the one-pass DFA was built (see
+    # `short_search_one_pass`).
+    @short_searches = Atomic(Int32).new(0)
+    # 1 once a caller read groups that a search had left to read later.
+    @groups_read = Atomic(Int32).new(0)
     @mutex = Mutex.new
     @list_of_idle_leases = [] of SearchLease
     # The most recently returned lease, taken without the mutex.
@@ -122,9 +127,29 @@ module Mica::Regex
     #
     # Until a search has built the one-pass DFA (the first capture pass
     # does), this is false, so a search that never matches never pays for
-    # building it.
+    # building it. Once a caller has read the groups of a match found
+    # without them (`note_groups_read`), it is false for good: this
+    # program's callers read groups, and reading them later costs more
+    # than reading them with the match.
     def defers_groups? : Bool
-      @program.slot_count > 2 && @one_pass_built.get == 1 && @one_pass.get.nil?
+      @program.slot_count > 2 && @one_pass_built.get == 1 && @one_pass.get.nil? &&
+        @groups_read.get(:relaxed) == 0
+    end
+
+    # Records that a caller read the groups of a match found without them
+    # (see `defers_groups?`).
+    def note_groups_read : Nil
+      @groups_read.set(1, :relaxed)
+    end
+
+    # The one-pass DFA for `ShortSearch#run`: built (see `one_pass`) once
+    # the program has had `ShortSearch::BUILD_AFTER` short searches, or as
+    # soon as another search built it; nil before, or when the program is
+    # not one-pass.
+    def short_search_one_pass : OnePassDFA?
+      return @one_pass.get if @one_pass_built.get == 1
+      return nil if @short_searches.add(1, :relaxed) < ShortSearch::BUILD_AFTER
+      one_pass
     end
 
     # The one-pass DFA when a search has built it already (see `one_pass`),

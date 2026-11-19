@@ -5,7 +5,10 @@ module Mica::Regex
   # taking a lease or starting an engine (see "Short searches" in
   # docs/regex.md).
   #
-  # Both are read from the NFA, with every assertion taken as passing, so
+  # It also holds an ASCII byte every match contains, when there is one
+  # (`:` in `.*:(\d+)`).
+  #
+  # All are read from the NFA, with every assertion taken as passing, so
   # they over-approximate the matches: a haystack the filter rejects has no
   # match, and one it accepts may or may not.
   #
@@ -13,18 +16,24 @@ module Mica::Regex
   # filter = Mica::Regex::Expression.new("\\d+px", compile_limits: Mica::Regex::CompileLimits::TRUSTED_PATTERN)
   #   .program.plan.start_filter
   # filter.minimum_bytes                        # => 3
-  # filter.rejects?("12p".to_slice, 0, false)   # => false
+  # filter.rejects?("12px".to_slice, 0, false)  # => false
   # filter.rejects?("ab px".to_slice, 0, false) # => true
   # ```
   class StartFilter
     # The fewest bytes a match spans (0 when it can be empty).
     getter minimum_bytes : Int32
+    # An ASCII byte every match contains (the rarest found), or nil.
+    getter required_byte : UInt8?
     # One bit per byte value that can start a non-empty match.
     @start_bytes = StaticArray(UInt64, 4).new(0_u64)
+
+    # The most single-byte states `required_byte` considers.
+    private MAX_REQUIRED_CANDIDATES = 8
 
     def initialize(program : Program)
       @minimum_bytes = StartFilter.shortest_match(program)
       collect_start_bytes(program) if @minimum_bytes > 0
+      @required_byte = StartFilter.required_byte(program) if @minimum_bytes > 0
     end
 
     # True when no match can start in *haystack* at *from* (or, unless
@@ -36,7 +45,51 @@ module Mica::Regex
       return true if from > last
       return false if @minimum_bytes == 0
       last = from if anchored
-      (from..last).none? { |index| starts?(haystack.unsafe_fetch(index)) }
+      return true if (from..last).none? { |index| starts?(haystack.unsafe_fetch(index)) }
+      required = @required_byte
+      !!required && !haystack[from..].includes?(required)
+    end
+
+    # The rarest ASCII byte (by `Prefilter.rank`) that every path from the
+    # start state to the match state reads in a state that reads only that
+    # byte, or nil. Each of the `MAX_REQUIRED_CANDIDATES` rarest such bytes
+    # is tried by searching for a path that avoids its states: O(m) each.
+    def self.required_byte(program : Program) : UInt8?
+      states = program.list_of_states
+      list_of_candidates = states.compact_map do |state|
+        state.low if state.kind.byte_range? && state.low == state.high && state.low < 0x80
+      end
+      list_of_candidates.uniq!.sort_by! { |byte| Prefilter.rank(byte) }
+      list_of_candidates.first(MAX_REQUIRED_CANDIDATES).find { |byte| !match_reachable_without?(program, byte) }
+    end
+
+    # True when a path from the start state reaches the match state without
+    # a state that reads only *byte*.
+    private def self.match_reachable_without?(program : Program, byte : UInt8) : Bool
+      states = program.list_of_states
+      visited = Array(Bool).new(states.size, false)
+      list_of_pending = [program.start_state]
+      while index = list_of_pending.pop?
+        next if visited[index]
+        visited[index] = true
+        state = states[index]
+        case state.kind
+        when .match?
+          return true
+        when .split?
+          list_of_pending << state.next_state << state.alternate
+        when .save?, .look?
+          list_of_pending << state.next_state
+        when .byte_range?
+          list_of_pending << state.next_state unless state.low == byte && state.high == byte
+        when .sparse?
+          state.alternate.times do |offset|
+            transition = program.list_of_transitions[state.argument + offset]
+            list_of_pending << transition.target unless transition.low == byte && transition.high == byte
+          end
+        end
+      end
+      false
     end
 
     private def starts?(byte : UInt8) : Bool

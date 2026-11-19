@@ -311,8 +311,9 @@ module Mica::Regex
     # `LazyDFA`). Returns true or false when it decided whether there is a
     # match, nil when the call should take the other paths instead (the
     # search starts again from *byte_index* there): the one-pass DFA could
-    # not decide (see `OnePassDFA#search`), the lazy DFA gave up, or the
-    # call turned this search off.
+    # not decide (see `OnePassDFA#search`), the lazy DFA gave up, a try
+    # read `MAX_TRY_BYTES` undecided, or the call turned this search off.
+    # Each of the first three turns it off for the rest of the call.
     #
     # Unanchored, it tries each prefilter candidate in turn: every match
     # starts with a prefix literal, so the first candidate where an
@@ -349,17 +350,24 @@ module Mica::Regex
       end
     end
 
+    # The most bytes one try at a start reads before it gives up: a try
+    # still undecided there (a long match, or a long failure such as `a+b`
+    # over a run of a's) turns the search at starts off for the call, so
+    # it costs the call at most this much.
+    MAX_TRY_BYTES = 256
+
     # One anchored try at *start* (see `find_at_starts`), on *one_pass*
     # when there is one, else on *forward* with *cache*.
     private def try_start(one_pass : OnePassDFA?, forward : LazyDFA?, cache : DFACache?, bytes : Bytes, start : Int32,
                           byte_index : Int32) : Bool?
+      stop = start.to_i64 + MAX_TRY_BYTES > bytes.size ? Int32::MAX : start + MAX_TRY_BYTES
       if one_pass
         scratch = @one_pass_scratch ||= Slice(Int64).new(@program.slot_count, PikeVM::UNSET)
-        finish, scanned = one_pass.search(bytes, start, byte_index, @capture_slots, scratch, @meter)
+        finish, scanned = one_pass.search(bytes, start, byte_index, @capture_slots, scratch, @meter, stop)
         path = Path::OnePass
       elsif forward && cache
         before = @meter.operations
-        finish = forward.find_end(cache, bytes, start, true, false, nil, @meter)
+        finish = forward.find_end(cache, bytes, start, true, false, nil, @meter, stop)
         scanned = @meter.operations - before
         @span_slots[0] = start.to_i64
         @span_slots[1] = finish.to_i64
@@ -367,7 +375,10 @@ module Mica::Regex
       else
         return nil
       end
-      return nil if finish == LazyDFA::GAVE_UP
+      if finish == LazyDFA::GAVE_UP
+        @start_search_off = true
+        return nil
+      end
       count_start_search_waste(bytes, scanned.to_i64, finish >= 0 ? (finish - start).to_i64 : -1_i64)
       return false if finish < 0
       @last_path = path

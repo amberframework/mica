@@ -1,0 +1,110 @@
+module Mica::Regex
+  # :nodoc:
+  # One single search (`Expression#match_at_byte_index` or
+  # `#matches_at_byte_index?`) of a short haystack, answered without a
+  # lease, a searcher or a meter when it can be (see "Short searches" in
+  # docs/regex.md):
+  #
+  # - `rejects?`: the program's `StartFilter` shows no match can start;
+  # - `run`: the one-pass DFA, anchored at each position where the filter
+  #   allows a match to start, finds the match (span and groups).
+  #
+  # Both answer only where the searcher would answer the same without
+  # raising: no timeout is set (one already passed must fail), the offset
+  # is a character boundary inside the haystack, the haystack is valid
+  # UTF-8, and the work they may do (validation plus at most
+  # `work_bound` steps) fits the call's allowance. Otherwise they decline
+  # and the caller runs the searcher.
+  struct ShortSearch
+    # The longest haystack a short search reads.
+    MAX_BYTES = 256
+    # The most capture slots `run` keeps on the stack.
+    MAX_SLOTS = 16
+    # How many short searches of a program `run` waits for before it
+    # builds the program's one-pass DFA, so a pattern searched once does
+    # not pay for building it.
+    BUILD_AFTER = 8
+
+    def initialize(@program : Program, @haystack : String, @byte_index : Int32, @options : MatchOptions,
+                   @limits : SearchLimits, @timeout : Time::Span?)
+    end
+
+    # True when the haystack is short and the offset one the searcher
+    # would accept; no other method answers otherwise.
+    def applies? : Bool
+      bytes = @haystack.to_slice
+      return false if @timeout || bytes.size > MAX_BYTES || @byte_index < 0 || @byte_index > bytes.size
+      @byte_index == bytes.size || bytes.unsafe_fetch(@byte_index) & 0xC0 != 0x80
+    end
+
+    # True when no match can start (see `StartFilter#rejects?`) and the
+    # searcher would say so without raising. Call `applies?` first.
+    def rejects? : Bool
+      bytes = @haystack.to_slice
+      plan = @program.plan
+      return false unless plan.start_filter.rejects?(bytes, @byte_index, anchored?(plan))
+      fits?(0) && valid?
+    end
+
+    # Runs the search on the one-pass DFA into *slots* (`slot_count`
+    # entries) with *scratch* beside it. Returns the match end,
+    # `LazyDFA::NO_MATCH`, or `LazyDFA::GAVE_UP` when this search declines.
+    # Call `applies?` first.
+    def run(slots : Slice(Int64), scratch : Slice(Int64)) : Int32
+      return LazyDFA::GAVE_UP if @program.slot_count > MAX_SLOTS
+      return LazyDFA::GAVE_UP if @program.options.first_line? || @program.options.end_anchored?
+      return LazyDFA::GAVE_UP if @options.end_anchored?
+      plan = @program.plan
+      one_pass = plan.short_search_one_pass || return LazyDFA::GAVE_UP
+      bytes = @haystack.to_slice
+      bound = work_bound(bytes.size)
+      return LazyDFA::GAVE_UP unless fits?(bound) && valid?
+      filter = plan.start_filter
+      if anchored?(plan)
+        finish, _ = one_pass.search(bytes, @byte_index, @byte_index, slots, scratch, nil)
+        return finish
+      end
+      spent = 0
+      start = @byte_index
+      last = bytes.size - filter.minimum_bytes
+      while start <= last
+        if start == bytes.size || (bytes.unsafe_fetch(start) & 0xC0 != 0x80 && !filter.rejects?(bytes, start, true))
+          finish, scanned = one_pass.search(bytes, start, @byte_index, slots, scratch, nil)
+          return finish unless finish == LazyDFA::NO_MATCH
+          spent += scanned + 1
+          return LazyDFA::GAVE_UP if spent > bound
+        end
+        start += 1
+      end
+      LazyDFA::NO_MATCH
+    end
+
+    # The most one-pass steps `run` takes before it declines: a few passes
+    # over the haystack, so a pattern whose failed tries read far stays
+    # cheap and linear.
+    private def work_bound(size : Int32) : Int32
+      4 * size + 64
+    end
+
+    private def anchored?(plan : SearchPlan) : Bool
+      @program.options.anchored? || @options.anchored? || plan.anchored_start?
+    end
+
+    # True when validating the haystack and *steps* more operations fit
+    # the call's work allowance.
+    #
+    # It checks a sufficient condition that needs no multiplication:
+    # the allowance is at least the smaller of `work_ceiling` and
+    # `base_work`, or of `work_ceiling` and `work_per_byte` times a
+    # haystack of at least one byte. Limits too tight for it decline.
+    private def fits?(steps : Int32) : Bool
+      needed = @haystack.bytesize.to_i64 + steps
+      return false if @limits.work_ceiling < needed
+      @limits.base_work >= needed || (@haystack.bytesize > 0 && @limits.work_per_byte >= needed)
+    end
+
+    private def valid? : Bool
+      Core::UTF8.first_invalid_offset(@haystack.to_slice).nil?
+    end
+  end
+end

@@ -168,7 +168,8 @@ describe "Mica::Regex short searches" do
     it_satisfies "REGEX-R3-short-search", "reads the fewest bytes and the first bytes of a match from the program" do
       filter = expression("\\d+px").program.plan.start_filter
       filter.minimum_bytes.should eq(3)
-      filter.rejects?("12p".to_slice, 0, false).should be_false
+      filter.rejects?("12px".to_slice, 0, false).should be_false
+      filter.rejects?("12p".to_slice, 0, false).should be_true
       filter.rejects?("ab px".to_slice, 0, false).should be_true
       filter.rejects?("1px".to_slice, 1, false).should be_true
       expression("é|ab").program.plan.start_filter.minimum_bytes.should eq(2)
@@ -190,6 +191,62 @@ describe "Mica::Regex short searches" do
       expect_raises(ArgumentError) { dot.match_at_byte_index("é\n", 1, limits: LIMITS) }
       none = Mica::Regex::SearchLimits.custom(work_ceiling: 0_i64)
       expect_raises(Mica::Regex::SearchLimitError) { dot.match("\n", limits: none) }
+    end
+  end
+
+  describe "short haystacks on the one-pass DFA" do
+    it_satisfies "REGEX-R3-short-search", "finds matches and groups on the one-pass DFA alone once a program has had a few short searches" do
+      list_of_cases = {
+        {"\\w", "δa", 0},
+        {"[a-z]+?", "abc", 1},
+        {"\\b", "δ x", 0},
+        {"(\\d+)-(\\d+)", "tel 12-345", 0},
+        {"\\A([a-z]+)-(\\d+)\\z", "post-42", 0},
+        {"(?m)^(b+)$", "a\nbb\n", 0},
+        {"\\Ga", "aab", 1},
+      }
+      list_of_cases.each do |source, haystack, offset|
+        pattern = expression(source)
+        reference = expression(source)
+        expected = nil
+        reference.each_match(haystack, limits: LIMITS) { |match| expected ||= match.to_a if match.byte_begin >= offset }
+        12.times do
+          pattern.match_at_byte_index(haystack, offset, limits: LIMITS).try(&.to_a).should eq(expected)
+        end
+      end
+    end
+
+    it_satisfies "REGEX-R3-short-search", "rejects a short haystack without a byte every match contains" do
+      host = expression(".*:(\\d+)")
+      host.program.plan.start_filter.required_byte.should eq(':'.ord.to_u8)
+      host.match("amber-grant-345", limits: LIMITS).should be_nil
+      host.match("example.com:4567", limits: LIMITS).try(&.[1]).should eq("4567")
+      expression("a(?:b|c:)d").program.plan.start_filter.required_byte.should eq('d'.ord.to_u8)
+      expression("x|y").program.plan.start_filter.required_byte.should be_nil
+    end
+
+    it_satisfies "REGEX-R3-short-search", "stops a try at a start after MAX_TRY_BYTES and searches the other way" do
+      # Every try at an "a" runs on to the end looking for the "b"; the
+      # first try stops after MAX_TRY_BYTES, so the work stays linear.
+      pattern = expression("(?:a+)+b")
+      haystack = "a" * 20_000
+      searcher = Mica::Regex::Searcher.new(pattern.program, haystack, LIMITS, nil, Mica::Regex::Engine::Auto)
+      searcher.find(0, Mica::Regex::MatchOptions::None, false).should be_nil
+      plain = Mica::Regex::Searcher.new(pattern.program, haystack, LIMITS, nil, Mica::Regex::Engine::NoAccelerators)
+      plain.find(0, Mica::Regex::MatchOptions::None, false).should be_nil
+      (searcher.meter.operations - plain.meter.operations).should be <= Mica::Regex::Searcher::MAX_TRY_BYTES + 64
+      {searcher, plain}.each(&.finish)
+      pattern.match("aaab", limits: LIMITS).try(&.to_s).should eq("aaab")
+    end
+
+    it_satisfies "REGEX-R3-short-search", "reads groups with the match again once a caller reads deferred groups" do
+      pattern = expression("(a|ab)(c|bcd)(d*)")
+      pattern.match("abcd", limits: LIMITS)
+      plan = pattern.program.plan
+      plan.defers_groups?.should be_true
+      pattern.match("abcd", limits: LIMITS).try(&.[2]).should eq("bcd")
+      plan.defers_groups?.should be_false
+      pattern.match("abcd", limits: LIMITS).try(&.to_a).should eq(["abcd", "a", "bcd", ""])
     end
   end
 

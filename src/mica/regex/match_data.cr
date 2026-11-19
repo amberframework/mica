@@ -71,8 +71,10 @@ module Mica::Regex
     def self.copy_groups(slots : Slice(Int64), group_size : Int32) : Slice(Int32)
       return Slice(Int32).empty if group_size == 0
       count = group_size * 2
-      copied = Slice(Int32).new(count, -1)
-      Math.min(count, slots.size - 2).times { |index| copied[index] = slots[index + 2].to_i32 }
+      available = Math.min(count, slots.size - 2)
+      copied = Slice(Int32).new(count) do |index|
+        index < available ? slots.unsafe_fetch(index + 2).to_i32 : -1
+      end
       copied
     end
 
@@ -266,6 +268,7 @@ module Mica::Regex
     # one that sees `GROUP_UNREAD` reads the groups itself.
     private def read_groups : Nil
       reader = @reader || return
+      @regex.program.plan.note_groups_read
       found = @regex.read_groups(@string, @byte_index, @match_begin, @match_end, reader.options, reader.limits,
         reader.timeout)
       @groups.size.times { |index| @groups[index] = found[index + 2].to_i32 }

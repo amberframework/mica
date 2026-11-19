@@ -423,16 +423,27 @@ log line) or find a short match, so the fixed cost of a call matters as
 much as the cost per byte:
 
 - **No engine for a short haystack that cannot match.** A program's
-  `StartFilter` (built with its plan) holds the fewest bytes a match spans
-  and the bytes a match can start with, read from the NFA with every
-  assertion taken as passing. `match`, `match_at_byte_index`, `search` and
+  `StartFilter` (built with its plan) holds the fewest bytes a match spans,
+  the bytes a match can start with, and an ASCII byte every match
+  contains when there is one (`:` in `.*:(\d+)`), read from the NFA with
+  every assertion taken as passing. `match`, `match_at_byte_index`, `search` and
   `matches?` over a haystack of at most 256 bytes return no match at once,
   with no lease and no engine, when too few bytes remain or none of them
-  can start a match (only the first, when the search is anchored). They do
-  so only where the searcher would also return no match without raising:
+  can start a match (only the first, when the search is anchored), or the
+  required byte is missing. They do so only where the searcher would also return no match without raising:
   the haystack is valid UTF-8 and its validation fits the work allowance,
   the offset is a character boundary, and no timeout is set.
-- **One atomic each way.** A call takes its program's hot lease with one
+- **Short haystacks on the one-pass DFA.** Once a one-pass program has had
+  a few short searches (`ShortSearch::BUILD_AFTER`, so a pattern searched
+  once does not pay to build it), a single search of at most 256 bytes runs
+  the one-pass DFA alone, anchored at each position where the start
+  filter allows a match: span and groups with no lease, no searcher and
+  no allocation for the slots, which live on the stack. It answers under
+  the same conditions as the shortcut above and within a few passes over
+  the haystack (`4n + 64` steps), and otherwise declines to the searcher.
+  The one-pass DFA keeps, per table cell, the next state's row offset
+  with flags for an edge that has assertions or slots and for a target
+  with a match path, so one load per byte finds the next state. A call takes its program's hot lease with one
   atomic exchange and puts it back with one compare-and-set. Who holds a
   lease is decided by where it sits: in the hot slot or the idle list it is
   idle, and whoever takes it out (a search, or the pool evicting it) holds
@@ -458,7 +469,10 @@ much as the cost per byte:
   read past a match end while looking for a longer one) are counted per
   call; past the haystack's size, or once the prefilter proves
   ineffective, the call stops trying, so the one-pass search adds at most
-  O(n) to a call.
+  O(n) to a call. A single try stops after `Searcher::MAX_TRY_BYTES`
+  (256) undecided bytes and turns the search at starts off for the call,
+  so a long failure such as `(?:a+)+b` over a run of a's costs at most
+  that much extra.
 - **Groups read on first use.** When only the bounded backtracker or the
   Pike VM can read a pattern's groups (the first capture pass found the
   pattern is not one-pass),
@@ -469,7 +483,9 @@ much as the cost per byte:
   under the limits and timeout of the call that found it. The groups are
   stored once in a buffer every copy of the `MatchData` shares. A caller
   that only asks whether and where a validator matched never pays for
-  them. When the one-pass DFA can read the groups (O(L)), they are read
+  them. Once any caller reads the groups of such a match, the program
+  reads groups with the match again, as a caller that reads them pays
+  more for a later pass. When the one-pass DFA can read the groups (O(L)), they are read
   with the match. The iteration methods (`each_match`, `scan`, `gsub`,
   `sub`, `split`) read groups with each match through the call's own
   searcher.

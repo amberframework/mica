@@ -44,9 +44,27 @@ module Mica::Regex
       OnePassBuilder.new(program, byte_classes).build
     end
 
+    # For `search`: per table cell, the target state's row offset (state
+    # times class count) shifted left by two, with `STEP_TAKES_EDGE` when
+    # the edge has assertions or slots and `STEP_REACHES_MATCH` when the
+    # target state has a match path; -1 where there is no edge. One load
+    # per byte then finds the next state.
+    @steps : Array(Int32)
+
+    private STEP_TAKES_EDGE    = 1
+    private STEP_REACHES_MATCH = 2
+
     def initialize(@byte_classes : ByteClasses, @table : Array(Int32), @match_edges : Array(Int32),
                    @list_of_edges : Array(Edge))
       @class_count = @byte_classes.class_count
+      @steps = @table.map do |index|
+        next -1 if index < 0
+        edge = @list_of_edges[index]
+        step = (edge.target * @class_count) << 2
+        step |= STEP_TAKES_EDGE if edge.looks != 0 || edge.slots != 0
+        step |= STEP_REACHES_MATCH if @match_edges[edge.target] >= 0
+        step
+      end
     end
 
     # Fills *slots* with the captures of the match `[start, finish)` of
@@ -93,20 +111,30 @@ module Mica::Regex
     #
     # Returns the match end, `LazyDFA::NO_MATCH` or `LazyDFA::GAVE_UP`, and
     # the bytes read. O(L + c·k) for L bytes read and k positions with a
-    # match path.
+    # match path. Without a *meter*, the caller has proved the work fits
+    # the call's allowance (see `ShortSearch`).
+    #
+    # With *stop*, a search still undecided when it reaches byte *stop*
+    # returns `LazyDFA::GAVE_UP` there.
     def search(haystack : Bytes, start : Int32, search_start : Int32, slots : Slice(Int64), scratch : Slice(Int64),
-               meter : SearchMeter) : {Int32, Int32}
+               meter : SearchMeter?, stop : Int32 = Int32::MAX) : {Int32, Int32}
       scratch.fill(PikeVM::UNSET)
-      state = 0
       at = start
       charged = start
       size = haystack.size
       found = LazyDFA::NO_MATCH
       undecided = false
+      # Locals, so the loop does not reload them after each slot write.
+      table = @table.to_unsafe
+      steps = @steps.to_unsafe
+      edges = @list_of_edges.to_unsafe
+      class_of = @byte_classes.table
+      bytes = haystack.to_unsafe
+      row = 0
+      reaches_match = @match_edges.unsafe_fetch(0) >= 0
       while true
-        index = @match_edges.unsafe_fetch(state)
-        if index >= 0
-          edge = @list_of_edges.unsafe_fetch(index)
+        if reaches_match
+          edge = edges[@match_edges.unsafe_fetch(row // @class_count)]
           if holds?(edge, haystack, at, search_start)
             slots.copy_from(scratch.to_unsafe, slots.size)
             write(edge, at, slots)
@@ -117,18 +145,27 @@ module Mica::Regex
           end
         end
         break if at >= size
-        if at - charged >= PrefilterScan::CHARGE_CHUNK
+        if at >= stop
+          undecided = true
+          break
+        end
+        if meter && at - charged >= PrefilterScan::CHARGE_CHUNK
           meter.charge(at - charged, at)
           charged = at
         end
-        index = @table.unsafe_fetch(state * @class_count + @byte_classes.class_of(haystack.unsafe_fetch(at)))
-        break if index < 0
-        edge = @list_of_edges.unsafe_fetch(index)
-        break unless take(edge, haystack, at, search_start, scratch)
-        state = edge.target
-        at += 1
+        cell = row &+ class_of[bytes[at]]
+        step = steps[cell]
+        break if step < 0
+        if step & STEP_TAKES_EDGE != 0
+          edge = edges[table[cell]]
+          break unless holds?(edge, haystack, at, search_start)
+          write(edge, at, scratch)
+        end
+        row = step >> 2
+        reaches_match = step & STEP_REACHES_MATCH != 0
+        at &+= 1
       end
-      meter.charge(at - charged + 1, charged)
+      meter.try(&.charge(at - charged + 1, charged))
       {undecided ? LazyDFA::GAVE_UP : found, at - start}
     end
 

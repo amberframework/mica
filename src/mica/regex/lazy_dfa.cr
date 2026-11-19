@@ -191,8 +191,11 @@ module Mica::Regex
     # The loop works on table entries (see `DFACache#entry_of`): a state's
     # row offset with a low bit set for states that need a look (match,
     # dead, start), so the common transition is one load and one test.
+    #
+    # With *stop*, a search still undecided when it reaches byte *stop*
+    # returns `GAVE_UP` there (see `Searcher#find_at_starts`).
     def find_end(cache : DFACache, haystack : Bytes, start : Int32, anchored : Bool, earliest : Bool,
-                 scan : PrefilterScan?, meter : SearchMeter) : Int32
+                 scan : PrefilterScan?, meter : SearchMeter, stop : Int32 = Int32::MAX) : Int32
       size = haystack.size
       limit = @final_lf && size > start && haystack.unsafe_fetch(size - 1) == Look::LINE_FEED ? size - 1 : size
       state = cache.start_state(self, start_flags(haystack, start, anchored), meter)
@@ -221,7 +224,8 @@ module Mica::Regex
           scan = nil if scan.ineffective?
         end
         break if at >= limit
-        chunk_end = Math.min(limit, at + 4096)
+        return GAVE_UP if at >= stop
+        chunk_end = Math.min(Math.min(limit, stop), at + 4096)
         chunk_start = at
         table = cache.transition_table.to_unsafe
         while at < chunk_end
