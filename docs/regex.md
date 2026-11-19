@@ -308,11 +308,18 @@ call, before the haystack is validated, and then at work checkpoints, so a
 timeout that has already passed fails any call before it reads the
 haystack, while a running search notices its deadline at the next
 checkpoint. Every scan that reads ahead of an engine (the literal
-accelerators, the final-byte skip, the `FirstLine` line feed search) reads
-in windows the call's meter allows before each is read
-(`SearchMeter#readable`): a window never passes the next checkpoint, so
-the budget and the clock are checked before a byte the call cannot pay
-for, not after. A search never returns a partial or wrong result.
+accelerators, the final-byte skip, the `FirstLine` line feed search), the
+stepping loops of the lazy DFAs (forward, reverse and from each start) and
+of the one-pass DFA, and the character index conversion of `match` and
+`matches?` with a `pos` other than 0 read in windows the call's meter
+allows before each is read (`SearchMeter#readable`): a window never
+passes the next checkpoint, so the budget and the clock are checked before
+a byte the call cannot pay for, not after. A loop that builds a DFA state
+inside a window charges what it has read first and has the rest of the
+window allowed again, since building charges the meter too. The character
+index conversion runs inside the call's searcher, after the deadline is
+read and the haystack validated, under the same allowance as the search.
+A search never returns a partial or wrong result.
 
 ## Engines
 
@@ -758,7 +765,10 @@ reserves new ones when it is next used. A lease's forward and reverse
 caches build their states in one shared scratch space, sized for the DFA
 with the most nodes; a reverse DFA widened to read classes backward gets a
 larger one, and each cache still reserves the scratch space as its own, so
-the pool's count stays an upper bound. When none is idle, a lazy DFA gives
+the pool's count stays an upper bound. The scratch space is made only
+after its cache's reservation succeeds, and a lease drops one that no
+cache it holds uses, so a refused cache leaves nothing allocated outside
+the pool. When none is idle, a lazy DFA gives
 up and the search runs on the Pike VM; a Pike VM workspace the pool still
 cannot supply raises `SearchLimitError` naming `cache_pool_max_bytes`, so
 nothing is allocated past the cap and no wrong answer is returned. A call

@@ -55,6 +55,9 @@ module Mica::Regex
     # The fewest bytes read per state built that does not count as
     # thrashing.
     MINIMUM_BYTES_PER_STATE = 10
+    # The most bytes a stepping loop reads between charges. Each chunk is
+    # allowed by the meter before it is read (`SearchMeter#readable`).
+    CHUNK_BYTES = 4096
 
     # State flags (the first entry of a state's key).
     TEXT_EDGE             =  0x01 # forward: at the start of the text; reverse: at its end
@@ -246,7 +249,11 @@ module Mica::Regex
         end
         break if at >= limit
         return GAVE_UP if at >= stop
-        chunk_end = Math.min(Math.min(limit, stop), at + 4096)
+        # The chunk is paid for before it is read: the meter allows its
+        # bytes now (`SearchMeter#readable`), and they are charged once
+        # read.
+        wanted_end = Math.min(Math.min(limit, stop), at + CHUNK_BYTES)
+        chunk_end = at + meter.readable(wanted_end - at, at)
         chunk_start = at
         table = cache.transition_table.to_unsafe
         while at < chunk_end
@@ -258,10 +265,17 @@ module Mica::Regex
           end
           entry = table[(current & ROW_MASK) &+ symbol]
           if entry < 0
+            # Building a state charges the meter too, so the bytes read so
+            # far are charged first and the rest of the chunk is allowed
+            # again after the build.
+            meter.charge(at - chunk_start, at)
+            cache.note_bytes(at - chunk_start)
+            chunk_start = at
             id = cache.transition(self, current // stride, symbol, meter)
             return GAVE_UP if id < 0
             entry = cache.entry_of(id)
             table = cache.transition_table.to_unsafe
+            chunk_end = at + meter.readable(wanted_end - at, at)
           end
           at &+= 1
           current = entry
@@ -283,10 +297,10 @@ module Mica::Regex
         return last_end if cache.list_of_marks.unsafe_fetch(current // stride) & MARK_DEAD != 0
       end
       if at == size - 1 && limit == size - 1
+        meter.charge(1, at)
         state = step(cache, current // stride, final_lf_symbol, meter)
         return GAVE_UP if state < 0
         at += 1
-        meter.charge(1, at)
         if cache.list_of_marks.unsafe_fetch(state) & MARK_MATCH != 0
           last_end = at - 1
           return last_end if earliest
@@ -318,7 +332,9 @@ module Mica::Regex
       wide_word = false
       dead = false
       while at > lower_bound && !dead
-        chunk_end = Math.max(lower_bound, at - 4096)
+        # Paid for before it is read, as in `find_end`.
+        wanted_end = Math.max(lower_bound, at - CHUNK_BYTES)
+        chunk_end = at - meter.readable(at - wanted_end, at)
         chunk_start = at
         table = cache.transition_table.to_unsafe
         while at > chunk_end
@@ -330,10 +346,14 @@ module Mica::Regex
           end
           entry = table[(current & ROW_MASK) &+ symbol]
           if entry < 0
+            meter.charge(chunk_start - at, at)
+            cache.note_bytes(chunk_start - at)
+            chunk_start = at
             id = cache.transition(self, current // stride, symbol, meter)
             return GAVE_UP if id < 0
             entry = cache.entry_of(id)
             table = cache.transition_table.to_unsafe
+            chunk_end = at - meter.readable(at - wanted_end, at)
           end
           at &-= 1
           current = entry
@@ -381,7 +401,14 @@ module Mica::Regex
       words = @unicode_words
       wide_start = wide_end = 0
       wide_word = false
+      # The operations made since the last charge, and how many the meter
+      # allowed then (`SearchMeter#readable`): a byte is read only while
+      # `unpaid` is below `allowed`, and while the meter's count is still
+      # `allowed_at` (building a state or a `memchr` scan charges the meter
+      # itself, using up what it allowed, so the search asks again).
       unpaid = 0
+      allowed = 0
+      allowed_at = -1_i64
       origin = start
       list_of_final_bytes = short_match.list_of_final_bytes
       longest = short_match.longest
@@ -390,6 +417,10 @@ module Mica::Regex
       final_at = StaticArray(Int32, ShortMatch::MAX_FINAL_BYTES).new(-1)
       next_final = -1
       while origin <= size
+        if unpaid >= allowed || meter.operations != allowed_at
+          allowed, allowed_at = settle(cache, meter, unpaid, origin, Math.min(size + 1 - origin, CHUNK_BYTES))
+          unpaid = 0
+        end
         if origin < size && bytes[origin] & 0xC0 == 0x80
           origin += 1
           unpaid += 1
@@ -418,39 +449,56 @@ module Mica::Regex
         at = origin
         table = cache.transition_table.to_unsafe
         dead = false
-        while at < limit
-          byte = bytes[at]
-          symbol = class_table[byte].to_i32
-          if words && byte >= 0x80
-            wide_start, wide_end, wide_word = LazyDFA.wide_char(haystack, at) unless wide_start <= at < wide_end
-            symbol &+= @word_offset if wide_word
+        stopped = false
+        # The try's end steps (`finish_at_end`), paid with its start.
+        unpaid += 1
+        while at < limit && !stopped
+          if unpaid >= allowed || meter.operations != allowed_at
+            allowed, allowed_at = settle(cache, meter, unpaid, at, Math.min(limit - at, CHUNK_BYTES))
+            unpaid = 0
           end
-          entry = table[(current & ROW_MASK) &+ symbol]
-          if entry < 0
-            id = cache.transition(self, current // stride, symbol, meter)
-            return {GAVE_UP, 0} if id < 0
-            entry = cache.entry_of(id)
-            table = cache.transition_table.to_unsafe
-          end
-          at &+= 1
-          current = entry
-          if entry & SPECIAL != 0
-            marks = cache.list_of_marks.unsafe_fetch(entry // stride)
-            if marks & MARK_MATCH != 0
-              last_end = at - 1
-              break if earliest
+          window_end = Math.min(limit, at + (allowed - unpaid))
+          window_start = at
+          while at < window_end
+            byte = bytes[at]
+            symbol = class_table[byte].to_i32
+            if words && byte >= 0x80
+              wide_start, wide_end, wide_word = LazyDFA.wide_char(haystack, at) unless wide_start <= at < wide_end
+              symbol &+= @word_offset if wide_word
             end
-            if marks & MARK_DEAD != 0
-              dead = true
-              break
+            entry = table[(current & ROW_MASK) &+ symbol]
+            if entry < 0
+              # Building a state charges the meter too: charge what was
+              # read first, and have the rest of the window allowed again.
+              meter.charge(unpaid + at - window_start, at)
+              cache.note_bytes(unpaid + at - window_start)
+              unpaid = 0
+              window_start = at
+              id = cache.transition(self, current // stride, symbol, meter)
+              return {GAVE_UP, 0} if id < 0
+              entry = cache.entry_of(id)
+              table = cache.transition_table.to_unsafe
+              allowed, allowed_at = settle(cache, meter, 0, at, Math.min(limit - at, CHUNK_BYTES))
+              window_end = Math.min(limit, at + allowed)
+            end
+            at &+= 1
+            current = entry
+            if entry & SPECIAL != 0
+              marks = cache.list_of_marks.unsafe_fetch(entry // stride)
+              if marks & MARK_MATCH != 0
+                last_end = at - 1
+                if earliest
+                  stopped = true
+                  break
+                end
+              end
+              if marks & MARK_DEAD != 0
+                dead = stopped = true
+                break
+              end
             end
           end
-        end
-        unpaid += at - origin + 1
-        if unpaid >= 4096
-          meter.charge(unpaid, at)
-          cache.note_bytes(unpaid)
-          unpaid = 0
+          unpaid += at - window_start
         end
         unless dead || (earliest && last_end >= 0)
           last_end = finish_at_end(cache, current // stride, at, size, limit, earliest, last_end, meter)
@@ -466,6 +514,18 @@ module Mica::Regex
       meter.charge(unpaid, size)
       cache.note_bytes(unpaid)
       {NO_MATCH, 0}
+    end
+
+    # Charges the *unpaid* operations a search from each start made (the
+    # bytes it read and one per try) and returns how many of the next
+    # *wanted* the meter allows before they are made
+    # (`SearchMeter#readable`), with the meter's count at that moment.
+    private def settle(cache : DFACache, meter : SearchMeter, unpaid : Int32, at : Int32,
+                       wanted : Int32) : {Int32, Int64}
+      meter.charge(unpaid, at)
+      cache.note_bytes(unpaid)
+      allowed = meter.readable(Math.max(wanted, 1), at)
+      {allowed, meter.operations}
     end
 
     # The first position at or after *from* holding *byte*, or `Int32::MAX`;

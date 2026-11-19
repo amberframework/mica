@@ -409,9 +409,11 @@ module Mica::Regex
     end
 
     # The forward cache, made on first use; nil when the pool cannot supply
-    # a new cache (the search then runs on the Pike VM).
+    # a new cache (the search then runs on the Pike VM). The cache's bytes,
+    # the builder's scratch space among them, are reserved before the
+    # builder is made, so a refused cache leaves no builder behind.
     def forward_cache(dfa : LazyDFA) : DFACache?
-      @forward_cache ||= DFACache.reserve?(dfa, @pool, builder(dfa))
+      @forward_cache ||= reserve_cache(dfa)
     end
 
     # The reverse cache, as `forward_cache`.
@@ -423,7 +425,17 @@ module Mica::Regex
         cache.evict
         cache = @reverse_cache = nil
       end
-      cache || (@reverse_cache = DFACache.reserve?(dfa, @pool, builder(dfa)))
+      cache || (@reverse_cache = reserve_cache(dfa))
+    end
+
+    # Reserves a new cache for *dfa* from the pool, then makes the builder
+    # it shares (`builder`). When the pool refuses, no builder is made, and
+    # one no remaining cache holds is dropped, so the lease keeps no
+    # scratch space the pool does not account for.
+    private def reserve_cache(dfa : LazyDFA) : DFACache?
+      cache = DFACache.reserve?(dfa, @pool) { builder(dfa) }
+      @builder = nil unless cache || @forward_cache || @reverse_cache
+      cache
     end
 
     # The scratch space the caches build their states in: a search builds

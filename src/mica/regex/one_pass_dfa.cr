@@ -86,10 +86,14 @@ module Mica::Regex
       state = 0
       at = start
       charged = start
+      # Bytes before `allowed_end` are allowed by the meter
+      # (`SearchMeter#readable`) and charged once read.
+      allowed_end = start
       while at < finish
-        if at - charged >= PrefilterScan::CHARGE_CHUNK
+        if at >= allowed_end
           meter.charge(at - charged, at)
           charged = at
+          allowed_end = at + meter.readable(Math.min(finish - at, PrefilterScan::CHARGE_CHUNK), at)
         end
         index = @table.unsafe_fetch(state * @class_count + @byte_classes.class_of(haystack.unsafe_fetch(at)))
         return false if index < 0
@@ -134,6 +138,10 @@ module Mica::Regex
       at = start
       charged = start
       size = haystack.size
+      # Bytes before `allowed_end` are allowed by the meter
+      # (`SearchMeter#readable`) and charged once read; without a meter the
+      # caller proved the whole haystack fits.
+      allowed_end = meter ? start : size
       found = LazyDFA::NO_MATCH
       undecided = false
       # Locals, so the loop does not reload them after each slot write.
@@ -161,13 +169,14 @@ module Mica::Regex
           undecided = true
           break
         end
-        if meter && at - charged >= PrefilterScan::CHARGE_CHUNK
+        if meter && at >= allowed_end
           meter.charge(at - charged, at)
           charged = at
+          allowed_end = at + meter.readable(Math.min(Math.min(size, stop) - at, PrefilterScan::CHARGE_CHUNK), at)
         end
         # The common step (no edge work, no match path ahead) in a tight
         # loop up to the next bound: one table load per byte.
-        bound = Math.min(Math.min(size, stop), charged &+ PrefilterScan::CHARGE_CHUNK)
+        bound = Math.min(Math.min(size, stop), allowed_end)
         step = 0
         while at < bound
           step = steps[row &+ class_of[bytes[at]]]

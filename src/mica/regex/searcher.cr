@@ -255,6 +255,38 @@ module Mica::Regex
       end
     end
 
+    # Returns the byte index of character *pos* of the haystack (its
+    # bytesize when *pos* is its character count), or nil when *pos* is
+    # negative or past the end, as `String#char_index_to_byte_index`
+    # does. The haystack was validated when the call began, so every byte
+    # that is not a continuation byte starts a character. It reads the
+    # haystack in windows of at most `PrefilterScan::CHARGE_CHUNK` bytes
+    # that the meter allows before each is read (`SearchMeter#readable`),
+    # one operation per byte, so the deadline and `max_work` stop it.
+    def byte_index_of_char(pos : Int32) : Int32?
+      bytes = @haystack.to_slice
+      # A string has no more characters than bytes.
+      return nil if pos < 0 || pos > bytes.size
+      characters = 0
+      at = 0
+      while at < bytes.size
+        window_start = at
+        stop = at + @meter.readable(Math.min(bytes.size - at, PrefilterScan::CHARGE_CHUNK), at)
+        while at < stop
+          if bytes.unsafe_fetch(at) & 0xC0 != 0x80
+            if characters == pos
+              @meter.charge(at + 1 - window_start, at)
+              return at
+            end
+            characters += 1
+          end
+          at += 1
+        end
+        @meter.charge(stop - window_start, stop)
+      end
+      characters == pos ? bytes.size : nil
+    end
+
     # True once the prefilter proved ineffective in this call (for specs).
     def prefilter_off? : Bool
       @prefilter_off || !!@scan.try(&.ineffective?)

@@ -58,14 +58,16 @@ module Mica::Regex
     # *pool* before they are allocated, or nil when the pool cannot supply
     # them or they do not fit under its `max_cache_bytes`.
     #
-    # *builder* is the scratch space the cache builds states in; a lease's
-    # forward and reverse caches share one (`SearchLease#builder`), as they
-    # never build at the same time. Each cache still reserves the scratch
-    # space as its own, so the pool's count stays an upper bound.
-    def self.reserve?(dfa : LazyDFA, pool : CachePool, builder : DFABuilder) : DFACache?
+    # The block returns the scratch space the cache builds states in, and
+    # runs only once the reservation succeeds, so a refused cache allocates
+    # nothing. A lease's forward and reverse caches share one builder
+    # (`SearchLease#builder`), as they never build at the same time. Each
+    # cache still reserves the scratch space as its own, so the pool's
+    # count stays an upper bound.
+    def self.reserve?(dfa : LazyDFA, pool : CachePool, & : -> DFABuilder) : DFACache?
       reservation = CacheReservation.new(pool)
       return nil unless reservation.cover(initial_bytes(dfa), ceiling: pool.max_cache_bytes)
-      new(dfa, pool, reservation, builder)
+      new(dfa, pool, reservation, yield)
     end
 
     # The bytes a new cache takes before its first state is built.

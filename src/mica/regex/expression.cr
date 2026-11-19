@@ -87,12 +87,21 @@ module Mica::Regex
     end
 
     # Returns the first match in *string* at or after character index
-    # *pos*, or nil.
+    # *pos*, or nil (also when *pos* is negative or past the end).
+    #
+    # Character 0 is byte 0, so that call is `match_at_byte_index`. Any
+    # other *pos* opens the searcher first, which reads the deadline and
+    # validates the haystack, and the searcher finds the byte index of
+    # *pos* under the call's meter (`Searcher#byte_index_of_char`).
     def match(string : String, pos : Int32 = 0, options : MatchOptions = MatchOptions::None, *,
               limits : SearchLimits, timeout : Time::Span? = nil) : MatchData?
-      byte_index = string.char_index_to_byte_index(pos)
+      return match_at_byte_index(string, 0, options, limits: limits, timeout: timeout) if pos == 0
+      searcher = Searcher.open(@program, string, limits, timeout, @cache_pool)
+      byte_index = searcher.byte_index_of_char(pos)
       return nil unless byte_index
-      match_at_byte_index(string, byte_index, options, limits: limits, timeout: timeout)
+      find_match(searcher, string, byte_index, options, limits, timeout)
+    ensure
+      searcher.try(&.finish)
     end
 
     # Like `match`, but raises `MatchNotFoundError` when nothing matches.
@@ -132,6 +141,15 @@ module Mica::Regex
         return MatchData.new(self, string, byte_index, slots) unless finish == LazyDFA::GAVE_UP
       end
       searcher = Searcher.open(@program, string, limits, timeout, @cache_pool)
+      find_match(searcher, string, byte_index, options, limits, timeout)
+    ensure
+      searcher.try(&.finish)
+    end
+
+    # The first match *searcher* finds in *string* from *byte_index*, with
+    # its groups read now or left to `GroupReader`.
+    private def find_match(searcher : Searcher, string : String, byte_index : Int32, options : MatchOptions,
+                           limits : SearchLimits, timeout : Time::Span?) : MatchData?
       if searcher.defers_groups?
         found = searcher.find(byte_index, options, false)
         return nil unless found
@@ -141,8 +159,6 @@ module Mica::Regex
         found = searcher.find(byte_index, options, true)
         found ? MatchData.new(self, string, byte_index, found) : nil
       end
-    ensure
-      searcher.try(&.finish)
     end
 
     # :nodoc:
@@ -167,12 +183,17 @@ module Mica::Regex
     end
 
     # Returns true when *string* has a match at or after character index
-    # *pos*. Stops at the first match it reaches.
+    # *pos*. Stops at the first match it reaches. A *pos* other than 0 is
+    # read as `match` reads it.
     def matches?(string : String, pos : Int32 = 0, options : MatchOptions = MatchOptions::None, *,
                  limits : SearchLimits, timeout : Time::Span? = nil) : Bool
-      byte_index = string.char_index_to_byte_index(pos)
+      return matches_at_byte_index?(string, 0, options, limits: limits, timeout: timeout) if pos == 0
+      searcher = Searcher.open(@program, string, limits, timeout, @cache_pool)
+      byte_index = searcher.byte_index_of_char(pos)
       return false unless byte_index
-      matches_at_byte_index?(string, byte_index, options, limits: limits, timeout: timeout)
+      searcher.matches?(byte_index, options)
+    ensure
+      searcher.try(&.finish)
     end
 
     # Returns true when *string* has a match at or after byte *byte_index*.
