@@ -85,7 +85,9 @@ module Mica::Regex
       @ledger.charge_object(instance_sizeof(Compiler), "the compiler", 0)
       @ledger.charge_array(capacity, sizeof(Program::State), "the program states", 0)
       @list_of_states = Array(Program::State).new(capacity)
-      transition_bound = transitions_bound
+      # A program of few states has few transitions; it skips the bound
+      # and grows its list as it emits.
+      transition_bound = @estimate >= PRESIZE_MIN_STATES ? transitions_bound : 0_i64
       if PRESIZED_TRANSITIONS <= transition_bound <= @limits.max_program_states
         @ledger.charge_array(transition_bound, sizeof(Program::Transition), "the program transitions", 0)
         @list_of_transitions = Array(Program::Transition).new(transition_bound.to_i32)
@@ -106,6 +108,8 @@ module Mica::Regex
     # A program bound to have at least this many transitions gets its
     # transition list allocated once, at the bound, rather than grown.
     private PRESIZED_TRANSITIONS = 512_i64
+    # Programs bound to fewer states than this never need the transition bound.
+    private PRESIZE_MIN_STATES = 128_i64
 
     # An upper bound on the transitions the program's classes emit: each
     # class's transitions (a large class's memoized block exactly, a small
