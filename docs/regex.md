@@ -352,7 +352,12 @@ program's own) and numbers its states as the copies would be numbered,
 so compiling `\p{L}{256}` takes about as long as `\p{L}`, and
 `\b\w{25,}\b` about as long as `\b\w+\b`. A first search reads the run's
 states through `Program#state_at` (or `Program#each_state`), which
-works each one out from the block, and the plan writes `list_of_states`
+works each one out from the block: it finds the run by a binary search
+over the runs, and the engines charge the call's meter one operation for
+each run a read looks at, before it looks (at most
+`Program#run_reads_per_state`, the bit length of the run count plus
+one), so `max_work` and the deadline bound the lookups as they bound the
+visits. The plan writes `list_of_states`
 out (for a large class, the program the copies written out compile to,
 state for state) when it is first built. The bytes the written-out
 states take are charged to the compilation as the preflight bound.
