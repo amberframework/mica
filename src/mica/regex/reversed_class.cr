@@ -49,10 +49,9 @@ module Mica::Regex
     # first state, `EXIT` for the exit). Nil when the block is not a plain
     # class.
     private def self.shape_of(program : Program, block : Program::ClassBlock) : Array(Int32)?
-      states = program.list_of_states
       shape = Array(Int32).new((block.end_state - block.first_state) * 4)
       (block.first_state...block.end_state).each do |index|
-        state = states[index]
+        state = program.state_at(index)
         if state.kind.byte_range?
           shape << 1
           return nil unless add_edge(shape, state.low, state.high, state.next_state, block)

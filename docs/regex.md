@@ -336,12 +336,21 @@ byte ranges in a trie, so a class emits at most the byte ranges the size
 preflight counted for it). A large class (16 ranges or more, such as `\w`
 or `\p{L}`, or any class reaching three-byte sequences, such as `.` or
 `[^"']`) is built once per process as a minimal automaton, its equal
-suffixes sharing states. A program copies only its states (one memory
-copy, relocated in place): their `Sparse` states read the class's
-transitions from one table shared by every program and copy
+suffixes sharing states. A program copies its states (one memory copy,
+relocated in place), except the copies a counted repetition makes of
+such a class (`\w{25,}`, `\p{L}{2,8}`): each of those is one record
+(`Program::ClassCopy`: the automaton, the copy's first state number and
+its exit), numbered after the states the program holds. The first search
+that reads a copy's state (`Program#state_at`) writes the copies out
+once, so compiling costs what the first search needs and the engines
+then read every state from one array; the bytes the written-out states
+take are charged to the compilation as the preflight bound. Every copy's
+`Sparse` states read the class's transitions
+from one table shared by every program and copy
 (`Program#list_of_shared_tables`, targets relative to the reading state),
-so a copy of `\w` adds 354 states and no transitions. The preflight
-counts its exact states.
+so a copy of `\w` adds 354 states (or one record) and no transitions,
+and `\b\w{25,}\b` compiles in about 2.5 µs instead of 15. The preflight
+counts its exact states, and every bound in m counts the copies' states.
 A class of one escape or property lowers to a set shared by the process,
 and so does every written class of up to 32 items (`[0-9a-f]`, kept for
 up to 512 classes, the table emptied and refilled when full), each ASCII
@@ -426,7 +435,7 @@ it did in R2) picks the fastest correct path for each search:
 |---|---|---|---|
 | 1 | **Required bytes**: no engine when the haystack lacks a byte every match reads (see "Required bytes") | `Auto` | one `memchr` pass per required byte, at most once per call |
 | 1 | **Literal search** | the pattern is a finite set of literals with no assertion (`LiteralSet#exact?`), and the search is not anchored | O(n) prefilter scan plus the literal bytes compared at each candidate |
-| 1 | **One-pass search**: span and groups in one pass | the pattern is one-pass and the search is anchored with groups wanted, or the pattern has prefix literals: tried at each prefilter candidate (see "Short searches") | one transition per byte read |
+| 1 | **One-pass search**: span and groups in one pass | the pattern is one-pass and the search is anchored with groups wanted (once a search built the one-pass DFA, or when the forward DFA has read max(4096, 64·m) bytes undecided; a DFA with no left-out paths then reads to the match end), or the pattern has prefix literals: tried at each prefilter candidate (see "Short searches") | one transition per byte read |
 | 1 | **Lazy DFAs**: forward for `e`, reverse for `s` | every program without `\G`, unless `FirstLine` or `EndAnchored` is set | one table read per byte; O(m) per state built |
 | 1 | **Forward DFA from each start** ("Short matches"): finds `s` for a program whose matches span at most 512 bytes while its reverse cache thrashes, and searches it while its forward cache thrashes | the program has a match bound | at most `longest` + 1 table reads per start |
 | 1 | **Pike VM**, span layout | otherwise, and whenever a lazy DFA gives up | O(m·(n + 1)) |
@@ -435,7 +444,12 @@ it did in R2) picks the fastest correct path for each search:
 
 While the forward DFA sits in its start state, the prefilter (when the
 pattern has prefix literals) skips to the next position where a literal
-starts. A pattern whose every match starts at `\A` is searched anchored,
+starts. A DFA state that loops to itself (`.*`, `[^"]*`, and the start
+state of a pattern without literals) is stepped in a run whose table
+loads do not wait on each other; after a run shorter than 32 bytes the
+forward DFA steps byte by byte for the next 1,024, so the letters of a
+word under `\w+` cost nothing extra. The one-pass DFA steps such states
+the same way. A pattern whose every match starts at `\A` is searched anchored,
 with no reverse DFA. A lazy DFA gives up, and the search runs on the Pike
 VM, when its cache thrashes or when the `CachePool` has no room. Once a DFA gives up in a call, the
 call's later searches go straight to the Pike VM, so the work a thrashing
@@ -783,7 +797,7 @@ alone finds matches, in priority order at the leftmost candidate.
 
 | Searcher | When | How |
 |---|---|---|
-| Rare byte | one literal | `memchr` for its least common byte by a fixed frequency rank (non-ASCII lead bytes rank as common, continuation bytes as rare), then the literal is compared around it |
+| Rare byte | one literal | `memchr` for its least common byte by a fixed frequency rank (non-ASCII lead bytes rank as common, continuation bytes as rare), then the literal is compared around it. When that byte is still common (the space or one of the eleven most common letters), it looks for a pair instead: the two least common bytes at their distance in the literal, eight positions per step in one 64-bit word |
 | First bytes | at most three distinct first bytes | `memchr` for each, keeping where each was last found so no byte is read twice |
 | Packed (Teddy style) | up to 64 literals | three 256-entry masks, one per leading byte, a bit per literal; a position is a candidate when the masks share a bit, and only those literals are compared |
 
@@ -855,7 +869,7 @@ C x its bound, and growth from x1 to x8 must stay under 8 x 1.25.
 
 | Family | Varies | Bound | C | Checked |
 |---|---|---|---|---|
-| Each prefilter on a candidate-dense haystack: rare byte `ab[0-9]{3}x` and first bytes `(?:ab\|ba\|ca)[0-9]` over `"abz"`·k, packed `(?:ab\|bc\|cd\|de\|ef)[0-9]` over `"abzbczcdzdezefz"`·k, the literal search `aaab\|aaac\|aaad` over `"a"`·n | n = 4,000 to 32,000 bytes | m·(n + 1) | 16 | linear growth; the guard turns a dense prefilter off and leaves a sparse one on |
+| Each prefilter on a candidate-dense haystack: rare byte `ab[0-9]{3}x`, rare pair `ea[0-9]{3}x` over `"eaz"`·k and `eaea` over `"eae"`·k, and first bytes `(?:ab\|ba\|ca)[0-9]` over `"abz"`·k, packed `(?:ab\|bc\|cd\|de\|ef)[0-9]` over `"abzbczcdzdezefz"`·k, the literal search `aaab\|aaac\|aaad` over `"a"`·n | n = 4,000 to 32,000 bytes | m·(n + 1) | 16 | linear growth; the guard turns a dense prefilter off and leaves a sparse one on |
 | Cache thrash: `(a\|b)*a(a\|b){20}c` over random `a`/`b` with a 96 KiB cache | n = 8,000 to 64,000 | m·(n + 1) | 8 | the DFA gives up and the Pike VM keeps growth linear |
 | From each start: `[a-q][^u-z]{13}[u-z]` over `"a"`·n on `Engine::EachStart`, where every start reads 14 bytes and none matches | n = 4,000 to 32,000 | m·(n + 1) | 2 | linear growth |
 | Iteration: `\w+` over words, one searcher for the whole scan | n = 5,000 to 40,000 | m·(n + 1) | 4 | linear growth over the whole call |

@@ -161,9 +161,9 @@ module Mica::Regex
 
     # The assertion kinds *program* uses.
     def self.looks_used(program : Program) : Array(Program::LookKind)
-      program.list_of_states.compact_map do |state|
-        Program::LookKind.new(state.argument) if state.kind.look?
-      end.uniq!
+      list_of_kinds = [] of Program::LookKind
+      program.each_state { |state, _| list_of_kinds << Program::LookKind.new(state.argument) if state.kind.look? }
+      list_of_kinds.uniq!
     end
 
     protected def self.unicode_word?(kind : Program::LookKind) : Bool
@@ -205,6 +205,11 @@ module Mica::Regex
       {start, start + length, Look.word_after?(haystack, start, false)}
     end
 
+    # A self-loop run in `find_end` shorter than this is short.
+    SHORT_RUN = 32
+    # The bytes `find_end` steps one by one after a short run.
+    RUN_BACKOFF = 1024
+
     # Searches forward from *start* for the end of the leftmost-first
     # match, reading to the end of *haystack*. Returns the end, `NO_MATCH`,
     # or `GAVE_UP` (the caller then runs the Pike VM). With *earliest*,
@@ -234,6 +239,8 @@ module Mica::Regex
       # The character the last non-ASCII byte belonged to (see `wide_char`).
       wide_start = wide_end = 0
       wide_word = false
+      # Where self-loop runs may start again (see `RUN_BACKOFF`).
+      runs_from = 0
       while true
         if scan && current & START_ENTRY != 0
           candidate = scan.find(at, meter)
@@ -278,6 +285,21 @@ module Mica::Regex
             chunk_end = at + meter.readable(wanted_end - at, at)
           end
           at &+= 1
+          if entry == current && at >= runs_from && entry & SPECIAL == 0 && !words &&
+             (scan.nil? || entry & START_ENTRY == 0)
+            # A state that loops to itself (`.*`, `[^"]*`, the start state
+            # between candidates): its row stays, so the loads of the run
+            # no longer wait on each other. A short run (the letters of a
+            # word under `\w+`) pays more for leaving this loop than it
+            # saves, so after one the search steps byte by byte for
+            # `RUN_BACKOFF` bytes.
+            run_start = at
+            row = entry & ROW_MASK
+            while at < chunk_end && table[row &+ class_table[bytes[at]]] == entry
+              at &+= 1
+            end
+            runs_from = at + RUN_BACKOFF if at - run_start < SHORT_RUN
+          end
           current = entry
           if entry & (SPECIAL | START_ENTRY) != 0
             break if scan && entry & START_ENTRY != 0
@@ -654,14 +676,13 @@ module Mica::Regex
       builder.reset
       matched = false
       quit = false
-      states = @program.list_of_states
       explore = ->(seed : Int32) do
         builder.push(seed)
         while current = builder.pop?
           while true
             break unless builder.visit(current)
             meter.charge(1, 0)
-            state = states.unsafe_fetch(current)
+            state = @program.state_at(current)
             case state.kind
             when .byte_range?, .sparse?
               builder.output(current)
@@ -706,7 +727,7 @@ module Mica::Regex
       next_flags |= symbol_flags(byte, symbol)
       builder.begin_targets(next_flags & @relevant_flags)
       builder.each_output do |state_index|
-        state = states.unsafe_fetch(state_index)
+        state = @program.state_at(state_index)
         target = if state.kind.byte_range?
                    state.low <= byte <= state.high ? state.next_state : -1
                  else

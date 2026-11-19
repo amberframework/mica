@@ -106,10 +106,9 @@ module Mica::Regex
     # transition read at most once per candidate, and in practice about
     # once).
     def self.required_bytes(program : Program) : Array(UInt8)
-      states = program.list_of_states
       seen = StaticArray(Bool, 128).new(false)
       list_of_candidates = [] of UInt8
-      states.each do |state|
+      program.each_state do |state, _|
         next unless state.kind.byte_range? && state.low == state.high && state.low < 0x80
         next if seen[state.low]
         seen[state.low] = true
@@ -132,16 +131,15 @@ module Mica::Regex
     # the start state to a match state avoids: no state on it reads only
     # that byte.
     private def self.avoided_on_the_way_to_a_match(program : Program, list_of_candidates : Array(UInt8)) : UInt8
-      states = program.list_of_states
       blocking = StaticArray(UInt8, 128).new(0_u8)
       list_of_candidates.each_with_index { |byte, index| blocking[byte] = 1_u8 << index }
-      marks = Array(UInt8).new(states.size, 0_u8)
+      marks = Array(UInt8).new(program.state_count, 0_u8)
       list_of_pending = [program.start_state]
       marks[program.start_state] = ((1 << list_of_candidates.size) - 1).to_u8
       at_match = 0_u8
       while index = list_of_pending.pop?
         here = marks[index]
-        state = states[index]
+        state = program.state_at(index)
         case state.kind
         when .match?
           at_match |= here
@@ -208,14 +206,13 @@ module Mica::Regex
     # a 0-1 breadth-first search, byte states weighing one and every other
     # state nothing. O(m) for m states (and their sparse transitions).
     def self.shortest_match(program : Program) : Int32
-      states = program.list_of_states
-      distance = Array(Int32).new(states.size, Int32::MAX)
+      distance = Array(Int32).new(program.state_count, Int32::MAX)
       deque = Deque(Int32).new
       distance[program.start_state] = 0
       deque << program.start_state
       while index = deque.shift?
         here = distance[index]
-        state = states[index]
+        state = program.state_at(index)
         case state.kind
         when .match?
           return here
@@ -247,12 +244,11 @@ module Mica::Regex
     # Marks every byte a transition reachable from the start state without
     # reading a byte can read first.
     private def collect_start_bytes(program : Program) : Nil
-      states = program.list_of_states
       visited = Set(Int32).new
       list_of_pending = [program.start_state]
       while index = list_of_pending.pop?
         next unless visited.add?(index)
-        state = states[index]
+        state = program.state_at(index)
         case state.kind
         when .split?
           list_of_pending << state.next_state << state.alternate
@@ -298,11 +294,10 @@ module Mica::Regex
     # Yields each state that reads a byte (`ByteRange` or `Sparse`) reachable
     # from *list_of_pending* without reading one.
     private def each_reading_state(program : Program, list_of_pending : Array(Int32), & : Int32, Program::State ->) : Nil
-      states = program.list_of_states
       visited = Set(Int32).new
       while index = list_of_pending.pop?
         next unless visited.add?(index)
-        state = states[index]
+        state = program.state_at(index)
         case state.kind
         when .split?
           list_of_pending << state.next_state << state.alternate

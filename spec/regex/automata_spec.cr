@@ -149,6 +149,36 @@ describe "Mica::Regex R3 engines" do
         end
       end
     end
+
+    it_satisfies "REGEX-R3-differential", "reads each copy of a large class in place, holding one record per copy" do
+      long_words = program("\\b\\w{25,}\\b")
+      # A copy of `\w`: the states of its memoized automaton.
+      word = program("\\w{2}").list_of_class_copies.first.list_of_template_states.size
+      word.should be > 300
+      long_words.list_of_class_copies.size.should eq(25)
+      long_words.held_state_count.should be < 16
+      long_words.state_count.should eq(long_words.held_state_count + 25 * word)
+      long_words.list_of_states.size.should eq(long_words.state_count)
+      long_words.list_of_class_copies.each do |copy|
+        copy.list_of_template_states.size.should eq(word)
+        copy.first_state.should be >= long_words.held_state_count
+      end
+      # A class no counted repetition repeats keeps its states in the program.
+      program("(w+)s+(w+)").list_of_class_copies.should be_empty
+    end
+
+    it_satisfies "REGEX-R3-differential", "finds the same spans on every engine path through class copies" do
+      haystack = "short words, then Donaudampfschifffahrtsgesellschaftskapitän and " \
+                 "Привет_Привет_Привет_Привет_мир, ok\n" + "abcdefghijklmnopqrstuvwxyzé" * 3
+      ["\\b\\w{25,}\\b", "(\\w{2,4})+\\s", "\\w{3}(\\pL{2})?", "(?:\\pL{0,2}|\\d)*_", "^\\w{25}$", "(?m)^\\w{25,}$",
+       "[^\\s,]{20}", "(?i)\\w{5}k\\w*"].each do |source|
+        expected = span(source, haystack, Mica::Regex::Engine::PikeVM).first
+        Mica::Regex::Engine.values.each do |engine|
+          next if engine.backtracker? && !Mica::Regex::BoundedBacktracker.fits?(program(source), haystack.bytesize)
+          span(source, haystack, engine).first.should eq(expected), "#{source} on #{engine}"
+        end
+      end
+    end
   end
 
   describe "literal sets and prefilters" do
@@ -213,6 +243,38 @@ describe "Mica::Regex R3 engines" do
           found.should eq(off.find(offset, Mica::Regex::MatchOptions::None, false).try(&.to_a))
           break unless found
           offset = found[1] > found[0] ? found[1].to_i32 : found[0].to_i32 + 1
+        end
+      end
+    end
+
+    it_satisfies "REGEX-R3-accelerators", "looks for a pair of bytes when a literal's rarest byte is common, finding every match" do
+      paired = program("aeaeaeaeae").plan.prefilter.should_not be_nil
+      paired.pair_gap.should eq(1)
+      paired.list_of_needles.should eq(['a'.ord.to_u8, 'e'.ord.to_u8])
+      program("sherlock\\d").plan.prefilter.try(&.pair_gap).should eq(0)
+      random = Random::PCG32.new(20261119_u64)
+      ["aeaeaeaeae", "the", "ea", "aa", "tea tea", "a e"].each do |source|
+        expression = Mica::Regex::Expression.new(source, compile_limits: TRUSTED)
+        expression.program.end_first_searches
+        expression.program.plan.prefilter.try(&.pair_gap).should_not eq(0)
+        40.times do |round|
+          # Matches planted at every offset modulo 8, at the start and at the
+          # very end, among bytes that make false lanes in the word test.
+          haystack = String.build do |io|
+            (round % 9).times { io << "ta e"[random.rand(4)] }
+            io << source if round.odd?
+            (50 + random.rand(200)).times { io << (random.rand(23) == 0 ? source : "aeth \x01"[random.rand(6)].to_s) }
+            io << source if round % 3 == 0
+          end
+          on = Mica::Regex::Searcher.new(expression.program, haystack, LIMITS, nil, Mica::Regex::Engine::Auto)
+          off = Mica::Regex::Searcher.new(expression.program, haystack, LIMITS, nil, Mica::Regex::Engine::PikeVM)
+          offset = 0
+          while true
+            found = on.find(offset, Mica::Regex::MatchOptions::None, false).try(&.to_a)
+            found.should eq(off.find(offset, Mica::Regex::MatchOptions::None, false).try(&.to_a.first(2)))
+            break unless found
+            offset = found[1].to_i32
+          end
         end
       end
     end

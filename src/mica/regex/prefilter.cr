@@ -8,7 +8,9 @@ module Mica::Regex
   #   distinct bytes; each is found with `memchr`, which libc vectorizes;
   # - **rare byte**: one literal; its least common byte (by a fixed
   #   frequency rank) is found with `memchr` and the literal is checked
-  #   around it;
+  #   around it. When even that byte is common in text (`COMMON_RANK`),
+  #   the searcher looks for a pair instead, the two least common bytes
+  #   at their distance in the literal, eight positions per step;
   # - **packed** (Teddy style): up to 64 literals; three 256-entry masks,
   #   one per leading byte position, say which literals can have that byte
   #   there, and a position is a candidate when the three masks share a bit.
@@ -30,10 +32,15 @@ module Mica::Regex
 
     getter kind : Kind
     getter literal_set : LiteralSet
-    # The distinct first bytes (`FirstBytes`) or the rare byte (`RareByte`).
+    # The distinct first bytes (`FirstBytes`), or the rare byte or pair
+    # (`RareByte`).
     getter list_of_needles : Array(UInt8)
-    # For `RareByte`, where the rare byte sits in the literal.
+    # For `RareByte`, where the rare byte (or the first of the pair) sits
+    # in the literal.
     getter needle_offset : Int32
+    # For `RareByte` with a pair, how far the second byte of the pair sits
+    # after the first (0 without a pair).
+    getter pair_gap : Int32
     # For `Packed`, how many leading bytes the masks cover (1 to 3).
     getter mask_width : Int32
     @masks : Slice(UInt64)
@@ -46,6 +53,7 @@ module Mica::Regex
       @starting_with = StaticArray(UInt64, 256).new(0_u64)
       @literals.each_with_index { |literal, index| @starting_with[literal[0]] |= 1_u64 << index }
       @needle_offset = 0
+      @pair_gap = 0
       @mask_width = 0
       @masks = Slice(UInt64).empty
       first_bytes = @literals.map(&.[0]).uniq!
@@ -54,6 +62,16 @@ module Mica::Regex
         literal = @literals[0]
         @needle_offset = (0...literal.size).min_by { |index| Prefilter.rank(literal[index]) }
         @list_of_needles = [literal[@needle_offset]]
+        if literal.size > 1 && Prefilter.rank(literal[@needle_offset]) >= COMMON_RANK
+          # The second byte is the least common of the other offsets, a
+          # different byte value first (a pair of two values is rarer).
+          rare = literal[@needle_offset]
+          other = (0...literal.size).reject(@needle_offset).min_by { |index| {literal[index] == rare ? 1 : 0, Prefilter.rank(literal[index])} }
+          first, second = {@needle_offset, other}.minmax
+          @needle_offset = first
+          @pair_gap = second - first
+          @list_of_needles = [literal[first], literal[second]]
+        end
       elsif first_bytes.size <= 3
         @kind = Kind::FirstBytes
         @list_of_needles = first_bytes
@@ -128,6 +146,11 @@ module Mica::Regex
       COMMON_BYTES.index(byte.unsafe_chr).try { |index| 255 - index } || 64
     end
 
+    # The rank from which a rare byte is too common for `memchr` to skip
+    # far: the space and the eleven most common letters, each found every
+    # few dozen bytes of text.
+    COMMON_RANK = 243
+
     # Bytes in descending order of how often they occur in English text and
     # source code.
     COMMON_BYTES = " etaoinsrhldcumfpgwybvkxjqzETAOINSRHLDCUMFPGWYBVKXJQZ0123456789\n.,;:-_'\"()/=<>{}[]*#\t"
@@ -148,6 +171,10 @@ module Mica::Regex
     MINIMUM_SKIP     =  8
     # The bytes a scan reads between two charges to the meter.
     CHARGE_CHUNK = 4096
+    # A byte in every lane of a word, and the high bit of every lane (the
+    # pair search).
+    LANE_ONES  = 0x0101010101010101_u64
+    LANE_HIGHS = 0x8080808080808080_u64
 
     getter prefilter : Prefilter
     # How many candidates the scan has verified.
@@ -226,6 +253,7 @@ module Mica::Regex
     end
 
     private def find_rare_byte(from : Int32, meter : SearchMeter) : Int32
+      return find_rare_pair(from, meter) if @prefilter.pair_gap > 0
       offset = @prefilter.needle_offset
       needle = @prefilter.list_of_needles[0]
       at = from
@@ -237,6 +265,72 @@ module Mica::Regex
         at = candidate + 1
       end
       -1
+    end
+
+    # The pair search: a position is a candidate when the pair's first
+    # byte sits at the needle offset after it and the second byte
+    # `Prefilter#pair_gap` further on. Eight positions are tested at once,
+    # one byte per lane of a 64-bit word: a lane holding the wanted byte
+    # becomes zero after an XOR, and the zero-lane test can also flag a
+    # lane above a real zero, so the lowest flagged lane is a candidate
+    # that `accept?` verifies (a false one is skipped like any candidate
+    # that fails). The meter is charged as in `find_packed`.
+    private def find_rare_pair(from : Int32, meter : SearchMeter) : Int32
+      offset = @prefilter.needle_offset
+      gap = @prefilter.pair_gap
+      first = @prefilter.list_of_needles[0]
+      second = @prefilter.list_of_needles[1]
+      first_lanes = LANE_ONES &* first
+      second_lanes = LANE_ONES &* second
+      last = @haystack.size - @prefilter.literal_size(0)
+      at = Math.max(from, 0)
+      bytes = @haystack.to_unsafe
+      while at <= last
+        stop = at + meter.readable(Math.min(CHARGE_CHUNK, last + 1 - at), at) - 1
+        chunk_from = at
+        found = -1
+        while at + 7 <= stop
+          lanes = PrefilterScan.zero_lanes(PrefilterScan.word_at(bytes + at + offset) ^ first_lanes) &
+                  PrefilterScan.zero_lanes(PrefilterScan.word_at(bytes + at + offset + gap) ^ second_lanes)
+          if lanes != 0
+            found = at + lanes.trailing_zeros_count // 8
+            break
+          end
+          at += 8
+        end
+        if found < 0
+          while at <= stop
+            if bytes[at + offset] == first && bytes[at + offset + gap] == second
+              found = at
+              break
+            end
+            at += 1
+          end
+        end
+        if found >= 0
+          meter.charge(found - chunk_from + 1, found)
+          return found if accept?(found, meter)
+          at = found + 1
+        elsif at > chunk_from
+          meter.charge(at - chunk_from, chunk_from)
+        end
+      end
+      meter.charge(@haystack.size - at, at) if at < @haystack.size
+      -1
+    end
+
+    # The eight bytes at *pointer* as one little-endian word (an unaligned
+    # read).
+    protected def self.word_at(pointer : UInt8*) : UInt64
+      word = 0_u64
+      pointerof(word).as(UInt8*).copy_from(pointer, 8)
+      word
+    end
+
+    # The high bit of each lane of *word* that may be zero: every zero lane
+    # is flagged, and a lane above a zero lane can be flagged too.
+    protected def self.zero_lanes(word : UInt64) : UInt64
+      (word &- LANE_ONES) & ~word & LANE_HIGHS
     end
 
     # Returns the first position at or after *from* holding *needle*
