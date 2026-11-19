@@ -816,7 +816,8 @@ match is not one-pass, and its captures come from the backtracker or the
 Pike VM. It is built on the first capture search, for programs of at most
 1,500 states and 64 slots, and runs only over the span phase 1 found.
 In a state that every ASCII byte leads back to with no slot and no
-assertion (the loop of `(?s:.)*` or `[^\n]*`), the capture pass steps
+assertion (the loop of `(?s:.)*` or `[^\n]*`), the capture pass, and the
+one-pass search of a long anchored match, step
 over a run of ASCII bytes eight at a time without reading its table,
 within the bytes the meter has allowed.
 
