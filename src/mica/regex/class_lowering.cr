@@ -158,6 +158,7 @@ module Mica::Regex
       return nil unless options.ignore_case? && !dialect.xsd?
       code_point = literal.code_point
       restricted = options.caseless_restrict? && dialect.crystal?
+      return shared_ascii_fold(literal, restricted, limits, meter) if code_point < 0x80
       members = StaticArray(Int32, 8).new(0)
       count = 1
       members[0] = code_point
@@ -188,6 +189,42 @@ module Mica::Regex
         end
       end
       CodePointSet.from_bounds(bounds)
+    end
+
+    # The folded set of an ASCII literal, shared by the process (see
+    # `ASCII_FOLDS`): a case-insensitive pattern folds most of its
+    # characters, and each would otherwise make a set of its own. The set
+    # is held to `max_class_ranges` and charged to *meter* as one made for
+    # the literal would be; nothing is allocated, so the ledger is not
+    # charged.
+    private def self.shared_ascii_fold(literal : Ast::Literal, restricted : Bool, limits : CompileLimits,
+                                       meter : Core::WorkMeter) : CodePointSet?
+      set = ASCII_FOLDS[literal.code_point * 2 + (restricted ? 1 : 0)]
+      return nil unless set
+      offset = literal.offset
+      meter.enforce { Core::Position.new(offset.to_i64) } if meter.charge(set.size.to_i32)
+      if set.range_count > limits.max_class_ranges
+        raise CompileLimitError.new("max_class_ranges", limits.max_class_ranges.to_i64,
+          "A class of #{set.range_count} ranges", Core::Position.new(offset.to_i64))
+      end
+      set
+    end
+
+    # The fold set of each ASCII code point, unrestricted then restricted
+    # (`CaselessRestrict`), or nil for one that matches only itself. Built
+    # once per process on first use and only read afterward.
+    private ASCII_FOLDS = Array(CodePointSet?).new(256) do |index|
+      code_point = index // 2
+      restricted = index.odd?
+      members = [code_point]
+      Unicode.each_fold_partner(code_point) do |partner|
+        members << partner unless restricted && partner >= 0x80
+      end
+      if members.size == 1
+        nil
+      else
+        CodePointSet.new(members.map { |member| {member, member} })
+      end
     end
 
     # Returns the union of *list_of_sets*, charged to *ledger* and *meter*
