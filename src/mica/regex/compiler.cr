@@ -183,6 +183,7 @@ module Mica::Regex
 
     private def class_transitions(set : CodePointSet) : Int64
       return memo_block(set).list_of_transitions.size.to_i64 if ClassMemo.memoized?(set)
+      return set.range_count.to_i64 if set.empty? || set.list_of_bounds[-1] < 0x80
       byte_ranges = 0_i64
       set.each_range { |first, last| byte_ranges += Utf8Sequences.count(first, last)[1] }
       byte_ranges

@@ -102,6 +102,8 @@ module Mica::Regex
     end
 
     private def self.count_set_states(set : CodePointSet) : Int64
+      # An ASCII set is one one-byte sequence per range.
+      return add(set.range_count.to_i64, set.range_count.to_i64 - 1) if set.list_of_bounds[-1] < 0x80
       sequences = 0_i64
       byte_ranges = 0_i64
       set.each_range do |first, last|
