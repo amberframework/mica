@@ -265,8 +265,16 @@ module Mica::Regex
           @slots[-(job.state + 1)] = job.at
           next
         end
-        current = job.state
-        at = job.at.to_i32
+        if job.state >= STARTS_JOB
+          @visits_left = visits_left
+          current, at = take_from_starts(program, job, haystack, start, columns, end_bound, meter)
+          visits_left = @visits_left
+          return false if current == GAVE_UP
+          next if current < 0
+        else
+          current = job.state
+          at = job.at.to_i32
+        end
         while true
           bit = current.to_i64 * columns + (at - start)
           if sparse
@@ -323,6 +331,18 @@ module Mica::Regex
             current = target
             at += 1
           when .split?
+            unless runs_pending
+              body = program.state_at(state.next_state)
+              if body.kind.byte_range? || body.kind.sparse?
+                @visits_left = visits_left
+                current, at = follow_byte_loop(program, current, state, body, at, haystack, start, columns,
+                  end_bound, meter)
+                visits_left = @visits_left
+                return false if current == GAVE_UP
+                break if current < 0
+                next
+              end
+            end
             push_job(state.alternate, at.to_i64)
             current = state.next_state
           when .save?
@@ -351,6 +371,167 @@ module Mica::Regex
 
     # `follow_run`'s answer when the search reached its visit limit.
     private GAVE_UP = -2
+
+    # Added to a state number, a job of starts: explore that state at each
+    # position from the first to the last, the last first, as the jobs one
+    # `Split` per position pushes would be taken (see `follow_byte_loop`).
+    # The job's `at` holds the first position in its high 32 bits and the
+    # last in its low ones.
+    private STARTS_JOB = 1 << 30
+
+    # Follows a `Split` (number *split_index*, its pair at *at* marked and
+    # charged) whose preferred branch is *body*, a byte state, for as long
+    # as the byte read leads back to the split: a greedy loop such as
+    # `.*`. It visits the pairs the general loop would, in the same order
+    # and with the same charges, but pushes the alternate at each position
+    # it passes as one job of starts. Returns the state after the body,
+    # with its position, when the body leaves the loop; -1 when the thread
+    # ends (a byte the body does not take, a pair visited before, the end
+    # of the span); `GAVE_UP` at the visit limit.
+    private def follow_byte_loop(program : Program, split_index : Int32, split : Program::State, body : Program::State,
+                                 at : Int32, haystack : Bytes, start : Int32, columns : Int32, end_bound : Int32,
+                                 meter : SearchMeter) : {Int32, Int32}
+      body_index = split.next_state
+      body_bits = body_index.to_i64 * columns - start
+      split_bits = split_index.to_i64 * columns - start
+      first = at
+      # The ASCII bytes known to lead back to the split, so a run of text
+      # reads the body's ranges once per byte value rather than once per
+      # position.
+      staying = 0_u128
+      # Visits are charged in windows the meter allows (`SearchMeter#readable`),
+      # so it is checked at the same visit as a charge per visit would be.
+      credit = 0
+      uncharged = 0
+      last = at
+      next_state = -1
+      while true
+        break unless first_visit?(body_bits + at)
+        if credit == 0
+          meter.charge(uncharged, at) if uncharged > 0
+          uncharged = 0
+          credit = meter.readable(2 * (end_bound - at) + 2, at)
+        end
+        unless count_visit
+          next_state = GAVE_UP
+          break
+        end
+        credit -= 1
+        uncharged += 1
+        break unless at < end_bound
+        byte = haystack.unsafe_fetch(at)
+        target = if byte < 128 && (staying >> byte) & 1 == 1
+                   split_index
+                 else
+                   byte_target(program, body_index, body, byte)
+                 end
+        unless target == split_index
+          next_state = target
+          break
+        end
+        staying |= 1_u128 << byte if byte < 128
+        last = at
+        at += 1
+        break unless first_visit?(split_bits + at)
+        if credit == 0
+          meter.charge(uncharged, at) if uncharged > 0
+          uncharged = 0
+          credit = meter.readable(2 * (end_bound - at) + 2, at)
+        end
+        unless count_visit
+          next_state = GAVE_UP
+          break
+        end
+        credit -= 1
+        uncharged += 1
+        last = at
+      end
+      meter.charge(uncharged, at) if uncharged > 0
+      return {GAVE_UP, at} if next_state == GAVE_UP
+      push_starts(split.alternate, first, last)
+      next_state < 0 ? {-1, at} : {next_state, at + 1}
+    end
+
+    # Takes the next start from a job of starts, leaving the rest on the
+    # stack, and returns the pair to explore, not yet marked. When the
+    # job's state is a byte state, the starts whose byte it does not take
+    # are visited here (marked, counted and charged, as the general loop
+    # would), and the pair returned is the one after the byte it takes.
+    # Returns -1 when no start is left to explore and `GAVE_UP` at the
+    # visit limit.
+    private def take_from_starts(program : Program, job : Job, haystack : Bytes, start : Int32, columns : Int32,
+                                 end_bound : Int32, meter : SearchMeter) : {Int32, Int32}
+      state_index = job.state - STARTS_JOB
+      first = (job.at >> 32).to_i32
+      at = (job.at & 0xFFFF_FFFF).to_i32
+      state = program.state_at(state_index)
+      unless state.kind.byte_range? || state.kind.sparse?
+        push_starts(state_index, first, at - 1) if at > first
+        return {state_index, at}
+      end
+      state_bits = state_index.to_i64 * columns - start
+      # The ASCII bytes the state is known not to take, and the visits
+      # charged in windows, as in `follow_byte_loop`.
+      refused = 0_u128
+      credit = 0
+      uncharged = 0
+      target = -1
+      while at >= first
+        if first_visit?(state_bits + at)
+          if credit == 0
+            meter.charge(uncharged, at) if uncharged > 0
+            uncharged = 0
+            credit = meter.readable(at - first + 1, at)
+          end
+          unless count_visit
+            target = GAVE_UP
+            break
+          end
+          credit -= 1
+          uncharged += 1
+          if at < end_bound
+            byte = haystack.unsafe_fetch(at)
+            unless byte < 128 && (refused >> byte) & 1 == 1
+              target = byte_target(program, state_index, state, byte)
+              break if target >= 0
+              refused |= 1_u128 << byte if byte < 128
+            end
+          end
+        end
+        at -= 1
+      end
+      meter.charge(uncharged, at) if uncharged > 0
+      return {GAVE_UP, at} if target == GAVE_UP
+      return {-1, at} if target < 0
+      push_starts(state_index, first, at - 1) if at > first
+      {target, at + 1}
+    end
+
+    # Counts one visit against the search's visit limit; false (having
+    # set `gave_up?`) when the limit is reached.
+    @[AlwaysInline]
+    private def count_visit : Bool
+      return true if (@visits_left -= 1) >= 0
+      @gave_up = true
+      false
+    end
+
+    # Pushes the starts of *state* from *first* to *last* as one job.
+    @[AlwaysInline]
+    private def push_starts(state : Int32, first : Int32, last : Int32) : Nil
+      push_job(state + STARTS_JOB, (first.to_i64 << 32) | last.to_i64)
+    end
+
+    # The target of byte state *state* (number *state_index*) for *byte*,
+    # or -1.
+    @[AlwaysInline]
+    private def byte_target(program : Program, state_index : Int32, state : Program::State, byte : UInt8) : Int32
+      if state.kind.byte_range?
+        state.low <= byte <= state.high ? state.next_state : -1
+      else
+        program.sparse_target(state_index, state, byte)
+      end
+    end
 
     # Follows the class copies of *run* from *current* (a state of the run
     # whose pair at *at* is marked and charged) over the haystack, and
