@@ -319,8 +319,9 @@ lowers to a set shared by the process, an alternation of classes and
 single characters around a large class compiles as their union, and a
 repeated small class is built once and copied. The compiler expands
 repetitions, never recurses on the pattern (it keeps a task stack),
-charges every allocation to the ledger, checks `max_program_states` as it emits and `max_pike_bytes`
-when it finishes, and never emits more states than the preflight bound.
+charges every allocation to the ledger, checks `max_program_states` as
+it emits and `max_pike_bytes` when it finishes, and never emits more
+states than the preflight bound.
 There is no unanchored `.*?` prefix: the engines start a thread at each
 character boundary instead.
 
