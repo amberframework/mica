@@ -748,6 +748,10 @@ dropped. A pattern where two paths meet the same byte class, NFA state or
 match is not one-pass, and its captures come from the backtracker or the
 Pike VM. It is built on the first capture search, for programs of at most
 1,500 states and 64 slots, and runs only over the span phase 1 found.
+In a state that every ASCII byte leads back to with no slot and no
+assertion (the loop of `(?s:.)*` or `[^\n]*`), the capture pass steps
+over a run of ASCII bytes eight at a time without reading its table,
+within the bytes the meter has allowed.
 
 ## Literal acceleration
 

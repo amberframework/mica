@@ -54,6 +54,11 @@ module Mica::Regex
     private STEP_TAKES_EDGE    = 1
     private STEP_REACHES_MATCH = 2
 
+    # Per state: true when every ASCII byte leads back to the state with no
+    # assertion and no slot (`(?s:.)*`, `[^\n]*`), so `captures` steps over
+    # a run of ASCII bytes there without reading the table.
+    @list_of_ascii_loops : Array(Bool)
+
     def initialize(@byte_classes : ByteClasses, @table : Array(Int32), @match_edges : Array(Int32),
                    @list_of_edges : Array(Edge), @list_of_shadows : Array(Bool))
       @class_count = @byte_classes.class_count
@@ -64,6 +69,16 @@ module Mica::Regex
         step |= STEP_TAKES_EDGE if edge.looks != 0 || edge.slots != 0
         step |= STEP_REACHES_MATCH if matches_before_end?(edge.target)
         step
+      end
+      @list_of_ascii_loops = Array(Bool).new(@match_edges.size) { |state| ascii_loop?(state) }
+    end
+
+    private def ascii_loop?(state : Int32) : Bool
+      row = state * @class_count
+      class_of = @byte_classes.table
+      (0...0x80).all? do |byte|
+        step = @steps[row + class_of[byte]]
+        step >= 0 && step & STEP_TAKES_EDGE == 0 && step >> 2 == row
       end
     end
 
@@ -83,27 +98,36 @@ module Mica::Regex
     def captures(haystack : Bytes, start : Int32, finish : Int32, search_start : Int32, slots : Slice(Int64),
                  meter : SearchMeter) : Bool
       slots.fill(PikeVM::UNSET)
-      state = 0
+      row = 0
       at = start
       charged = start
       # Bytes before `allowed_end` are allowed by the meter
       # (`SearchMeter#readable`) and charged once read.
       allowed_end = start
+      steps = @steps.to_unsafe
+      class_of = @byte_classes.table
+      bytes = haystack.to_unsafe
       while at < finish
         if at >= allowed_end
           meter.charge(at - charged, at)
           charged = at
           allowed_end = at + meter.readable(Math.min(finish - at, PrefilterScan::CHARGE_CHUNK), at)
         end
-        index = @table.unsafe_fetch(state * @class_count + @byte_classes.class_of(haystack.unsafe_fetch(at)))
-        return false if index < 0
-        edge = @list_of_edges.unsafe_fetch(index)
-        return false unless take(edge, haystack, at, search_start, slots)
-        state = edge.target
-        at += 1
+        if @list_of_ascii_loops.unsafe_fetch(row // @class_count)
+          at = OnePassDFA.after_ascii(bytes, at, allowed_end)
+          next if at >= allowed_end
+        end
+        cell = row &+ class_of[bytes[at]]
+        step = steps[cell]
+        return false if step < 0
+        if step & STEP_TAKES_EDGE != 0
+          return false unless take(@list_of_edges.unsafe_fetch(@table.unsafe_fetch(cell)), haystack, at, search_start, slots)
+        end
+        row = step >> 2
+        at &+= 1
       end
       meter.charge(finish - charged + 1, charged)
-      index = @match_edges.unsafe_fetch(state)
+      index = @match_edges.unsafe_fetch(row // @class_count)
       return false if index < 0
       take(@list_of_edges.unsafe_fetch(index), haystack, finish, search_start, slots)
     end
@@ -218,6 +242,20 @@ module Mica::Regex
         slots[slot] = at.to_i64
         saved &= saved - 1
       end
+    end
+
+    # The first position from *at* up to *bound* whose byte is not ASCII,
+    # or *bound*: eight bytes at a time while they fit.
+    protected def self.after_ascii(bytes : Pointer(UInt8), at : Int32, bound : Int32) : Int32
+      while at + 8 <= bound
+        word = (bytes + at).as(Pointer(UInt64)).value
+        break if word & 0x8080808080808080_u64 != 0
+        at &+= 8
+      end
+      while at < bound && bytes[at] < 0x80
+        at &+= 1
+      end
+      at
     end
 
     private def take(edge : Edge, haystack : Bytes, at : Int32, search_start : Int32, slots : Slice(Int64)) : Bool

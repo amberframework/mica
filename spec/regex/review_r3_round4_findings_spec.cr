@@ -179,4 +179,10 @@ describe "Mica::Regex R3 fourth review findings" do
     expect_stops_at_the_allowance("([a-z]+)0", haystack, Mica::Regex::Engine::NoAccelerators, true,
       last: haystack.bytesize.to_i64 - 100)
   end
+
+  it_satisfies "REGEX-R3-one-pass", "has the capture pass's ASCII runs allowed before it reads them" do
+    haystack = "abcdefghij" * 2_000
+    expect_stops_at_the_allowance("(?s)\\A((.*)()($))", haystack, Mica::Regex::Engine::NoAccelerators, true,
+      last: haystack.bytesize.to_i64 - 100)
+  end
 end

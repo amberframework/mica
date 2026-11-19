@@ -125,6 +125,21 @@ describe "Mica::Regex R3 engines" do
         span(source, haystack).first.should eq(span(source, haystack, Mica::Regex::Engine::TwoPhase).first)
       end
     end
+
+    it_satisfies "REGEX-R3-one-pass", "steps over a run of ASCII bytes in a state every one loops back to" do
+      haystack = "line one\n" * 50 + "é ß 中 😀 tail\n" + "x" * 37
+      [
+        "(?s)^((.*)()()($))",
+        "(?s)\\A([^\\n]*)\\n(.*)",
+        "(?s)\\A(.*)\\z",
+        "\\A([a-z ]*)(\\d*)",
+      ].each do |source|
+        program(source).plan.one_pass.should_not be_nil
+        {haystack, haystack + "\n", "", "é", "abcdefgh", "abcdefghé"}.each do |subject|
+          span(source, subject).first.should eq(span(source, subject, Mica::Regex::Engine::TwoPhase).first)
+        end
+      end
+    end
   end
 
   describe "shared class tables" do
