@@ -69,6 +69,9 @@ module Mica::Regex
     # per set rather than once per copy.
     @last_memo_set : CodePointSet? = nil
     @last_memo_block : ClassMemo::Block? = nil
+    # The alternation merged into one class last, and its union.
+    @last_merged_node : Hir::Alternation? = nil
+    @last_merged_set : CodePointSet? = nil
     @high_water = StaticArray(Int32, 4).new(0)
     @list_of_visited = [] of Bool
 
@@ -181,6 +184,10 @@ module Mica::Regex
           push_task(TaskKind::Compile, node.list_of_children[count - 1], next_state)
         end
       when Hir::Alternation
+        if set = merged_class(node)
+          push_value(compile_class(set, next_state))
+          return
+        end
         branches = node.list_of_branches
         push_task(TaskKind::AlternationFinish, node, NONE, branches.size)
         (branches.size - 1).downto(0) { |index| push_task(TaskKind::Compile, branches[index], next_state) }
@@ -395,14 +402,49 @@ module Mica::Regex
     # here, before it is allocated, on top of the copies' own charges.
     private def reserve_class_copies(node : Hir::Repetition, maximum : Int32?) : Nil
       child = node.child
-      return unless child.is_a?(Hir::Class)
-      set = child.code_point_set
-      return unless ClassMemo.memoized?(set)
+      set = if child.is_a?(Hir::Class)
+              child.code_point_set
+            elsif child.is_a?(Hir::Alternation)
+              merged_class(child)
+            end
+      return unless set && ClassMemo.memoized?(set)
       copies = maximum || Math.max(node.minimum, 1)
       added = memo_block(set).list_of_transitions.size.to_i64 * copies
       return if added > Int32::MAX // 2
       @ledger.charge(AllocationLedger.granules(added * sizeof(Program::Transition)), "the class transitions of a repetition", 0)
       reserve_transitions(added.to_i32)
+    end
+
+    # The one class an alternation of classes and single characters stands
+    # for, when a branch is a large class: `(?:\p{Lu}|\p{Ll})` matches
+    # exactly one code point of either set whichever branch is taken, so it
+    # compiles as their union,
+    # one automaton instead of two joined by a split. Nil for any other
+    # alternation, or when the union could pass `max_class_ranges`. The
+    # union is computed once per alternation node, so the copies of a
+    # repetition share it.
+    private def merged_class(node : Hir::Alternation) : CodePointSet?
+      return @last_merged_set if node.same?(@last_merged_node)
+      branches = node.list_of_branches
+      return nil if branches.size < 2
+      return nil unless branches.all? { |branch| branch.is_a?(Hir::Class) || branch.is_a?(Hir::Literal) }
+      return nil unless branches.any? { |branch| branch.is_a?(Hir::Class) && ClassMemo.memoized?(branch.code_point_set) }
+      @ledger.charge_array(branches.size, sizeof(CodePointSet), "a class union", 0)
+      list_of_sets = Array(CodePointSet).new(branches.size)
+      branches.each do |branch|
+        if branch.is_a?(Hir::Class)
+          list_of_sets << branch.code_point_set
+        elsif branch.is_a?(Hir::Literal)
+          @ledger.charge_object(instance_sizeof(CodePointSet), "a class union", 0)
+          @ledger.charge_array(2, sizeof(Int32), "a class union", 0)
+          list_of_sets << CodePointSet.from_bounds([branch.code_point, branch.code_point])
+        end
+      end
+      return nil unless list_of_sets.sum(0_i64, &.range_count) <= @limits.max_class_ranges
+      merged = ClassLowering.union_of(list_of_sets, @limits, @ledger, @meter, 0)
+      @last_merged_node = node
+      @last_merged_set = merged
+      merged
     end
 
     # The memoized block of *set*, asking the memo once per set object.

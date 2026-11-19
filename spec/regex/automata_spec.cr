@@ -225,6 +225,25 @@ describe "Mica::Regex R3 engines" do
       {busy, again, evicted}.each(&.finish)
     end
 
+    it_satisfies "REGEX-R3-cache-pool", "drops an evicted lease's caches and reserves fresh ones when it is used again" do
+      step = Mica::Regex::CachePool::RESERVATION_BYTES
+      # Room for one expression's two caches and a Pike VM workspace.
+      pool = Mica::Regex::CachePool.new(max_bytes: step * 2 + 8192, max_cache_bytes: step)
+      first = program("[a-c]+d")
+      second = program("[d-f]+g")
+      3.times do
+        {first, second}.each do |target|
+          haystack = target.same?(first) ? "xxabcabd" : "xxdefdeg"
+          found = Mica::Regex::Searcher.new(target, haystack, LIMITS, nil, Mica::Regex::Engine::Auto, pool)
+          found.find(0, Mica::Regex::MatchOptions::None, false).try(&.to_a).should eq([2, 8])
+          found.dfa_gave_up?.should be_false
+          found.last_path.should eq(Mica::Regex::Searcher::Path::LazyDFA)
+          pool.reserved_bytes.should be <= pool.max_bytes
+          found.finish
+        end
+      end
+    end
+
     it_satisfies "REGEX-R3-cache-pool", "gives the lease back when a call fails to start" do
       step = Mica::Regex::CachePool::RESERVATION_BYTES
       # Room for one expression's two caches and a Pike VM workspace.

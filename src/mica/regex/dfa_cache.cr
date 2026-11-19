@@ -74,14 +74,10 @@ module Mica::Regex
       @bytes_since_clear += count
     end
 
-    # Drops every state and gives the memory back to the pool (its lease
-    # is being evicted, see `SearchLease`).
+    # Gives every byte the cache reserved back to the pool. Its lease is
+    # being evicted and drops the cache (see `SearchLease`), so nothing is
+    # rebuilt: the lease reserves a new cache when it is next used.
     def evict : Nil
-      @transition_table = [] of Int32
-      @list_of_marks = [] of UInt8
-      @list_of_keys = [] of Array(Int32)
-      @state_ids = {} of Array(Int32) => Int32
-      reset_states
       @reservation.release_all
     end
 

@@ -318,10 +318,20 @@ describe Mica::Regex::Syntax do
     end
 
     it_satisfies "REGEX-R1-preflight", "compiles the same program for a large class whether its automaton was memoized or not" do
-      first = Mica::Regex::Syntax.compile("p{L}{3}x|w+", dialect: :crystal, compile_limits: TRUSTED)
-      again = Mica::Regex::Syntax.compile("p{L}{3}x|w+", dialect: :crystal, compile_limits: TRUSTED)
+      first = Mica::Regex::Syntax.compile("\\p{L}{3}x|\\w+", dialect: :crystal, compile_limits: TRUSTED)
+      again = Mica::Regex::Syntax.compile("\\p{L}{3}x|\\w+", dialect: :crystal, compile_limits: TRUSTED)
       again.list_of_states.should eq(first.list_of_states)
       again.list_of_transitions.should eq(first.list_of_transitions)
+    end
+
+    it_satisfies "REGEX-R1-preflight", "compiles an alternation of classes with a large one as their union" do
+      merged = Mica::Regex::Syntax.compile("(?:\\p{Lu}|\\p{Ll}|_){3}", dialect: :crystal, compile_limits: TRUSTED)
+      union = Mica::Regex::Syntax.compile("[\\p{Lu}\\p{Ll}_]{3}", dialect: :crystal, compile_limits: TRUSTED)
+      merged.list_of_states.should eq(union.list_of_states)
+      merged.list_of_transitions.should eq(union.list_of_transitions)
+      # Alternations without a large class keep their splits.
+      Mica::Regex::Syntax.compile("[ab]|[cd]", dialect: :crystal, compile_limits: TRUSTED).list_of_states
+        .count(&.kind.split?).should be > 0
     end
 
     it_satisfies "REGEX-R1-ledger", "refuses compiles that would pass max_compile_bytes" do

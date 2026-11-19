@@ -148,6 +148,22 @@ module Mica::Regex
       CodePointSet.from_bounds(bounds)
     end
 
+    # Returns the union of *list_of_sets*, charged to *ledger* and *meter*
+    # as a class lowering at *offset* would be. The caller keeps the total
+    # of their ranges within *limits*' `max_class_ranges`, so the union
+    # never passes it.
+    def self.union_of(list_of_sets : Array(CodePointSet), limits : CompileLimits, ledger : AllocationLedger,
+                      meter : Core::WorkMeter, offset : Int32) : CodePointSet
+      ledger.charge_object(instance_sizeof(Context), "a class union", offset)
+      context = Context.new(offset, limits, ledger, meter)
+      context.charge_array(list_of_sets.size, sizeof(RangeStream))
+      list_of_streams = list_of_sets.map do |set|
+        context.charge_stream
+        RangeStream.new(set.list_of_bounds, false)
+      end
+      union(list_of_streams, context)
+    end
+
     # Returns `.` (*matches_newline* false: everything but LF) or `\N`.
     def self.any_character(matches_newline : Bool) : CodePointSet
       return CodePointSet.from_bounds([0, CodePointSet::MAX_CODE_POINT]) if matches_newline

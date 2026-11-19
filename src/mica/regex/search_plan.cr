@@ -230,11 +230,15 @@ module Mica::Regex
       @validated = haystack
     end
 
-    # Drops the caches' states and the kept Pike VM workspace, giving their
-    # bytes back to the pool. Runs only while the lease is idle and EVICTING.
+    # Drops the caches (with their builders' scratch space) and the kept
+    # Pike VM workspace, giving their bytes back to the pool. Runs only
+    # while the lease is idle and EVICTING; a cache is reserved afresh when
+    # the lease is next used.
     protected def evict : Nil
       @forward_cache.try(&.evict)
+      @forward_cache = nil
       @reverse_cache.try(&.evict)
+      @reverse_cache = nil
       @pike.try(&.release)
     end
   end
