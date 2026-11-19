@@ -236,8 +236,8 @@ describe "Mica::Regex R3 engines" do
       step = Mica::Regex::CachePool::RESERVATION_BYTES
       # Room for one expression's two caches and a Pike VM workspace.
       pool = Mica::Regex::CachePool.new(max_bytes: step * 2 + 8192, max_cache_bytes: step)
-      first = program("[a-c]+d")
-      second = program("[d-f]+g")
+      first = program("[a-c]*[a-c]d")
+      second = program("[d-f]*[d-f]g")
       3.times do
         {first, second}.each do |target|
           haystack = target.same?(first) ? "xxabcabd" : "xxdefdeg"
