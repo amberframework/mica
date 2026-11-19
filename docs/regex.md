@@ -740,6 +740,27 @@ much as the cost per byte:
   search goes on with the reverse DFA. The pass stays within the bitset
   gate, the call's remaining allowance and `FirstSearch.visit_limit`
   visits, each charged before it is read.
+- **Capture passes of a large program.** A program of thousands of
+  states (alternatives of `\p{L}{14}`, about 28,500 states) is too large
+  for the backtracker's bitset over even a short span, so its capture
+  pass would run on the Pike VM, which steps every live thread through
+  its closure at each byte. The pass first runs the backtracker marking
+  visited pairs in a hash set (see "Capped searches" in
+  `BoundedBacktracker`), capped at `BoundedBacktracker::SPARSE_VISITS`
+  visits: it visits the pairs the bitset would, so it reads the same
+  groups. When it reaches the cap the Pike VM runs instead and the call
+  stops trying it, so a call spends at most that many extra visits. The
+  hash set starts a new generation for each search rather than clearing
+  its table.
+- **Alternatives too long for the span.** A capture pass, and the
+  groups-with-span pass, must end at the match end. A program of at most
+  `Program::MIN_BYTES_MAX_STATES` (1024) states finds, the 16th time it
+  is asked (`Program::MIN_BYTES_AFTER`, so a pattern read once never pays
+  for it), the fewest bytes a match reads from each state, in one 0-1
+  breadth-first pass over its reversed edges. The backtracker drops a
+  pair whose state cannot reach a match before the bound, so
+  `([A-Za-z]{14})|…|([A-Za-z]{5})` over a seven-letter word tries the
+  longer alternatives without reading them.
 - **Fixed-length starts.** When every match of a program spans the same
   number of bytes (its longest match, `ShortMatch.longest_match`, is as
   long as its shortest, `StartFilter#minimum_bytes`; worked out once for a
