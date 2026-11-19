@@ -371,9 +371,6 @@ module Mica::Regex
       if found = @required_bytes.get(:acquire)
         return found
       end
-      # The analysis reads every state, which a program with runs would
-      # have to build first.
-      return nil if runs_pending?
       allowance = REQUIRED_BYTES_BASE_EDGES + REQUIRED_BYTES_EDGES_PER_BYTE * span_bytes
       return nil unless edges_within?(allowance)
       list_of_required_bytes
@@ -386,7 +383,10 @@ module Mica::Regex
       edges = state_count.to_i64 + @list_of_transitions.size
       return false if edges > allowance
       return true if @list_of_shared_tables.empty?
-      list_of_states.each do |state|
+      # Read through `state_at`, so a program with runs builds its states
+      # (as the analysis then does) only when they are within the allowance.
+      state_count.times do |index|
+        state = state_at(index)
         next unless state.kind.sparse? && state.low != 0
         edges += state.alternate
         return false if edges > allowance
