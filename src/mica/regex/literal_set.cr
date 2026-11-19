@@ -39,11 +39,24 @@ module Mica::Regex
       return nil unless sequence
       return nil if sequence.empty? || sequence.any?(&.bytes.empty?)
       exact = sequence.all?(&.exact?) && !extractor.saw_look? && unrestricted?(pattern.options)
-      list_of_literals = [] of Bytes
-      sequence.each do |entry|
-        list_of_literals << entry.bytes unless list_of_literals.includes?(entry.bytes)
+      new(distinct_literals(sequence), exact)
+    end
+
+    # The distinct byte strings of *sequence*, first occurrence first. A
+    # long sequence (up to `MAX_LITERALS` entries, often equal after being
+    # cut to `MAX_LITERAL_BYTES`) is checked through a set rather than by
+    # comparing each entry with every kept one.
+    private def self.distinct_literals(sequence : Array(LiteralEntry)) : Array(Bytes)
+      list_of_literals = Array(Bytes).new(sequence.size)
+      if sequence.size <= 8
+        sequence.each do |entry|
+          list_of_literals << entry.bytes unless list_of_literals.includes?(entry.bytes)
+        end
+      else
+        seen = Set(Bytes).new(sequence.size)
+        sequence.each { |entry| list_of_literals << entry.bytes if seen.add?(entry.bytes) }
       end
-      new(list_of_literals, exact)
+      list_of_literals
     end
 
     # True when no option changes where a literal match may start or end.

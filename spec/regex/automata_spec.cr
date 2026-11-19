@@ -137,6 +137,15 @@ describe "Mica::Regex R3 engines" do
       program("(?i)ab").literal_set.try(&.list_of_literals.size).should eq(4)
     end
 
+    it_satisfies "REGEX-R3-accelerators", "keeps each literal once, first occurrence first, in short and long sets" do
+      short = program("ab|cd|ab|ef").literal_set.should_not be_nil
+      short.list_of_literals.map { |literal| String.new(literal) }.should eq(["ab", "cd", "ef"])
+      # 16 branches, each written twice: the long sequence is checked through a set.
+      list_of_words = (0...16).map { |index| "w#{index.to_s.rjust(2, '0')}" }
+      long = program((list_of_words + list_of_words).join("|")).literal_set.should_not be_nil
+      long.list_of_literals.map { |literal| String.new(literal) }.should eq(list_of_words)
+    end
+
     it_satisfies "REGEX-R3-accelerators", "chooses the rare-byte, first-byte and packed searchers" do
       program("sherlock\\d").plan.prefilter.try(&.kind).should eq(Mica::Regex::Prefilter::Kind::RareByte)
       program("(?:ab|ac)\\d").plan.prefilter.try(&.kind).should eq(Mica::Regex::Prefilter::Kind::FirstBytes)
