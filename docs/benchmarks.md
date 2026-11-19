@@ -149,3 +149,33 @@ toolchain, the commits and the settings.
 7. cases outside the comparison (unsupported, rebar count differences);
 8. every case, with the baseline's times and spread and each engine's
    ratio.
+
+## GC-free study (`Mica::Regex.static`)
+
+A design study, not part of the release bar: what the collector costs the
+runtime engine, and what a pattern compiled while the application builds
+(`Mica::Regex.static`, see `src/mica/regex/static_pattern.cr`) gains. The
+tools live in `bench/regex/gc_study/`:
+
+- `measure_allocations.cr` counts the heap allocations (calls and bytes)
+  of a compile, a process's first search and a warm search for every
+  corpus case, times each warm workload with the collector on and off
+  (interleaved), and records each pattern's table shapes (NFA states, byte
+  classes, groups, and the complete DFAs the static path would build).
+  `summarize_allocations.rb` turns its JSON lines into per-group tables.
+- `allocation_cost.cr` measures one `GC.malloc` at the sizes searches use.
+- `run_study.sh OUT_DIR` builds the PCRE2-JIT, Mica and Mica-static runners
+  with `--release` and runs the cases in `case_list.txt` (the Amber corpus
+  and the rebar cases whose haystack is at most 4 KiB) with the driver's
+  paired method: per case, each engine in its own process, one after the
+  other. `compare_engines.rb` compares the three engines per group.
+- `static_differential.cr` checks the static path against the runtime
+  engine and PCRE2 on the Amber patterns and a generated sample
+  (`list_differential_patterns.cr`, `write_differential_patterns.rb`), and
+  sums the heap bytes the static searches allocate.
+- `build_cost.rb` measures the build-time program per pattern and the
+  build of a small application with and without static patterns.
+
+The Mica-static runner (`bench/regex/mica_static_runner.cr`) holds the
+patterns `write_static_patterns.rb` lists; its "compile" is a table lookup,
+so its cold first search is the search alone.

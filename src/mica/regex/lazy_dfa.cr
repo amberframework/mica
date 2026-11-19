@@ -102,6 +102,34 @@ module Mica::Regex
     # The first word symbol (see `word_symbol`); every symbol below it is a
     # plain class or an edge symbol.
     @word_offset : Int32
+
+    # :nodoc:
+    # The state flags this DFA keeps (see `start_key`), for the build-time
+    # tables of `StaticPattern`.
+    def relevant_flags : Int32
+      @relevant_flags
+    end
+
+    # :nodoc:
+    # True when non-ASCII bytes are read as word symbols (see `word_symbol`).
+    def unicode_words? : Bool
+      @unicode_words
+    end
+
+    # :nodoc:
+    # True for a forward DFA that reads a line feed ending the haystack as
+    # its own symbol (`final_lf_symbol`).
+    def final_lf? : Bool
+      @final_lf
+    end
+
+    # :nodoc:
+    # The number of input symbols in use: the classes, the two edge symbols
+    # and (with Unicode word assertions) a word symbol per class.
+    def symbol_count : Int32
+      @unicode_words ? @word_offset + @byte_classes.class_count : @word_offset
+    end
+
     # The symbols of the ASCII bytes, found on first use (see
     # `list_of_ascii_symbols`).
     @list_of_ascii_symbols : Array(Int32)? = nil

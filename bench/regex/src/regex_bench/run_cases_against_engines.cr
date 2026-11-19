@@ -10,6 +10,7 @@ module RegexBench
     list_of_engines : Array(String),
     list_of_corpora : Array(String),
     case_filter : String,
+    list_of_case_ids : Array(String),
     max_amber_bytes : Int64,
     max_samples : Int32,
     min_samples : Int32,
@@ -30,6 +31,7 @@ module RegexBench
       "pcre2-jit"         => "pcre2_jit_runner",
       "pcre2-interpreter" => "pcre2_interpreter_runner",
       "mica"              => "mica_runner",
+      "mica-static"       => "mica_static_runner",
     }
 
     def initialize(@settings : DriverSettings, @progress : IO)
@@ -62,6 +64,7 @@ module RegexBench
     private def selected_cases : Array(BenchmarkCase)
       @corpus.cases_for(@settings.list_of_corpora).select do |benchmark_case|
         next false unless @settings.case_filter.empty? || benchmark_case.id.includes?(@settings.case_filter)
+        next false unless @settings.list_of_case_ids.empty? || @settings.list_of_case_ids.includes?(benchmark_case.id)
         benchmark_case.corpus != "amber" || benchmark_case.size_units <= @settings.max_amber_bytes
       end
     end
