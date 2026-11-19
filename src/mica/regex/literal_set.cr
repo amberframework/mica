@@ -143,15 +143,47 @@ module Mica::Regex
 
     private def concatenation_sequence(list_of_children : Array(Hir::Node), depth : Int32) : Array(LiteralEntry)?
       result = [LiteralEntry.new(Bytes.empty, true)]
-      list_of_children.each do |child|
+      index = 0
+      while index < list_of_children.size
         break unless result.any?(&.exact?)
-        child_sequence = sequence(child, depth + 1)
+        child = list_of_children[index]
+        if child.is_a?(Hir::Literal)
+          # A run of literal characters is one entry, crossed once:
+          # appending them one at a time copied every prefix again.
+          child_sequence, index = literal_run(list_of_children, index)
+        else
+          child_sequence = sequence(child, depth + 1)
+          index += 1
+        end
         return inexact(result) unless child_sequence
         crossed = cross(result, child_sequence)
         return inexact(result) unless crossed
         result = crossed
       end
       result
+    end
+
+    # The literal characters of *list_of_children* from *first* on, as one
+    # exact entry, and the index after them. Charges one operation per
+    # character, as `sequence` does per node.
+    private def literal_run(list_of_children : Array(Hir::Node), first : Int32) : {Array(LiteralEntry), Int32}
+      last = first
+      byte_count = 0
+      while last < list_of_children.size
+        child = list_of_children[last]
+        break unless child.is_a?(Hir::Literal)
+        @meter.charge(1)
+        byte_count += Core::UTF8.encoded_size(child.code_point)
+        last += 1
+      end
+      bytes = Bytes.new(byte_count)
+      offset = 0
+      (first...last).each do |child_index|
+        child = list_of_children[child_index]
+        next unless child.is_a?(Hir::Literal)
+        offset += Core::UTF8.encode(child.code_point, bytes + offset)
+      end
+      {[LiteralEntry.new(bytes, true)], last}
     end
 
     private def alternation_sequence(list_of_branches : Array(Hir::Node), depth : Int32) : Array(LiteralEntry)?
@@ -172,13 +204,20 @@ module Mica::Regex
       size = left.sum { |entry| entry.exact? ? right.size : 1 }
       return nil if size > LiteralSet::MAX_LITERALS
       result = Array(LiteralEntry).new(size)
+      # Every new literal is a slice of one buffer, so a product of up to
+      # `MAX_LITERALS` entries allocates once rather than once per entry.
+      right_bytes = right.sum(&.bytes.size)
+      buffer_size = left.sum { |entry| entry.exact? ? entry.bytes.size * right.size + right_bytes : 0 }
+      buffer = Bytes.new(buffer_size)
+      buffer_offset = 0
       left.each do |entry|
         unless entry.exact?
           result << entry
           next
         end
         right.each do |suffix|
-          bytes = Bytes.new(entry.bytes.size + suffix.bytes.size)
+          bytes = buffer[buffer_offset, entry.bytes.size + suffix.bytes.size]
+          buffer_offset += bytes.size
           entry.bytes.copy_to(bytes)
           suffix.bytes.copy_to(bytes + entry.bytes.size)
           if bytes.size > LiteralSet::MAX_LITERAL_BYTES

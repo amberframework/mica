@@ -137,6 +137,17 @@ describe "Mica::Regex R3 engines" do
       program("(?i)ab").literal_set.try(&.list_of_literals.size).should eq(4)
     end
 
+    it_satisfies "REGEX-R3-accelerators", "reads a run of literal characters as one literal, cut at the longest kept" do
+      crossed = program("abé(?:d|e)").literal_set.should_not be_nil
+      crossed.list_of_literals.map { |literal| String.new(literal) }.should eq(["abéd", "abée"])
+      crossed.exact?.should be_true
+      long = program("a" * 40).literal_set.should_not be_nil
+      long.list_of_literals.map(&.size).should eq([Mica::Regex::LiteralSet::MAX_LITERAL_BYTES])
+      long.exact?.should be_false
+      folded = program("(?i)ab", Mica::Regex::CompileOptions::None).literal_set.should_not be_nil
+      folded.list_of_literals.map { |literal| String.new(literal) }.should eq(["AB", "Ab", "aB", "ab"])
+    end
+
     it_satisfies "REGEX-R3-accelerators", "keeps each literal once, first occurrence first, in short and long sets" do
       short = program("ab|cd|ab|ef").literal_set.should_not be_nil
       short.list_of_literals.map { |literal| String.new(literal) }.should eq(["ab", "cd", "ef"])
