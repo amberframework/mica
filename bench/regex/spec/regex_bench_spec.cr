@@ -178,3 +178,32 @@ describe RegexBench::BuildTheReport do
     end
   end
 end
+
+# A result whose warm search took *seconds* per iteration, timed in
+# batches of *iterations_per_sample*.
+private def batched_result(case_id : String, engine : String, seconds : Float64,
+                           iterations_per_sample : Int32) : RegexBench::CaseResult
+  benchmark_case = RegexBench::BenchmarkCase.new(
+    id: case_id, corpus: "rebar", group: "rebar/test", subgroup: "rebar/test", model: "count",
+    pattern: "x", case_insensitive: false, haystack: RegexBench::HaystackSpec.new(contents: "x"))
+  RegexBench::CaseResult.new(benchmark_case: benchmark_case, engine: engine, status: "ok", count: 1,
+    warm_search: RegexBench::Statistics.of([seconds, seconds, seconds], iterations_per_sample),
+    compile: RegexBench::Statistics.of([1e-6]), cold_first_search: RegexBench::Statistics.of([2e-6]))
+end
+
+describe RegexBench::RenderTheMarkdown do
+  describe "#perform" do
+    it "lists each slower case's batch sizes beside its margin" do
+      results = [batched_result("t", "pcre2-jit", 80e-9, 128), batched_result("t", "mica", 120e-9, 64)]
+      document = RegexBench::BuildTheReport.new(run_record, results, [] of RegexBench::Corpus::RedosFamily).perform
+      comparison = document.case_comparisons.find!(&.case_id.==("t"))
+      comparison.engine_iterations_per_sample.should eq(64)
+      comparison.baseline_iterations_per_sample.should eq(128)
+      comparison.primary_ratio.should be_close(1.5, 1e-9)
+      markdown = RegexBench::RenderTheMarkdown.new(document, results, "spec").perform
+      markdown.should contain("| Batch (Mica / PCRE2-JIT) |")
+      markdown.should contain("| t | count | 120.0 ns | 80.0 ns | 1.5x | +50.0% | 64 / 128 |")
+      markdown.should contain("timed in calibrated batches")
+    end
+  end
+end

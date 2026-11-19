@@ -125,7 +125,14 @@ Per case and engine:
 
 Method: one verified iteration (its count must equal the baseline's), up to
 3 warm-up iterations within 0.5 s, then samples until 11, or until 1 s has
-passed with at least 3. An iteration slower than 2 s is sampled once. The
+passed with at least 3. An iteration slower than 2 s is sampled once.
+An operation shorter than 10 us (a few ticks of the 41.67 ns Apple Silicon
+clock) is timed in calibrated batches, by the same code for every engine:
+the batch doubles until one timed loop of it takes at least 10 us, then
+each sample times one batch and divides by the batch size. Longer
+operations are timed one at a time, as before. Each metric records its
+batch as `iterations_per_sample` in `results.jsonl`, and the slower-cases
+table shows the primary metric's batch for both engines. The
 report gives the median, p25/p75 and min/max; ratios use medians, and group
 summaries are geometric means of ratios over eligible cases (both engines
 finished and their counts agree). `run.json` records the machine, the

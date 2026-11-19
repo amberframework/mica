@@ -5,7 +5,8 @@ module RegexBench
     min_samples : Int32 = 3,
     phase_seconds : Float64 = 1.0,
     warmup_seconds : Float64 = 0.5,
-    slow_iteration_seconds : Float64 = 2.0
+    slow_iteration_seconds : Float64 = 2.0,
+    min_batch_seconds : Float64 = 10e-6
 
   # When an engine runner is handed a case, then it builds the haystack,
   # times the process-cold first search, verifies the model's count, and
@@ -17,6 +18,9 @@ module RegexBench
   # until `phase_seconds` has passed with at least `min_samples`. An
   # iteration slower than `slow_iteration_seconds` ends its phase after that
   # sample, so a pathological search is timed once rather than N times.
+  # An operation shorter than `min_batch_seconds` (10 us) is timed in
+  # calibrated batches (see `TimeInCalibratedBatches`), for every engine
+  # alike, and its batch size is recorded with its statistics.
   class MeasureACase
     def initialize(@engine : Engine, @benchmark_case : BenchmarkCase, @settings : MeasurementSettings,
                    @rebar_haystack_directory : String)
@@ -89,18 +93,7 @@ module RegexBench
     end
 
     private def sample(& : -> _) : Statistics
-      list_of_seconds = [] of Float64
-      phase_started = Time.instant
-      loop do
-        started = Time.instant
-        yield
-        seconds = elapsed_since(started)
-        list_of_seconds << seconds
-        break if seconds >= @settings.slow_iteration_seconds
-        break if list_of_seconds.size >= @settings.max_samples
-        break if list_of_seconds.size >= @settings.min_samples && elapsed_since(phase_started) >= @settings.phase_seconds
-      end
-      Statistics.of(list_of_seconds)
+      TimeInCalibratedBatches.new(@settings).measure { yield }
     end
 
     private def elapsed_since(started : Time::Instant) : Float64

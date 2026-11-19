@@ -26,11 +26,15 @@ module RegexBench
     getter engine_relative_spread : Float64
     getter count : Int64
     getter baseline_count : Int64
+    # The batch each engine timed its primary metric's samples in (see
+    # `Statistics#iterations_per_sample`).
+    getter engine_iterations_per_sample : Int32 = 1
+    getter baseline_iterations_per_sample : Int32 = 1
 
     def initialize(*, @case_id, @group, @subgroup, @model, @engine, @status, @baseline_status, @eligible, @detail,
                    @primary_ratio, @compile_ratio, @cold_ratio, @baseline_primary_median_seconds,
                    @engine_primary_median_seconds, @baseline_relative_spread, @engine_relative_spread,
-                   @count, @baseline_count)
+                   @count, @baseline_count, @engine_iterations_per_sample = 1, @baseline_iterations_per_sample = 1)
     end
 
     def slower_than_the_baseline? : Bool

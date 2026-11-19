@@ -119,13 +119,15 @@ module RegexBench
       elsif mica_slower.empty?
         io << "None. Mica is as fast as or faster than PCRE2-JIT on every eligible case.\n\n"
       else
-        io << "| Case | Model | Mica | PCRE2-JIT | Ratio | Margin |\n|---|---|---|---|---|---|\n"
+        io << "| Case | Model | Mica | PCRE2-JIT | Ratio | Margin | Batch (Mica / PCRE2-JIT) |\n"
+        io << "|---|---|---|---|---|---|---|\n"
         mica_slower.each do |comparison|
           io << "| " << comparison.case_id << " | " << comparison.model << " | "
           io << Report.format_seconds(comparison.engine_primary_median_seconds) << " | "
           io << Report.format_seconds(comparison.baseline_primary_median_seconds) << " | "
           io << Report.format_ratio(comparison.primary_ratio) << " | +"
-          io << Report.format_percent(comparison.primary_ratio - 1) << " |\n"
+          io << Report.format_percent(comparison.primary_ratio - 1) << " | "
+          io << comparison.engine_iterations_per_sample << " / " << comparison.baseline_iterations_per_sample << " |\n"
         end
         io << "\n"
       end
@@ -191,6 +193,11 @@ module RegexBench
       io << "- Warm search gets up to 3 warm-up iterations (0.5 s), then samples: at most " << run.max_samples
       io << ", at least " << run.min_samples << ", stopping once " << run.phase_seconds
       io << " s have passed; an iteration slower than 2 s is sampled once.\n"
+      io << "- An operation shorter than " << Report.format_seconds(MeasurementSettings.new.min_batch_seconds)
+      io << " is timed in calibrated batches, the same way for every engine: the batch doubles until one timed loop "
+      io << "takes at least that long, each sample times one batch and divides by its size, and the batch size is "
+      io << "recorded per case and metric (`iterations_per_sample`; the slower-cases table shows the primary metric's). "
+      io << "Longer operations are timed one at a time.\n"
       io << "- Reported: median with p25/p75 and min/max (relative spread = (p75 - p25) / median). Ratios use medians; "
       io << "group summaries use geometric means of ratios over eligible cases.\n"
       io << "- Peak memory: the process's peak RSS, and the part above the RSS right after the haystack was built.\n"

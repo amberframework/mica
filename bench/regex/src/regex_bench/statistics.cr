@@ -1,8 +1,12 @@
 require "json"
 
 module RegexBench
-  # The spread of one measurement's samples, in seconds. An empty
-  # measurement (no samples) has every field 0.
+  # The spread of one measurement's samples, in seconds per operation. An
+  # empty measurement (no samples) has every field 0.
+  #
+  # `iterations_per_sample` is the batch each sample timed as one and
+  # divided by (see `TimeInCalibratedBatches`): 1 when each operation was
+  # timed alone.
   struct Statistics
     include JSON::Serializable
 
@@ -12,15 +16,18 @@ module RegexBench
     getter p75 : Float64 = 0.0
     getter min : Float64 = 0.0
     getter max : Float64 = 0.0
+    getter iterations_per_sample : Int32 = 1
 
-    def initialize(@sample_count = 0, @median = 0.0, @p25 = 0.0, @p75 = 0.0, @min = 0.0, @max = 0.0)
+    def initialize(@sample_count = 0, @median = 0.0, @p25 = 0.0, @p75 = 0.0, @min = 0.0, @max = 0.0,
+                   @iterations_per_sample = 1)
     end
 
-    def self.of(list_of_seconds : Array(Float64)) : self
-      return new if list_of_seconds.empty?
+    def self.of(list_of_seconds : Array(Float64), iterations_per_sample : Int32 = 1) : self
+      return new(iterations_per_sample: iterations_per_sample) if list_of_seconds.empty?
       sorted = list_of_seconds.sort
       new(sample_count: sorted.size, median: percentile(sorted, 0.5), p25: percentile(sorted, 0.25),
-        p75: percentile(sorted, 0.75), min: sorted.first, max: sorted.last)
+        p75: percentile(sorted, 0.75), min: sorted.first, max: sorted.last,
+        iterations_per_sample: iterations_per_sample)
     end
 
     # Linear interpolation between the closest ranks.

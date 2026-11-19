@@ -75,7 +75,9 @@ module RegexBench
         engine_primary_median_seconds: engine_result.primary_median,
         baseline_relative_spread: primary_statistics(baseline).relative_spread,
         engine_relative_spread: primary_statistics(engine_result).relative_spread,
-        count: engine_result.count, baseline_count: baseline.count)
+        count: engine_result.count, baseline_count: baseline.count,
+        engine_iterations_per_sample: primary_statistics(engine_result).iterations_per_sample,
+        baseline_iterations_per_sample: primary_statistics(baseline).iterations_per_sample)
     end
 
     private def primary_statistics(case_result : CaseResult) : Statistics
