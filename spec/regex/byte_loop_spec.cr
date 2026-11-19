@@ -61,6 +61,21 @@ describe Mica::Regex::BoundedBacktracker do
       end
     end
 
+    it "drops loop pairs too close to the bound in a capture pass, with the Pike VM's groups" do
+      # The capture pass after the DFA prunes by each state's fewest bytes
+      # to a match once the program has asked for them often enough; the
+      # tight loop and its job of starts must drop the same pairs.
+      source = "([a-z]*)(x[a-z]{6})|([^ ]*)(y[0-9]{4})|([a-z]*z)"
+      haystack = "abxcdefgh qrs y1234 zz abcxdefghij .. y12 ay9876 xabcdef " * 12
+      expected = scan(source, haystack, Mica::Regex::Engine::PikeVM)
+      expected.size.should be > Mica::Regex::Program::MIN_BYTES_AFTER
+      program = Mica::Regex::Expression.new(source, compile_limits: TRUSTED).program
+      (Mica::Regex::Program::MIN_BYTES_AFTER + 1).times { program.list_of_min_bytes }
+      program.list_of_min_bytes.should_not be_nil
+      scan(source, haystack, Mica::Regex::Engine::Auto).should eq(expected)
+      scan(source, haystack, Mica::Regex::Engine::TwoPhase).should eq(expected)
+    end
+
     it "gives a first search over a long loop the same answer as the plan" do
       haystack = "A" * 200
       first = Mica::Regex::Expression.new(".*[^A-Z]|[A-Z]", compile_limits: TRUSTED)

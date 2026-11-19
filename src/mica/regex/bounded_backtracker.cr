@@ -429,7 +429,18 @@ module Mica::Regex
       uncharged = 0
       last = at
       next_state = -1
+      # The fewest bytes to a match from the body and the split, when the
+      # search prunes by them (see `list_of_min_bytes=`): a pair that cannot
+      # reach a match before the bound ends the thread unvisited, as in the
+      # general loop.
+      body_min = 0
+      split_min = 0
+      if min_bytes = @list_of_min_bytes
+        body_min = min_bytes.unsafe_fetch(body_index)
+        split_min = min_bytes.unsafe_fetch(split_index)
+      end
       while true
+        break if end_bound - at < body_min
         break unless first_visit?(body_bits + at)
         if credit == 0
           meter.charge(uncharged, at) if uncharged > 0
@@ -456,6 +467,7 @@ module Mica::Regex
         staying |= 1_u128 << byte if byte < 128
         last = at
         at += 1
+        break if end_bound - at < split_min
         break unless first_visit?(split_bits + at)
         if credit == 0
           meter.charge(uncharged, at) if uncharged > 0
@@ -500,8 +512,14 @@ module Mica::Regex
       credit = 0
       uncharged = 0
       target = -1
+      # Starts too close to the bound to reach a match are dropped
+      # unvisited, as the general loop drops them (see `list_of_min_bytes=`).
+      state_min = 0
+      if min_bytes = @list_of_min_bytes
+        state_min = min_bytes.unsafe_fetch(state_index)
+      end
       while at >= first
-        if first_visit?(state_bits + at)
+        if end_bound - at >= state_min && first_visit?(state_bits + at)
           if credit == 0
             meter.charge(uncharged, at) if uncharged > 0
             uncharged = 0
