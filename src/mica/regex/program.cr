@@ -371,6 +371,9 @@ module Mica::Regex
       if found = @required_bytes.get(:acquire)
         return found
       end
+      # A large program with runs would build every state first, which
+      # costs more than the first search it serves.
+      return nil if runs_pending? && state_count >= FirstSearch::LARGE_PROGRAM_STATES
       allowance = REQUIRED_BYTES_BASE_EDGES + REQUIRED_BYTES_EDGES_PER_BYTE * span_bytes
       return nil unless edges_within?(allowance)
       list_of_required_bytes
