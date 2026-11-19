@@ -149,13 +149,13 @@ module Mica::Regex
     def self.each_fold_partner(code_point : Int32, & : Int32 ->) : Nil
       index = fold_index_at_or_after(code_point)
       return if index >= fold_entry_count
-      table_bytes = Tables::FOLD_CYCLE.to_slice
-      return unless hex6(table_bytes, index * 12) == code_point
-      partner = hex6(table_bytes, index * 12 + 6)
+      entries = FOLD_ENTRIES
+      return unless entries[index * 2] == code_point
+      partner = entries[index * 2 + 1]
       steps = 0
       while partner != code_point && steps < Tables::LARGEST_ORBIT
         yield partner
-        partner = hex6(table_bytes, fold_index_at_or_after(partner) * 12 + 6)
+        partner = entries[fold_index_at_or_after(partner) * 2 + 1]
         steps += 1
       end
     end
@@ -165,10 +165,10 @@ module Mica::Regex
     # visited (the work done).
     def self.each_folding_code_point(first : Int32, last : Int32, & : Int32 ->) : Int32
       index = fold_index_at_or_after(first)
-      table_bytes = Tables::FOLD_CYCLE.to_slice
+      entries = FOLD_ENTRIES
       visited = 0
       while index < fold_entry_count
-        code_point = hex6(table_bytes, index * 12)
+        code_point = entries[index * 2]
         break if code_point > last
         yield code_point
         visited += 1
@@ -184,16 +184,29 @@ module Mica::Regex
     end
 
     private def self.fold_entry_count : Int32
-      Tables::FOLD_CYCLE.bytesize // 12
+      FOLD_ENTRIES.size // 2
+    end
+
+    # The simple case folding orbits as `code_point, next member` pairs
+    # sorted by code point, decoded from the hex table once per process
+    # (the constant is initialized on first use, under the runtime's
+    # once-lock). Every case-insensitive class and literal reads it, so it
+    # is decoded once rather than parsed digit by digit on each lookup.
+    # Only read after it is built.
+    private FOLD_ENTRIES = begin
+      table_bytes = Tables::FOLD_CYCLE.to_slice
+      entries = Slice(Int32).new(table_bytes.size // 6)
+      entries.size.times { |index| entries[index] = hex6(table_bytes, index * 6) }
+      entries
     end
 
     private def self.fold_index_at_or_after(code_point : Int32) : Int32
-      table_bytes = Tables::FOLD_CYCLE.to_slice
+      entries = FOLD_ENTRIES
       low = 0
-      high = fold_entry_count
+      high = entries.size // 2
       while low < high
         middle = (low + high) // 2
-        if hex6(table_bytes, middle * 12) < code_point
+        if entries.unsafe_fetch(middle * 2) < code_point
           low = middle + 1
         else
           high = middle
