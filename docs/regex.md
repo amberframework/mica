@@ -390,9 +390,9 @@ it did in R2) picks the fastest correct path for each search:
 
 While the forward DFA sits in its start state, the prefilter (when the
 pattern has prefix literals) skips to the next position where a literal
-starts. A lazy DFA gives up, and the search runs on the Pike VM, when its
-cache thrashes, when the `CachePool` has no room, or when a Unicode word
-assertion meets a non-ASCII byte. Once a DFA gives up in a call, the
+starts. A pattern whose every match starts at `\A` is searched anchored,
+with no reverse DFA. A lazy DFA gives up, and the search runs on the Pike
+VM, when its cache thrashes or when the `CachePool` has no room. Once a DFA gives up in a call, the
 call's later searches go straight to the Pike VM, so the work a thrashing
 cache wastes is spent once per call. Every path charges its work to the
 call's `SearchMeter` and reads the deadline at the same checkpoints, so
@@ -409,7 +409,10 @@ of the call that finished last, taken back with one atomic swap by the
 next call. Idle leases beyond it keep only their DFA caches (at most 8 per
 program). A lease also remembers the last `String` it validated (strings
 are immutable), so separate calls over one haystack, as `String#scan` and
-`gsub` make through `match_at_byte_index`, validate it once.
+`gsub` make through `match_at_byte_index`, validate it once. It holds
+that string (as the parked searcher does), so its address cannot be
+reused while identity is compared. The lease is the `CachePool` member, so taking it and
+handing it back is one atomic state change each.
 
 ## Lazy DFA
 
@@ -431,8 +434,15 @@ do, into a `DFACache` leased for the search:
   line feed, an ASCII word character, a continuation byte, not ASCII), and
   the next byte is the transition's input, so the closure that reaches a
   match runs one byte late. The end of the haystack is an extra input, and
-  so is a line feed that ends it (for `$` and `\Z`). Unicode word
-  assertions next to a non-ASCII byte, and `\G`, are left to the Pike VM.
+  so is a line feed that ends it (for `$` and `\Z`). `\G` is left to the
+  Pike VM.
+- **Unicode word assertions** (`\b`, `\B`, `\<`, `\>` in UCP mode): each
+  byte of a non-ASCII character is read as its class or as its class
+  marked "part of a word character", chosen by decoding the character
+  once in the search loop (the UCP word set is a bitmap below U+10000).
+  The transition into a character then knows whether it is a word
+  character, and the state after it records whether the previous one
+  was, so these assertions never send a search to the Pike VM.
 - **Byte classes** (`ByteClasses`) group bytes no state can tell apart, so
   a state has one transition per class.
 - **Cost:** every byte read, every NFA state a new state's closure visits,
@@ -699,13 +709,16 @@ exception, within the work budget, deterministically.
 
 ## Open items for later milestones
 
-- R3's performance bar is not met yet: see "Benchmarks" for the
-  per-group geometric means against PCRE2-JIT and every losing case. The
-  main gaps: compile time for patterns with large Unicode classes (each
-  class is a UTF-8 automaton; PCRE2 reads static property tables), the
-  per-call cost of short searches, Unicode `\b` on non-ASCII text (the
-  lazy DFA gives up and the Pike VM runs), and DFA blowups such as
-  `[a-q][^u-z]{13}x` (the cache thrashes and the Pike VM runs).
+- R3's performance bar is not met yet (the benchmark reports in the R3
+  evidence folder list the per-group geometric means against PCRE2-JIT
+  and every losing case). The main gaps: compile time for patterns with
+  large Unicode classes (each class is a UTF-8 automaton of hundreds of
+  states; PCRE2 tests a code point against static property tables),
+  bounded repetitions of such classes (`\p{L}{100}`: the DFA cache
+  thrashes and the Pike VM runs over tens of thousands of states), DFA
+  blowups such as `[a-q][^u-z]{13}x`, and the per-call cost of very short
+  searches. A code-point-level class state, shared by every engine, is
+  the design change that closes the first two.
 - The reverse-suffix and reverse-inner literal optimizations (roadmap
   6.2.2, with the 2·n reverse-byte budget), which would skip to a required
   literal that is not a prefix.

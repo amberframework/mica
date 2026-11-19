@@ -146,6 +146,17 @@ module Mica::Regex
       @scanned_from = StaticArray(Int32, 3).new(0)
     end
 
+    # Starts the scan over on *haystack*, as a new scan would (a searcher
+    # reuses its scan from one call to the next).
+    def reset(@haystack : Bytes) : Nil
+      @candidates = 0
+      @skipped = 0_i64
+      @guard_from = 0
+      @packed_from = 0
+      @found_at = StaticArray(Int32, 3).new(-1)
+      @scanned_from = StaticArray(Int32, 3).new(0)
+    end
+
     # True when candidates have been too dense for the scan to pay off
     # (`GUARD_CANDIDATES`, `MINIMUM_SKIP`); the caller then stops using it
     # for the rest of the call.

@@ -1,5 +1,3 @@
-require "weak_ref"
-
 module Mica::Regex
   # The engines a `Program` can run besides the Pike VM and the bounded
   # backtracker, chosen and built the first time the program is searched
@@ -158,7 +156,11 @@ module Mica::Regex
     getter pool : CachePool
     @forward_cache : DFACache?
     @reverse_cache : DFACache?
-    @validated : WeakRef(String)?
+    # The last haystack validated, held strongly: while it is held its
+    # address cannot be reused by another string, so identity proves it is
+    # the same (immutable) string. A searcher parked in the lease holds its
+    # last haystack too, so this retains nothing more.
+    @validated : String?
     @pike : PikeVM?
     @backtracker : BoundedBacktracker?
     @searcher : Searcher?
@@ -221,13 +223,11 @@ module Mica::Regex
     # True when *haystack* is the very `String` this lease validated last:
     # strings are immutable, so it is still valid UTF-8.
     def validated?(haystack : String) : Bool
-      validated = @validated
-      return false unless validated
-      validated.value.same?(haystack)
+      @validated.same?(haystack)
     end
 
     def remember_validated(haystack : String) : Nil
-      @validated = WeakRef.new(haystack)
+      @validated = haystack
     end
 
     # Drops the caches' states and the kept Pike VM workspace, giving their

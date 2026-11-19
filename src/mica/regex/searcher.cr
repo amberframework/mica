@@ -68,9 +68,6 @@ module Mica::Regex
   #
   # WARNING: A searcher belongs to one call and one fiber.
   class Searcher
-    # The shortest haystack a lease remembers as validated.
-    REMEMBERED_HAYSTACK_BYTES = 4096
-
     # The call's meter.
     getter meter : SearchMeter
     # True once a lazy DFA gave up in this call (for specs).
@@ -133,7 +130,7 @@ module Mica::Regex
       @meter.restart(limits, @program.state_count, @haystack.bytesize, timeout)
       @line_scan_start = -1
       @line_feed_at = -1
-      @scan = nil
+      @scan.try(&.reset(@haystack.to_slice))
       @prefilter_off = false
       @searches_started = 0
       @dfa_gave_up = false
@@ -165,18 +162,14 @@ module Mica::Regex
       lease = @lease
       unless lease && lease.validated?(@haystack)
         # Validation reads every byte once: one operation per byte. A lease
-        # remembers the last `String` of at least `REMEMBERED_HAYSTACK_BYTES`
-        # it validated, so an iteration of separate calls over one long
-        # haystack validates it once; a short one costs less to validate
-        # again than to remember (a weak reference per call).
+        # remembers the last `String` it validated, so an iteration of
+        # separate calls over one haystack validates it once.
         bytes = @haystack.to_slice
         @meter.charge(bytes.size, 0)
         if offset = Core::UTF8.first_invalid_offset(bytes)
           raise Mica::EncodingError.new("The haystack is not valid UTF-8", Core::Position.new(offset.to_i64))
         end
-        if lease && bytes.size >= REMEMBERED_HAYSTACK_BYTES
-          lease.remember_validated(@haystack)
-        end
+        lease.try(&.remember_validated(@haystack))
       end
       # The deadline is read at the start of every call, so a timeout that
       # has already passed fails even a search too short to reach a clock
