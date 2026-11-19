@@ -298,6 +298,13 @@ describe "Mica::Regex R3 engines" do
       # w and n, the rarest letters, with the ASCII case bit.
       {test.first_offset, test.second_offset}.should eq({1, 4})
       (test.first_fold & 0xFF).should eq(0x20)
+      test.reads_third?.should be_false
+      # t and h are common together: (?i)the and the take e as a third byte.
+      ["(?i)the", "the"].each do |source|
+        common = program(source).plan.prefilter.should_not be_nil
+        common.list_of_pair_tests.map(&.reads_third?).should eq([true])
+        common.list_of_pair_tests[0].third_offset.should eq(2)
+      end
       # A Cyrillic word: one test over continuation bytes, the case bit
       # 0x20 there (Ш is D0 A8, ш is D1 88).
       cyrillic = program("(?i)шерлок").plan.prefilter.should_not be_nil
@@ -364,7 +371,7 @@ describe "Mica::Regex R3 engines" do
     it_satisfies "REGEX-R3-accelerators", "finds every match with the pair tests, any case, at every offset modulo 8" do
       random = Random::PCG32.new(20261120_u64)
       sources = ["(?i)twain", "(?i)the", "(?i)sherlock", "(?i)holmes\\w*", "(?i)шерлок", "(?i)шерлок холмс",
-                 "(?i)sherlock|holmes|watson", "(?i)tom|sawyer|huckleberry|finn", "(?:ab|ac)\\d",
+                 "(?i)sherlock|holmes|watson", "(?i)tom|sawyer|huckleberry|finn", "(?:ab|ac)\\d", "the",
                  "шерлок|джон|ирен", "(?i)kelvin"]
       sources.each do |source|
         expression = Mica::Regex::Expression.new(source, compile_limits: TRUSTED)
