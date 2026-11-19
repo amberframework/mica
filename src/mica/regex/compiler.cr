@@ -329,9 +329,47 @@ module Mica::Regex
         push_task(TaskKind::Compile, node.child, loop_split)
       elsif maximum == 0
         push_value(next_state)
+      elsif single_item?(node.child)
+        push_value(compile_counted_item(node, maximum, next_state))
       else
         push_value(next_state)
         push_task(TaskKind::OptionalStep, node, next_state, maximum - node.minimum)
+      end
+    end
+
+    # True when *node* compiles in one step, without tasks of its own.
+    private def single_item?(node : Hir::Node) : Bool
+      node.is_a?(Hir::Literal) || node.is_a?(Hir::Class)
+    end
+
+    # Compiles `x{n,m}` for a literal or class *x* in a loop, emitting what
+    # the `OptionalStep`, `OptionalFinish` and `MandatoryStep` tasks emit
+    # for it, in the same order: the optional copies from the last back,
+    # each behind a split to *next_state*, then the mandatory copies.
+    # `[\w.%+-]{1,256}` is hundreds of copies, and a task round per copy
+    # cost more than the copy.
+    private def compile_counted_item(node : Hir::Repetition, maximum : Int32, next_state : Int32) : Int32
+      child = node.child
+      current = next_state
+      (maximum - node.minimum).times do
+        charge_work
+        copy = compile_item(child, current)
+        current = node.greedy? ? emit_split(copy, next_state) : emit_split(next_state, copy)
+      end
+      node.minimum.times do
+        charge_work
+        current = compile_item(child, current)
+      end
+      current
+    end
+
+    private def compile_item(node : Hir::Node, next_state : Int32) : Int32
+      if node.is_a?(Hir::Literal)
+        compile_literal(node.code_point, next_state)
+      elsif node.is_a?(Hir::Class)
+        compile_recorded_class(node.code_point_set, next_state)
+      else
+        raise SyntaxError.new("internal error: #{node.class} is not a single item", Core::Position.new(0_i64))
       end
     end
 

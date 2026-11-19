@@ -390,7 +390,8 @@ describe Mica::Regex::Syntax do
     end
 
     it_satisfies "REGEX-R1-preflight", "copies a repeated small class exactly as it would rebuild it" do
-      {".{3}" => "...", "[a-zé]{2,3}" => "[a-zé][a-zé](?:[a-zé])?", "x[^\"']{0,2}" => "x(?:[^\"'](?:[^\"'])?)?"}.each do |repeated, written|
+      {".{3}" => "...", "[a-zé]{2,3}" => "[a-zé][a-zé](?:[a-zé])?", "x[^\"']{0,2}" => "x(?:[^\"'](?:[^\"'])?)?",
+       "é{1,3}?" => "é(?:é(?:é)??)??", "\\w{0,2}" => "(?:\\w(?:\\w)?)?"}.each do |repeated, written|
         copied = Mica::Regex::Syntax.compile(repeated, dialect: :crystal, compile_limits: TRUSTED)
         rebuilt = Mica::Regex::Syntax.compile(written, dialect: :crystal, compile_limits: TRUSTED)
         copied.list_of_states.should eq(rebuilt.list_of_states)
