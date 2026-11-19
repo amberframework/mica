@@ -22,6 +22,18 @@ module PCRE2SearchCorpus
   VERDICTS_PATH = File.join(__DIR__, "..", "fixtures", "pcre2_testdata_search_verdicts.json")
   DIRECTORY     = File.join(SearchCorpus::CONFORMANCE, "pcre2")
 
+  # The subjects whose pattern sets PCRE2's own match-time limit (see
+  # spec/regex/pcre2_search_replay_spec.cr and spec/regex/bail_early_spec.cr).
+  RESOURCE_LIMITS_PATH = File.join(DIRECTORY, "search_resource_limits.tsv")
+
+  # The pattern settings that give PCRE2 its own match-time limits.
+  LIMIT_SETTINGS = {"(*LIMIT_MATCH=", "(*LIMIT_DEPTH=", "(*LIMIT_HEAP="}
+
+  # Returns true when *pattern* sets one of PCRE2's match-time limits.
+  def self.sets_a_resource_limit?(pattern : String) : Bool
+    LIMIT_SETTINGS.any? { |setting| pattern.includes?(setting) }
+  end
+
   # One subject line.
   struct Subject
     include JSON::Serializable
