@@ -153,8 +153,19 @@ module Mica::Regex
           meter.charge(at - charged, at)
           charged = at
         end
+        # The common step (no edge work, no match path ahead) in a tight
+        # loop up to the next bound: one table load per byte.
+        bound = Math.min(Math.min(size, stop), charged &+ PrefilterScan::CHARGE_CHUNK)
+        step = 0
+        while at < bound
+          step = steps[row &+ class_of[bytes[at]]]
+          break unless step >= 0 && step & (STEP_TAKES_EDGE | STEP_REACHES_MATCH) == 0
+          row = step >> 2
+          reaches_match = false
+          at &+= 1
+        end
+        next if at >= bound
         cell = row &+ class_of[bytes[at]]
-        step = steps[cell]
         break if step < 0
         if step & STEP_TAKES_EDGE != 0
           edge = edges[table[cell]]
