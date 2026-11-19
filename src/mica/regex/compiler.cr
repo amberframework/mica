@@ -93,6 +93,10 @@ module Mica::Regex
     # The states of the runs `transitions_bound` found ahead (see
     # `class_run`).
     @run_states_ahead = 0_i64
+    # The ASCII class whose run block (`run_block`) was built last, and the
+    # block, so a run's two lookups build it once.
+    @ascii_run_set : CodePointSet? = nil
+    @ascii_run_block : {Array(Program::State), Array(Program::Transition), Int32}? = nil
 
     private def initialize(@pattern : Hir::Pattern, @estimate : Int64, @limits : CompileLimits,
                            @ledger : AllocationLedger, @meter : Core::WorkMeter)
@@ -152,7 +156,8 @@ module Mica::Regex
           total = Preflight.add(total, Preflight.multiply(OTHER_LINE_BREAKS.range_count.to_i64 * 4, copies))
         when Hir::Repetition
           maximum = node.maximum
-          count_run_ahead(node) if copies == 1
+          # A run's transitions sit in its table, not in the program's list.
+          next if copies == 1 && run_ahead?(node)
           repeated = if maximum
                        maximum.to_i64
                      else
@@ -391,30 +396,73 @@ module Mica::Regex
 
     # The fewest states a run of class copies stands for (see
     # `Program::ClassRun`); fewer are emitted as states.
-    private RUN_MIN_STATES = 1024
+    private RUN_MIN_STATES = 32
 
-    # Emits *copies* copies of large class *set* as a `Program::ClassRun`,
-    # the first copy's exit leading to *next_state*, and returns the entry
-    # of the last copy (the one a match reads first); nil when the class is
-    # not memoized, its table cannot be shared, or the copies stand for
-    # fewer than `RUN_MIN_STATES` states. The run is checked, charged and
-    # numbered as its copies emitted one by one would be
-    # (`compile_recorded_class`, `instantiate_shared`), and the program it
-    # builds is the same; only its states are not written.
+    # A run's block: its states (targets relative to the block, `EXIT` for
+    # the exit), the table its `Sparse` states read (targets relative to the
+    # state, `Program::SHARED_EXIT` for the exit; empty when it has none),
+    # and its entry. A large class has its memoized block; an ASCII class
+    # its one byte state, as `compile_ascii_class` emits it, its ranges in
+    # a table of the program's own. Nil for any other class.
+    private def run_block(set : CodePointSet) : {Array(Program::State), Array(Program::Transition), Int32}?
+      return nil if set.empty?
+      if ClassMemo.memoized?(set)
+        block = memo_block(set)
+        table = block.shared_table || return nil
+        return block.list_of_states.size < 2 ? nil : {block.list_of_states, table, block.entry}
+      end
+      return nil unless set.list_of_bounds[-1] < 0x80
+      if set.same?(@ascii_run_set) && (cached = @ascii_run_block)
+        return cached
+      end
+      built = ascii_run_block(set)
+      @ascii_run_set = set
+      @ascii_run_block = built
+      built
+    end
+
+    private def ascii_run_block(set : CodePointSet) : {Array(Program::State), Array(Program::Transition), Int32}
+      bounds = set.list_of_bounds
+      range_count = bounds.size // 2
+      @ledger.charge_array(1, sizeof(Program::State), "a class run block", 0)
+      if range_count == 1
+        state = Program::State.new(Program::StateKind::ByteRange, bounds[0].to_u8, bounds[1].to_u8, ClassMemo::EXIT,
+          NONE, 0)
+        return {[state], [] of Program::Transition, 0}
+      end
+      @ledger.charge_array(range_count, sizeof(Program::Transition), "a class run table", 0)
+      table = Array(Program::Transition).new(range_count) do |index|
+        Program::Transition.new(bounds[index * 2].to_u8, bounds[index * 2 + 1].to_u8, Program::SHARED_EXIT)
+      end
+      {[Program::State.new(Program::StateKind::Sparse, 0_u8, 0_u8, NONE, range_count, 0)], table, 0}
+    end
+
+    # Emits *copies* copies of class *set* as a `Program::ClassRun`, the
+    # first copy's exit leading to *next_state*, and returns the entry of
+    # the last copy (the one a match reads first); nil when the class has
+    # no run block (`run_block`), its table cannot be shared, or the copies
+    # stand for fewer than `RUN_MIN_STATES` states. The run is checked,
+    # charged and numbered as its copies emitted one by one would be
+    # (`compile_recorded_class`, `instantiate_shared`), and it builds the
+    # program they would (an ASCII class's ranges then sit in a table of
+    # the program's own rather than in its transition list); only its
+    # states are not written.
     private def class_run(set : CodePointSet, copies : Int32, next_state : Int32) : Int32?
-      return nil if copies < 2 || set.empty? || !ClassMemo.memoized?(set)
-      block = memo_block(set)
-      block_states = block.list_of_states
-      return nil if block_states.size < 2
+      return nil if copies < 2
+      block_states, table, entry = run_block(set) || return nil
       return nil if copies.to_i64 * block_states.size < RUN_MIN_STATES
-      table = block.shared_table || return nil
-      table_id = shared_table_id(table) || return nil
+      table_id = 0_u8
+      unless table.empty?
+        table_id = shared_table_id(table) || return nil
+      end
       added = copies.to_i64 * block_states.size
       check_state_room(added.to_i32, written: false)
       @meter.enforce { Core::Position.new(0_i64) } if @meter.charge(added + copies)
-      copies.times { @ledger.charge_append(sizeof(Program::ClassBlock), "a class block", 0) }
+      if block_states.size > 1
+        copies.times { @ledger.charge_append(sizeof(Program::ClassBlock), "a class block", 0) }
+      end
       @ledger.charge_append(sizeof(Program::ClassRun), "a class run", 0)
-      run = Program::ClassRun.new(state_total, copies, block_states, table_id, block.entry, next_state)
+      run = Program::ClassRun.new(state_total, copies, block_states, table_id, entry, next_state)
       @list_of_runs << run
       @run_states += run.size
       run.last_entry
@@ -883,7 +931,7 @@ module Mica::Regex
     end
 
     # Gives `@list_of_states` room for the preflight's whole bound, charged
-    # as a new list: a run counted ahead (`count_run_ahead`) was emitted
+    # as a new list: a run counted ahead (`run_ahead?`) was emitted
     # as states (its class's table could not be shared).
     private def grow_to_bound : Nil
       bound = @estimate.clamp(1_i64, @limits.max_program_states).to_i32
@@ -895,20 +943,21 @@ module Mica::Regex
       @physical_capacity = bound
     end
 
-    # Adds to `@run_states_ahead` the states of the run (`class_run`) that
-    # *node*, compiled once, will make: a counted large class of at least
-    # `RUN_MIN_STATES` states. Called from `transitions_bound` for the
-    # repetitions it counts once, so it never counts more than the runs the
-    # compiler makes, unless a run's table cannot be shared.
-    private def count_run_ahead(node : Hir::Repetition) : Nil
+    # True when *node*, compiled once, will make a run (`class_run`) of its
+    # copies; it then adds the states the size preflight counted for them
+    # (`Preflight.set_states` per copy) to `@run_states_ahead`. Called from
+    # `transitions_bound` for the repetitions it counts once, so it never
+    # counts more than the runs the compiler makes, unless a run's table
+    # cannot be shared.
+    private def run_ahead?(node : Hir::Repetition) : Bool
       maximum = node.maximum
       child = node.child
-      return unless maximum && maximum > 0 && node.minimum >= 2 && child.is_a?(Hir::Class)
+      return false unless maximum && maximum == node.minimum && node.minimum >= 2 && child.is_a?(Hir::Class)
       set = child.code_point_set
-      return if set.empty? || !ClassMemo.memoized?(set)
-      block_size = memo_block(set).list_of_states.size
-      states = node.minimum.to_i64 * block_size
-      @run_states_ahead += states if block_size >= 2 && states >= RUN_MIN_STATES
+      block_states, _, _ = run_block(set) || return false
+      return false if node.minimum.to_i64 * block_states.size < RUN_MIN_STATES
+      @run_states_ahead += node.minimum.to_i64 * Preflight.set_states(set, @ledger, @meter)
+      true
     end
 
     # The number of states emitted so far, runs included (the next state's

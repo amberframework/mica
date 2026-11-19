@@ -102,9 +102,29 @@ module Mica::Regex
     # The first word symbol (see `word_symbol`); every symbol below it is a
     # plain class or an edge symbol.
     @word_offset : Int32
-    # The symbols of the ASCII bytes (forward only; see
-    # `DFACache#mark_ascii_loop`).
-    getter list_of_ascii_symbols : Array(Int32)
+    # The symbols of the ASCII bytes, found on first use (see
+    # `list_of_ascii_symbols`).
+    @list_of_ascii_symbols : Array(Int32)? = nil
+
+    # The distinct symbols of the ASCII bytes, for a forward DFA (none for
+    # a reverse one; see `DFACache#mark_ascii_loop`), found on first use.
+    # Threads racing here find the same list.
+    def list_of_ascii_symbols : Array(Int32)
+      if found = @list_of_ascii_symbols
+        return found
+      end
+      list = [] of Int32
+      unless @reverse
+        seen = StaticArray(Bool, 256).new(false)
+        0x80.times do |byte|
+          symbol = @byte_classes.class_of(byte.to_u8)
+          next if seen[symbol]
+          seen[symbol] = true
+          list << symbol
+        end
+      end
+      @list_of_ascii_symbols = list
+    end
 
     # A reverse DFA *with_reversed_classes* reads each class backward
     # through its `ReversedClass` (see `SearchPlan#widen_reverse`).
@@ -119,7 +139,6 @@ module Mica::Regex
       # so a row offset leaves three low bits free for flags (see `find_end`).
       symbols = @unicode_words ? @word_offset + class_count : @word_offset
       @stride = (symbols + 7) & ~7
-      @list_of_ascii_symbols = @reverse ? [] of Int32 : (0...0x80).map { |byte| @byte_classes.class_of(byte.to_u8) }.uniq!
       @unbuilt_row = Array(Int32).new(@stride, -1)
       @dead_row = Array(Int32).new(@stride, SPECIAL)
       @reverse_nfa = @reverse ? ReverseNFA.new(@program, @with_reversed_classes) : nil

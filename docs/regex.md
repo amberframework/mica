@@ -335,15 +335,17 @@ transitions from one table shared by every program and copy
 (`Program#list_of_shared_tables`, targets relative to the reading state),
 so a copy of `\w` adds 354 states and no transitions. The preflight
 counts its exact states.
-A counted large class whose copies stand for at least 1,024 states
-(`\p{L}{256}`: 256 copies of 300 states) is not even copied: the
-program holds the copies as one `Program::ClassRun` (the first state,
-the count and the class's memoized block) and numbers its states as the
-copies would be numbered, so compiling `\p{L}{256}` takes about as long as
+A counted class whose copies stand for at least 32 states, a large
+class or an ASCII one (`\p{L}{256}`: 256 copies of 300 states;
+`[0-9A-Za-z_]{256}`), is not even copied: the program holds the copies
+as one `Program::ClassRun` (the first state, the count, and the class's
+memoized block or, for an ASCII class, its one byte state with its ranges
+in a table of the program's own) and numbers its states as the copies
+would be numbered, so compiling `\p{L}{256}` takes about as long as
 `\p{L}`. A first search reads the run's states through
 `Program#state_at`, which works each one out from the block, and the
-plan builds `list_of_states` (the program the copies written out compile
-to, state for state) when it is first built.
+plan builds `list_of_states` (for a large class, the program the copies
+written out compile to, state for state) when it is first built.
 A class of one escape or property lowers to a set shared by the process,
 and so does every written class of up to 32 items (`[0-9a-f]`, kept for
 up to 512 classes, the table emptied and refilled when full), each ASCII
@@ -515,8 +517,11 @@ its memory (the set at its largest and a job stack of that many entries)
 is checked against the backtracker allowance before it starts. It visits
 the same pairs in the same order as with the bitset. Its plan costs in
 proportion to the program's states, at least what that many visits cost,
-so the span it reads is not limited: its other costs are the validation
-and scans every path makes.
+so a first search of a large program without prefix literals reads a span
+of up to `FirstSearch::MAX_LARGE_BYTES` (64 KiB); past it, the validation
+and scans every path makes cost more than the plan would save. A
+backtracked start reads at most `FirstSearch::MAX_BYTES` (256) bytes, so
+a long match end goes to the reverse DFA.
 
 The plan itself builds what a search reads when it first reads it: the
 start filter (read only by short searches) on first use, and the reverse

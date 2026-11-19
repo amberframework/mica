@@ -609,7 +609,8 @@ module Mica::Regex
     # The leftmost-first match of the span ends at *finish*: its start is
     # the match's, as no match starts earlier, and the match from there
     # that the forward DFA found ranks first among those that end by
-    # *finish*. The span must fit the backtracker's bitset and its most
+    # *finish*. The span must be at most `FirstSearch::MAX_BYTES` long and
+    # fit the backtracker's bitset or its capped hash set, and its most
     # work (a visit and a slot write per (state, position) pair) the
     # call's remaining allowance, so a reverse DFA built for one search is
     # not built at all, and the search stays within O(m·(L + 1)). A
@@ -618,7 +619,7 @@ module Mica::Regex
     private def backtracked_start(bytes : Bytes, finish : Int32, lower_bound : Int32) : Int32?
       plan = @plan || return nil
       span = finish - lower_bound
-      return nil unless FirstSearch.span_fits?(@program, span)
+      return nil unless span <= FirstSearch::MAX_BYTES && BoundedBacktracker.fits_capped?(@program, span)
       visits = BoundedBacktracker.capped_visits(@program, span)
       return nil if 2_i64 * visits > @meter.work_meter.allowance - @meter.operations
       return nil unless @engine.backtracked_starts? || plan.backtrack_start?

@@ -38,6 +38,10 @@ private RUN_PATTERNS = {
   "\\b\\w{12}\\b",
   "(?i)\\p{Ll}{20}",
   "\\p{L}{3}\\p{N}{400}",
+  "[0-9A-Za-z_]{40}",
+  "x[a-z]{64}",
+  "[^\\n]{40}",
+  "\\w{2}",
 }
 
 describe Mica::Regex::Program::ClassRun do
@@ -76,8 +80,21 @@ describe Mica::Regex::Program::ClassRun do
   end
 
   it_satisfies "REGEX-R2-compiler", "leaves a few copies of a class as states" do
-    program_of("\\w{2}").list_of_runs.should be_empty
-    program_of("[a-z]{500}").list_of_runs.should be_empty
+    program_of("[a-z]{31}").list_of_runs.should be_empty
+    program_of("(?:ab){500}").list_of_runs.should be_empty
+    program_of("[a-z]{32}").list_of_runs.size.should eq(1)
+  end
+
+  it_satisfies "REGEX-R2-compiler", "holds a counted ASCII class as a run of its one byte state" do
+    program = program_of("[0-9A-Za-z_]{256}")
+    run = program.list_of_runs.first
+    run.list_of_block_states.size.should eq(1)
+    program.list_of_transitions.should be_empty
+    written = program_of("[0-9A-Za-z_]" * 256)
+    program.state_count.should eq(written.state_count)
+    haystack = "b" * 300
+    found = Mica::Regex::Expression.new("[0-9A-Za-z_]{256}", compile_limits: TRUSTED).match(haystack, limits: LIMITS)
+    found.try(&.byte_end(0)).should eq(256)
   end
 
   it_satisfies "REGEX-R2-compiler", "searches alike on every engine path" do

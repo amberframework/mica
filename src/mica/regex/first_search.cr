@@ -45,13 +45,15 @@ module Mica::Regex
     VISITS_PER_STATE =   8_i64
 
     # The fewest states of a *large* program, whose first searches may read
-    # a span of any length (`\p{L}{50}` compiles to about 15,000). Its plan
-    # costs in proportion to its states, at least about what
-    # `BoundedBacktracker::SPARSE_VISITS` visits cost, and over a span too
-    # long for the bitset the backtracker marks visited pairs in a hash set
-    # and stops after that many visits whatever the span, so a longer span
-    # adds only the scans every path makes before it searches.
+    # a span of up to `MAX_LARGE_BYTES` (`\p{L}{50}` compiles to about
+    # 15,000 states). Its plan costs in proportion to its states, at least
+    # about what `BoundedBacktracker::SPARSE_VISITS` visits cost, and over a
+    # span too long for the bitset the backtracker marks visited pairs in a
+    # hash set and stops after that many visits whatever the span. Past
+    # `MAX_LARGE_BYTES` the search costs more than the plan, and a match
+    # far from the offset would leave those visits wasted.
     LARGE_PROGRAM_STATES = BoundedBacktracker::SPARSE_VISITS // VISITS_PER_STATE
+    MAX_LARGE_BYTES      = 65_536
 
     # The most visits a first search of *program* makes on the
     # backtracker.
@@ -73,13 +75,14 @@ module Mica::Regex
 
     # True when the backtracker may search a span of *span* bytes of
     # *program* with its visits capped: up to `MAX_BYTES` (`MAX_LITERAL_BYTES`
-    # with prefix literals) within its bitset or its hash set, and any span
-    # of a large program without prefix literals (`LARGE_PROGRAM_STATES`)
-    # in its hash set.
+    # with prefix literals) within its bitset or its hash set, and up to
+    # `MAX_LARGE_BYTES` of a large program without prefix literals
+    # (`LARGE_PROGRAM_STATES`) in its hash set.
     def self.span_fits?(program : Program, span : Int32) : Bool
       return false unless BoundedBacktracker.fits_capped?(program, span)
       return true if span <= (program.literal_set ? MAX_LITERAL_BYTES : MAX_BYTES)
-      !program.literal_set && program.state_count >= LARGE_PROGRAM_STATES && !BoundedBacktracker.fits?(program, span)
+      return false if program.literal_set || span > MAX_LARGE_BYTES
+      program.state_count >= LARGE_PROGRAM_STATES && !BoundedBacktracker.fits?(program, span)
     end
 
     # True when validating *haystack_bytes* bytes, the scans for the

@@ -74,10 +74,11 @@ module Mica::Regex
     # (see `ReverseNFA`).
     record ClassBlock, first_state : Int32, end_state : Int32, entry : Int32, exit : Int32
 
-    # *copies* copies of one memoized class, one after another from
-    # *first_state*, held as the class's block (`ClassMemo::Block`, shared
-    # with every program) rather than as states: `x{n}` for a large class
-    # `x` (`\p{L}{256}` is 256 copies of about 300 states). Copy k starts at
+    # *copies* copies of one class, one after another from *first_state*,
+    # held as the class's block (a large class's `ClassMemo::Block`, shared
+    # with every program, or an ASCII class's one byte state) rather than
+    # as states: `x{n}` (`\p{L}{256}` is 256 copies of about 300 states).
+    # Copy k starts at
     # `first_state + k * block size`; copy 0 leads to *exit*, and each
     # later copy to the entry of the copy before it, as the compiler emits
     # a counted item from the last copy back. Its `Sparse` states read
@@ -123,6 +124,8 @@ module Mica::Regex
       # The class blocks of the run's copies, in emission order.
       def each_class_block(& : ClassBlock ->) : Nil
         block_size = list_of_block_states.size
+        # A class of one state is not recorded (see `list_of_class_blocks`).
+        return if block_size < 2
         copies.times do |copy|
           copy_first = first_state + copy * block_size
           exit_target = copy == 0 ? exit : copy_first - block_size + entry
