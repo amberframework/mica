@@ -498,11 +498,20 @@ module Mica::Regex
         "a class transition", 0)
       @meter.enforce { Core::Position.new(0_i64) } if @meter.charge(block_states.size)
       reserve_transitions(block_transitions.size)
-      block_transitions.each do |transition|
-        @list_of_transitions << transition.copy_with(target: absolute_target(transition.target, first_state, next_state))
+      # Copied whole (a memory copy), then relocated in place: a large
+      # class is hundreds of states and over a thousand transitions, so
+      # appending them one by one dominated compiling a pattern like `\w+`.
+      @list_of_transitions.concat(block_transitions)
+      transitions = @list_of_transitions.to_unsafe + first_transition
+      block_transitions.size.times do |index|
+        transition = transitions[index]
+        transitions[index] = transition.copy_with(target: absolute_target(transition.target, first_state, next_state))
       end
-      block_states.each do |state|
-        @list_of_states << state.copy_with(next_state: absolute_target(state.next_state, first_state, next_state),
+      @list_of_states.concat(block_states)
+      states = @list_of_states.to_unsafe + first_state
+      block_states.size.times do |index|
+        state = states[index]
+        states[index] = state.copy_with(next_state: absolute_target(state.next_state, first_state, next_state),
           argument: state.kind.sparse? ? state.argument + first_transition : state.argument)
       end
       block.entry + first_state
