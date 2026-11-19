@@ -74,6 +74,7 @@ module Mica::Regex
     @list_of_trie_states : Array(Int32)
     @high_water = StaticArray(Int32, 6).new(0)
     @list_of_visited = [] of Bool
+    @list_of_class_blocks = [] of Program::ClassBlock
 
     private def initialize(@pattern : Hir::Pattern, @estimate : Int64, @limits : CompileLimits,
                            @ledger : AllocationLedger, @meter : Core::WorkMeter)
@@ -108,7 +109,8 @@ module Mica::Regex
       charge_literal_set(literal_set) if literal_set
       @ledger.charge_object(instance_sizeof(Program), "the program", 0)
       Program.new(@list_of_states, @list_of_transitions, start, @pattern.capture_count, group_names,
-        @pattern.options, @limits.max_pike_bytes - workspace_charge, @pattern.source_end, literal_set)
+        @pattern.options, @limits.max_pike_bytes - workspace_charge, @pattern.source_end, literal_set,
+        @list_of_class_blocks)
     end
 
     private def charge_literal_set(literal_set : LiteralSet) : Nil
@@ -172,7 +174,7 @@ module Mica::Regex
       when Hir::Literal
         push_value(compile_literal(node.code_point, next_state))
       when Hir::Class
-        push_value(compile_class(node.code_point_set, next_state))
+        push_value(compile_recorded_class(node.code_point_set, next_state))
       when Hir::Look
         push_value(emit_look(look_kind(node), next_state))
       when Hir::LineBreak
@@ -362,6 +364,19 @@ module Mica::Regex
     # leading byte ranges, one state per trie node (a `ByteRange` for one
     # edge, a `Sparse` for several), and every last byte goes to
     # *next_state*.
+    # Compiles *set* (see `compile_class`) and records its states as a
+    # `Program::ClassBlock` when they are more than one.
+    private def compile_recorded_class(set : CodePointSet, next_state : Int32) : Int32
+      first_state = @list_of_states.size
+      entry = compile_class(set, next_state)
+      end_state = @list_of_states.size
+      if end_state - first_state > 1
+        @ledger.charge_append(sizeof(Program::ClassBlock), "a class block", 0)
+        @list_of_class_blocks << Program::ClassBlock.new(first_state, end_state, entry, next_state)
+      end
+      entry
+    end
+
     private def compile_class(set : CodePointSet, next_state : Int32) : Int32
       return emit(Program::StateKind::Fail) if set.empty?
       return compile_class_from_trie(set, next_state) unless ClassMemo.memoized?(set)

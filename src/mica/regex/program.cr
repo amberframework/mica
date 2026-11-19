@@ -64,6 +64,11 @@ module Mica::Regex
     # One range of a `Sparse` state.
     record Transition, low : UInt8, high : UInt8, target : Int32
 
+    # The states one class compiled to: `first_state` up to (not including)
+    # `end_state`, only byte states, entered at `entry` and left to `exit`
+    # (see `ReverseNFA`).
+    record ClassBlock, first_state : Int32, end_state : Int32, entry : Int32, exit : Int32
+
     # Every state, indexed by number.
     getter list_of_states : Array(State)
     # The ranges of every `Sparse` state.
@@ -85,11 +90,14 @@ module Mica::Regex
     getter source_end : Ast::SourceEnd
     # The literals every match starts with (see `LiteralSet`), or nil.
     getter literal_set : LiteralSet?
+    # The classes of more than one state, in emission order.
+    getter list_of_class_blocks : Array(ClassBlock)
 
     def initialize(@list_of_states : Array(State), @list_of_transitions : Array(Transition), @start_state : Int32,
                    @capture_count : Int32, @list_of_group_names : Array(Ast::GroupName), @options : CompileOptions,
                    @backtracker_allowance : Int64, @source_end : Ast::SourceEnd = Ast::SourceEnd::Closed,
-                   @literal_set : LiteralSet? = nil)
+                   @literal_set : LiteralSet? = nil,
+                   @list_of_class_blocks : Array(ClassBlock) = [] of ClassBlock)
     end
 
     # Published through an atomic, so a thread that sees the plan sees it

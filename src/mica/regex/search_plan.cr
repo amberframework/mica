@@ -10,7 +10,12 @@ module Mica::Regex
   #    no assertion (`LiteralSet#exact?`): the prefilter finds the match.
   # 2. **Lazy DFA**, forward for the end and reverse for the start, with
   #    the prefilter skipping ahead while the forward DFA is in its start
-  #    state, for every program without `\G`.
+  #    state, for every program without `\G`. The reverse DFA is widened
+  #    to read classes backward (`widen_reverse`) once its states grow
+  #    wide. A program whose matches are short (`short_match`) finds the
+  #    start with the forward DFA run anchored from each start while the
+  #    reverse cache thrashes, and is searched that way while the forward
+  #    cache thrashes.
   # 3. **Pike VM** (span layout) when neither applies, under
   #    `CompileOptions::FirstLine` or `EndAnchored`, and whenever a lazy DFA
   #    gives up (cache thrash, a full `CachePool`, a Unicode word assertion
@@ -40,6 +45,9 @@ module Mica::Regex
     # The lazily built parts are published through atomics, so a search
     # on another thread that sees one sees it fully built.
     @reverse = Atomic(LazyDFA?).new(nil)
+    @reverse_with_reversed_classes = Atomic(LazyDFA?).new(nil)
+    # Set once `widen_reverse` found the widened DFA too large.
+    @widen_refused = Atomic(Int32).new(0)
     @one_pass = Atomic(OnePassDFA?).new(nil)
     # Set (after @one_pass) once the one-pass build ran, as its result may
     # be nil.
@@ -53,6 +61,8 @@ module Mica::Regex
     @short_validated = Atomic(String?).new(nil)
     # 1 once a caller read groups that a search had left to read later.
     @groups_read = Atomic(Int32).new(0)
+    @short_match = Atomic(ShortMatch?).new(nil)
+    @short_match_built = Atomic(Int32).new(0)
     @mutex = Mutex.new
     @list_of_idle_leases = [] of SearchLease
     # The most recently returned lease, taken without the mutex.
@@ -94,7 +104,8 @@ module Mica::Regex
       true
     end
 
-    # The reverse lazy DFA (built on first use), or nil.
+    # The reverse lazy DFA (built on first use; replaced once by
+    # `widen_reverse`), or nil.
     def reverse : LazyDFA?
       return nil unless @forward
       if built = @reverse.get
@@ -105,6 +116,59 @@ module Mica::Regex
         return built if built
         built = LazyDFA.new(@program, @byte_classes, true)
         @reverse.set(built)
+        built
+      end
+    end
+
+    # A reverse DFA state holding more NFA states than this is wide; a
+    # reverse cache that has built `WIDE_STATES_TO_WIDEN` wide states makes
+    # `widen_reverse` worth its one-time cost (a single short search does
+    # not).
+    WIDE_REVERSE_KEY     = 256
+    WIDE_STATES_TO_WIDEN =  16
+
+    # Replaces the reverse DFA with one that reads each class backward
+    # through its `ReversedClass`, once: a search whose reverse cache has
+    # built `WIDE_STATES_TO_WIDEN` states wider than `WIDE_REVERSE_KEY` NFA
+    # states calls it (large Unicode classes next to non-ASCII text).
+    # Reversing a class costs milliseconds the first time in a process, so
+    # only programs that need it pay.
+    #
+    # The widened DFA reads more NFA nodes, so its cache's fixed part is
+    # larger; when that part would take more than half of
+    # *max_cache_bytes* (`\p{L}{256}` repeats one class 256 times), the
+    # plan keeps its reverse DFA and does not try again.
+    def widen_reverse(max_cache_bytes : Int64) : Nil
+      return if @widen_refused.get == 1
+      current = @reverse.get
+      return if current && current.with_reversed_classes?
+      return if @program.list_of_class_blocks.empty?
+      # The widened DFA has at least the program's nodes; only when those fit
+      # are the reversed classes counted.
+      scratch_per_node = DFABuilder::BYTES_PER_STATE.to_i64 * 2
+      node_limit = max_cache_bytes // scratch_per_node
+      if @program.state_count > node_limit || ReverseNFA.widened_node_count(@program, node_limit) > node_limit
+        @widen_refused.set(1)
+        return
+      end
+      widened = reverse_with_reversed_classes || return
+      @mutex.synchronize { @reverse.set(widened) }
+    end
+
+    # The reverse DFA that reads each class backward through its
+    # `ReversedClass` (built on first use), or nil when the program needs
+    # the Pike VM. `widen_reverse` makes it the reverse DFA;
+    # `Engine::ReversedClasses` uses it from the start.
+    def reverse_with_reversed_classes : LazyDFA?
+      return nil unless @forward
+      if built = @reverse_with_reversed_classes.get
+        return built
+      end
+      @mutex.synchronize do
+        built = @reverse_with_reversed_classes.get
+        return built if built
+        built = LazyDFA.new(@program, @byte_classes, true, with_reversed_classes: true)
+        @reverse_with_reversed_classes.set(built)
         built
       end
     end
@@ -180,6 +244,19 @@ module Mica::Regex
     # or nil.
     def built_one_pass : OnePassDFA?
       @one_pass_built.get == 1 ? @one_pass.get : nil
+    end
+
+    # The analysis of short matches (made on first use), or nil when a
+    # match can be long (see `ShortMatch`).
+    def short_match : ShortMatch?
+      return @short_match.get if @short_match_built.get == 1
+      @mutex.synchronize do
+        if @short_match_built.get == 0
+          @short_match.set(ShortMatch.analyze(@program))
+          @short_match_built.set(1)
+        end
+      end
+      @short_match.get
     end
 
     # Takes an idle lease (its caches warm from earlier searches) or makes
@@ -304,8 +381,15 @@ module Mica::Regex
     end
 
     # The reverse cache, as `forward_cache`.
+    # A cache made for an earlier reverse DFA (see
+    # `SearchPlan#widen_reverse`) is evicted and replaced.
     def reverse_cache(dfa : LazyDFA) : DFACache?
-      @reverse_cache ||= DFACache.reserve?(dfa, @pool)
+      cache = @reverse_cache
+      if cache && !cache.dfa.same?(dfa)
+        cache.evict
+        cache = @reverse_cache = nil
+      end
+      cache || (@reverse_cache = DFACache.reserve?(dfa, @pool))
     end
 
     # True when *haystack* is the very `String` this lease validated last:

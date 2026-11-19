@@ -17,7 +17,32 @@ module Mica::Regex
     getter list_of_marks : Array(UInt8)
     # How many times the cache has been cleared.
     getter clears = 0
+    # True once a clear found the searches building a state for fewer than
+    # `LazyDFA::MINIMUM_BYTES_PER_STATE` bytes read: the unanchored DFA
+    # thrashes on this program, so a searcher prefers
+    # `LazyDFA#find_from_each_start` where the program allows it, trying
+    # the unanchored DFA again now and then (`retry?`).
+    getter? thrashing = false
+    # States built and bytes read since the cache was made (see
+    # `judge_retry`).
+    getter states_built = 0_i64
+    getter bytes_read = 0_i64
+    @searches_since_thrash = 0
+    # The most NFA states one state built so far held, and how many states
+    # built held more than `SearchPlan::WIDE_REVERSE_KEY`.
+    getter widest_key = 0
+    getter wide_states = 0
+    @retry_interval = FIRST_RETRY_INTERVAL
     getter dfa : LazyDFA
+
+    # Searches between retries of the unanchored DFA once it thrashes; the
+    # interval doubles, up to `LAST_RETRY_INTERVAL`, each time a retry
+    # thrashes again.
+    FIRST_RETRY_INTERVAL = 256
+    LAST_RETRY_INTERVAL  = 1 << 20
+    # The fewest states a retry builds before its rate can count as
+    # thrashing.
+    RETRY_STATES = 32
     @list_of_keys : Array(Array(Int32))
     @state_ids : Hash(Array(Int32), Int32)
     @start_states : Array(Int32)
@@ -39,12 +64,12 @@ module Mica::Regex
     end
 
     # The bytes a new cache takes before its first state is built.
-    protected def self.initial_bytes(dfa : LazyDFA) : Int64
+    def self.initial_bytes(dfa : LazyDFA) : Int64
       fixed_bytes_of(dfa) + 2 * state_bytes_of(dfa, 1)
     end
 
     protected def self.fixed_bytes_of(dfa : LazyDFA) : Int64
-      16_i64 * dfa.program.state_count + 4_i64 * LazyDFA::START_FLAG_COUNT + 256
+      DFABuilder::BYTES_PER_STATE.to_i64 * dfa.node_count + 4_i64 * LazyDFA::START_FLAG_COUNT + 256
     end
 
     protected def self.state_bytes_of(dfa : LazyDFA, key_size : Int32) : Int64
@@ -59,7 +84,7 @@ module Mica::Regex
       @list_of_keys = [] of Array(Int32)
       @state_ids = {} of Array(Int32) => Int32
       @start_states = Array(Int32).new(LazyDFA::START_FLAG_COUNT, -1)
-      @builder = DFABuilder.new(@dfa.program.state_count)
+      @builder = DFABuilder.new(@dfa.node_count)
       reset_states
     end
 
@@ -72,11 +97,39 @@ module Mica::Regex
     @[AlwaysInline]
     def note_bytes(count : Int32) : Nil
       @bytes_since_clear += count
+      @bytes_read += count
+    end
+
+    # Counts a search made from each start because the cache thrashes, and
+    # returns true (forgetting the thrashing) once the retry interval has
+    # passed, so that search tries the unanchored DFA again; the caller
+    # then reports how it went to `judge_retry`.
+    def retry? : Bool
+      @searches_since_thrash += 1
+      return false if @searches_since_thrash < @retry_interval
+      @thrashing = false
+      @searches_since_thrash = 0
+      true
+    end
+
+    # Judges a retry of the unanchored DFA that started when `states_built`
+    # was *states_before* and `bytes_read` was *bytes_before*: when it
+    # built at least `RETRY_STATES` states at fewer than
+    # `LazyDFA::MINIMUM_BYTES_PER_STATE` bytes each, the cache thrashes
+    # again and the next retry waits twice as long.
+    def judge_retry(states_before : Int64, bytes_before : Int64) : Nil
+      built = @states_built - states_before
+      return if built < RETRY_STATES
+      return if @bytes_read - bytes_before >= LazyDFA::MINIMUM_BYTES_PER_STATE.to_i64 * built
+      @thrashing = true
+      @retry_interval = Math.min(@retry_interval * 2, LAST_RETRY_INTERVAL)
     end
 
     # Drops every state and gives the memory back to the pool (its lease
     # is being evicted, see `SearchLease`).
     def evict : Nil
+      @thrashing = false
+      @retry_interval = FIRST_RETRY_INTERVAL
       @transition_table = [] of Int32
       @list_of_marks = [] of UInt8
       @list_of_keys = [] of Array(Int32)
@@ -130,6 +183,8 @@ module Mica::Regex
         return LazyDFA::GAVE_UP if @bytes_used + cost > @pool.max_cache_bytes
       end
       return LazyDFA::GAVE_UP unless reserve(@bytes_used + cost)
+      @widest_key = key.size if key.size > @widest_key
+      @wide_states += 1 if key.size > SearchPlan::WIDE_REVERSE_KEY
       add_state(key.dup, cost)
     end
 
@@ -148,6 +203,7 @@ module Mica::Regex
       @list_of_marks << mark
       @bytes_used += cost
       @states_since_clear += 1
+      @states_built += 1
       id
     end
 
@@ -160,8 +216,9 @@ module Mica::Regex
     private def clear(meter : SearchMeter) : Bool
       meter.charge(@list_of_keys.size, 0)
       @clears += 1
-      thrashing = @clears > LazyDFA::MAX_CLEARS &&
-                  @bytes_since_clear < LazyDFA::MINIMUM_BYTES_PER_STATE.to_i64 * @states_since_clear
+      sparse = @bytes_since_clear < LazyDFA::MINIMUM_BYTES_PER_STATE.to_i64 * @states_since_clear
+      @thrashing = true if sparse
+      thrashing = @clears > LazyDFA::MAX_CLEARS && sparse
       @transition_table.clear
       @list_of_marks.clear
       @list_of_keys.clear
@@ -188,31 +245,42 @@ module Mica::Regex
   end
 
   # :nodoc:
-  # Scratch space for building DFA states: a sparse set of visited NFA
+  # Scratch space for building DFA states: a stamped set of visited NFA
   # states, the closure stack, the consuming states in priority order, and
-  # the key being built with its own sparse set.
+  # the key being built with its own stamped set.
   class DFABuilder
-    @visited_dense : Array(Int32)
-    @visited_sparse : Array(Int32)
-    @visited_size = 0
-    @target_dense : Array(Int32)
-    @target_sparse : Array(Int32)
-    @target_size = 0
+    # A state is visited (or a target) in the current build when its stamp
+    # equals the current generation, so starting a build is one increment,
+    # and each set takes 4 bytes per NFA state.
+    @visited_stamps : Array(UInt32)
+    @visit_generation = 0_u32
+    @target_stamps : Array(UInt32)
+    @target_generation = 0_u32
     @stack = [] of Int32
     @outputs = [] of Int32
     @key = [] of Int32
 
+    # The bytes of the two stamp tables per NFA state.
+    BYTES_PER_STATE = 8
+
     def initialize(state_count : Int32)
-      @visited_dense = Array(Int32).new(state_count, 0)
-      @visited_sparse = Array(Int32).new(state_count, 0)
-      @target_dense = Array(Int32).new(state_count, 0)
-      @target_sparse = Array(Int32).new(state_count, 0)
+      @visited_stamps = Array(UInt32).new(state_count, 0_u32)
+      @target_stamps = Array(UInt32).new(state_count, 0_u32)
     end
 
     def reset : Nil
-      @visited_size = 0
+      @visit_generation = DFABuilder.next_generation(@visited_stamps, @visit_generation)
       @stack.clear
       @outputs.clear
+    end
+
+    # The generation after *generation* for *stamps*, clearing them when
+    # the counter wraps around.
+    protected def self.next_generation(stamps : Array(UInt32), generation : UInt32) : UInt32
+      generation &+= 1
+      return generation unless generation == 0
+      stamps.fill(0_u32)
+      1_u32
     end
 
     def push(state : Int32) : Nil
@@ -229,11 +297,8 @@ module Mica::Regex
 
     # Marks *state* visited; false when it already was.
     def visit(state : Int32) : Bool
-      member = @visited_sparse.unsafe_fetch(state)
-      return false if member < @visited_size && @visited_dense.unsafe_fetch(member) == state
-      @visited_sparse[state] = @visited_size
-      @visited_dense[@visited_size] = state
-      @visited_size += 1
+      return false if @visited_stamps.unsafe_fetch(state) == @visit_generation
+      @visited_stamps.unsafe_put(state, @visit_generation)
       true
     end
 
@@ -248,15 +313,12 @@ module Mica::Regex
     def begin_targets(flags : Int32) : Nil
       @key.clear
       @key << flags
-      @target_size = 0
+      @target_generation = DFABuilder.next_generation(@target_stamps, @target_generation)
     end
 
     def add_target(state : Int32) : Nil
-      member = @target_sparse.unsafe_fetch(state)
-      return if member < @target_size && @target_dense.unsafe_fetch(member) == state
-      @target_sparse[state] = @target_size
-      @target_dense[@target_size] = state
-      @target_size += 1
+      return if @target_stamps.unsafe_fetch(state) == @target_generation
+      @target_stamps.unsafe_put(state, @target_generation)
       @key << state
     end
 

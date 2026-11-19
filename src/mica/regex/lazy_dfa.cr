@@ -83,6 +83,8 @@ module Mica::Regex
     getter program : Program
     getter byte_classes : ByteClasses
     getter? reverse : Bool
+    # True for a reverse DFA that reads classes through `ReversedClass`.
+    getter? with_reversed_classes : Bool
     # Entries per state in the transition table: one per class, then the
     # end of input, then (forward) a line feed that ends the haystack.
     getter stride : Int32
@@ -94,7 +96,10 @@ module Mica::Regex
     # plain class or an edge symbol.
     @word_offset : Int32
 
-    def initialize(@program : Program, @byte_classes : ByteClasses, @reverse : Bool)
+    # A reverse DFA *with_reversed_classes* reads each class backward
+    # through its `ReversedClass` (see `SearchPlan#widen_reverse`).
+    def initialize(@program : Program, @byte_classes : ByteClasses, @reverse : Bool,
+                   @with_reversed_classes : Bool = false)
       looks = LazyDFA.looks_used(@program)
       @unicode_words = looks.any? { |kind| LazyDFA.unicode_word?(kind) }
       class_count = @byte_classes.class_count
@@ -104,7 +109,7 @@ module Mica::Regex
       # so a row offset leaves two low bits free for flags (see `find_end`).
       symbols = @unicode_words ? @word_offset + class_count : @word_offset
       @stride = (symbols + 3) & ~3
-      @reverse_nfa = @reverse ? ReverseNFA.new(@program) : nil
+      @reverse_nfa = @reverse ? ReverseNFA.new(@program, @with_reversed_classes) : nil
       line_start = looks.includes?(Program::LookKind::StartOfLine)
       text_start = looks.includes?(Program::LookKind::StartOfText)
       text_end = looks.includes?(Program::LookKind::EndOfText)
@@ -128,6 +133,16 @@ module Mica::Regex
       relevant |= PREVIOUS_WORD if ascii_words
       relevant |= PREVIOUS_UNICODE_WORD if @unicode_words
       @relevant_flags = relevant
+    end
+
+    # The NFA states a DFA state can hold: the program's, or (reverse) the
+    # `ReverseNFA`'s nodes.
+    def node_count : Int32
+      if reverse_nfa = @reverse_nfa
+        reverse_nfa.node_count
+      else
+        @program.state_count
+      end
     end
 
     # True when the lazy DFA can run *program*: everything but `\G`.
@@ -334,6 +349,156 @@ module Mica::Regex
       return GAVE_UP if state < 0
       last_start = lower_bound if cache.list_of_marks.unsafe_fetch(state) & MARK_MATCH != 0
       last_start
+    end
+
+    # Finds the leftmost-first match at or after *start* by running the DFA
+    # anchored at each character start in turn, for a program whose
+    # matches are short (*short_match*). Returns the match's start and end,
+    # or `NO_MATCH` (or `GAVE_UP`) as the start.
+    #
+    # The anchored DFA holds one thread per pattern position at most, so it
+    # builds few states where the unanchored one, holding a thread for
+    # every start still alive, thrashes (`[a-q][^u-z]{13}x`). Each start
+    # reads at most `ShortMatch#longest` + 1 bytes before its DFA dies, and
+    # that is below the program's state count, so a search costs
+    # O(m·(n + 1)), the Pike VM's bound, and far less when most starts die
+    # within a few bytes. When every match ends in one of a few bytes, the
+    # starts more than `longest` bytes before the next of them (found with
+    # `memchr`, each byte read once) are skipped.
+    def find_from_each_start(cache : DFACache, haystack : Bytes, start : Int32, earliest : Bool,
+                             short_match : ShortMatch, meter : SearchMeter) : {Int32, Int32}
+      size = haystack.size
+      limit = @final_lf && size > start && haystack.unsafe_fetch(size - 1) == Look::LINE_FEED ? size - 1 : size
+      bytes = haystack.to_unsafe
+      class_table = @byte_classes.table
+      stride = @stride
+      words = @unicode_words
+      wide_start = wide_end = 0
+      wide_word = false
+      unpaid = 0
+      origin = start
+      list_of_final_bytes = short_match.list_of_final_bytes
+      longest = short_match.longest
+      # The next position of each final byte at or after `origin`, -1 before
+      # it is searched, `Int32::MAX` when there is none.
+      final_at = StaticArray(Int32, ShortMatch::MAX_FINAL_BYTES).new(-1)
+      next_final = -1
+      while origin <= size
+        if origin < size && bytes[origin] & 0xC0 == 0x80
+          origin += 1
+          unpaid += 1
+          next
+        end
+        unless list_of_final_bytes.empty?
+          if next_final < origin
+            next_final = Int32::MAX
+            list_of_final_bytes.each_with_index do |final_byte, slot|
+              found = final_at[slot]
+              found = final_at[slot] = next_byte(haystack, final_byte, origin, meter) if found < origin
+              next_final = found if found < next_final
+            end
+            break if next_final == Int32::MAX
+          end
+          first_possible = next_final - longest + 1
+          if origin < first_possible
+            origin = first_possible
+            next
+          end
+        end
+        state = cache.start_state(self, start_flags(haystack, origin, true), meter)
+        return {GAVE_UP, 0} if state < 0
+        current = cache.entry_of(state)
+        last_end = NO_MATCH
+        at = origin
+        table = cache.transition_table.to_unsafe
+        dead = false
+        while at < limit
+          byte = bytes[at]
+          symbol = class_table[byte].to_i32
+          if words && byte >= 0x80
+            wide_start, wide_end, wide_word = LazyDFA.wide_char(haystack, at) unless wide_start <= at < wide_end
+            symbol &+= @word_offset if wide_word
+          end
+          entry = table[(current & ROW_MASK) &+ symbol]
+          if entry < 0
+            id = cache.transition(self, current // stride, symbol, meter)
+            return {GAVE_UP, 0} if id < 0
+            entry = cache.entry_of(id)
+            table = cache.transition_table.to_unsafe
+          end
+          at &+= 1
+          current = entry
+          if entry & SPECIAL != 0
+            marks = cache.list_of_marks.unsafe_fetch(entry // stride)
+            if marks & MARK_MATCH != 0
+              last_end = at - 1
+              break if earliest
+            end
+            if marks & MARK_DEAD != 0
+              dead = true
+              break
+            end
+          end
+        end
+        unpaid += at - origin + 1
+        if unpaid >= 4096
+          meter.charge(unpaid, at)
+          cache.note_bytes(unpaid)
+          unpaid = 0
+        end
+        unless dead || (earliest && last_end >= 0)
+          last_end = finish_at_end(cache, current // stride, at, size, limit, earliest, last_end, meter)
+          return {GAVE_UP, 0} if last_end == GAVE_UP
+        end
+        if last_end >= 0
+          meter.charge(unpaid, at)
+          cache.note_bytes(unpaid)
+          return {origin, last_end}
+        end
+        origin += 1
+      end
+      meter.charge(unpaid, size)
+      cache.note_bytes(unpaid)
+      {NO_MATCH, 0}
+    end
+
+    # The first position at or after *from* holding *byte*, or `Int32::MAX`;
+    # charges the bytes `memchr` reads, in windows of 4096 bytes.
+    private def next_byte(haystack : Bytes, byte : UInt8, from : Int32, meter : SearchMeter) : Int32
+      at = from
+      size = haystack.size
+      while at < size
+        stop = Math.min(size, at + 4096)
+        if found = haystack[at, stop - at].index(byte)
+          meter.charge(found + 1, at)
+          return at + found
+        end
+        meter.charge(stop - at, at)
+        at = stop
+      end
+      Int32::MAX
+    end
+
+    # Reads the end of the haystack (the line feed that ends it, then the
+    # end of input) from *state* at *at*, after the scan stopped at
+    # *limit*, and returns the match end found so far or `GAVE_UP`.
+    private def finish_at_end(cache : DFACache, state : Int32, at : Int32, size : Int32, limit : Int32,
+                              earliest : Bool, last_end : Int32, meter : SearchMeter) : Int32
+      if at == size - 1 && limit == size - 1
+        state = step(cache, state, final_lf_symbol, meter)
+        return GAVE_UP if state < 0
+        at += 1
+        marks = cache.list_of_marks.unsafe_fetch(state)
+        if marks & MARK_MATCH != 0
+          last_end = at - 1
+          return last_end if earliest
+        end
+        return last_end if marks & MARK_DEAD != 0
+      end
+      return last_end unless at >= size
+      state = step(cache, state, edge_symbol, meter)
+      return GAVE_UP if state < 0
+      cache.list_of_marks.unsafe_fetch(state) & MARK_MATCH != 0 ? size : last_end
     end
 
     # The low bits of a table entry (see `find_end`): a match or dead state,
