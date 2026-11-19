@@ -88,6 +88,10 @@ module Mica::Regex
     # Entries per state in the transition table: one per class, then the
     # end of input, then (forward) a line feed that ends the haystack.
     getter stride : Int32
+    # A new state's row: every transition still to build (-1).
+    getter unbuilt_row : Array(Int32)
+    # A dead state's row: every transition to the dead state.
+    getter dead_row : Array(Int32)
     @reverse_nfa : ReverseNFA?
     @relevant_flags : Int32
     @unicode_words : Bool
@@ -109,6 +113,8 @@ module Mica::Regex
       # so a row offset leaves two low bits free for flags (see `find_end`).
       symbols = @unicode_words ? @word_offset + class_count : @word_offset
       @stride = (symbols + 3) & ~3
+      @unbuilt_row = Array(Int32).new(@stride, -1)
+      @dead_row = Array(Int32).new(@stride, SPECIAL)
       @reverse_nfa = @reverse ? ReverseNFA.new(@program, @with_reversed_classes) : nil
       line_start = looks.includes?(Program::LookKind::StartOfLine)
       text_start = looks.includes?(Program::LookKind::StartOfText)
