@@ -82,12 +82,12 @@ module Mica::Regex
       small_set_states(set)
     end
 
-    # The bound for a set below `ClassMemo::MIN_RANGES` ranges.
+    # The bound for a set counted from its UTF-8 sequences. The trie the
+    # compiler builds has no more states, and a memoized set's automaton
+    # (the trie with equal suffixes merged) has no more than the trie, so
+    # this bounds every set; `set_states` is exact for memoized ones.
     private def self.small_set_states(set : CodePointSet) : Int64
       return 1_i64 if set.empty?
-      if ClassMemo.memoized?(set)
-        raise ArgumentError.new("A set of #{set.range_count} ranges needs a ledger for its class bound")
-      end
       count_set_states(set)
     end
 

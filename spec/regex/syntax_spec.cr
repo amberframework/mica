@@ -209,6 +209,17 @@ describe Mica::Regex::Syntax do
       hir_of("(?i)[^k]").should_not contain("212A")
     end
 
+    it_satisfies "REGEX-R1-case-folding", "shares one folded set per ASCII character, restricted or not" do
+      folded = ->(source : String) do
+        Mica::Regex::Syntax.translate(source, dialect: :crystal, compile_limits: TRUSTED).root.as(Mica::Regex::Hir::Class).code_point_set
+      end
+      folded.call("(?i)s").should be(folded.call("(?i)s"))
+      folded.call("(?i)s").list_of_bounds.should eq([0x53, 0x53, 0x73, 0x73, 0x17F, 0x17F])
+      folded.call("(?ir)s").list_of_bounds.should eq([0x53, 0x53, 0x73, 0x73])
+      folded.call("(?ir)s").should_not be(folded.call("(?i)s"))
+      Mica::Regex::Syntax.translate("(?i)1", dialect: :crystal, compile_limits: TRUSTED).root.should be_a(Mica::Regex::Hir::Literal)
+    end
+
     it_satisfies "REGEX-R1-case-folding", "keeps ASCII and non-ASCII apart under (?r)" do
       hir_of("(?ir)k").should eq("[Kk]")
       hir_of("(?ir)\\x{212A}").should eq("\\x{212A}")
@@ -355,6 +366,27 @@ describe Mica::Regex::Syntax do
       # A smaller max_class_ranges still refuses the kept set.
       error_of("(?i)[0-9a-fk]", Mica::Regex::CompileLimits.custom(max_class_ranges: 5)).as(Mica::Regex::CompileLimitError)
         .limit_name.should eq("max_class_ranges")
+    end
+
+    it_satisfies "REGEX-R1-preflight", "compiles an ASCII class to one byte state, as its trie would" do
+      one = Mica::Regex::Syntax.compile("[a-c]", dialect: :crystal, compile_limits: TRUSTED)
+      one.list_of_states.count(&.kind.byte_range?).should eq(1)
+      one.list_of_transitions.should be_empty
+      several = Mica::Regex::Syntax.compile("[x-z0-2a]", dialect: :crystal, compile_limits: TRUSTED)
+      sparse = several.list_of_states.find(&.kind.sparse?).should_not be_nil
+      several.list_of_transitions[sparse.argument, sparse.alternate].map { |transition| {transition.low, transition.high} }
+        .should eq([{0x30_u8, 0x32_u8}, {0x61_u8, 0x61_u8}, {0x78_u8, 0x7A_u8}])
+    end
+
+    it_satisfies "REGEX-R1-preflight", "keeps the automaton of a class reaching three-byte sequences, however few its ranges" do
+      Mica::Regex::ClassMemo.memoized?(Mica::Regex::ClassLowering.any_character(false)).should be_true
+      Mica::Regex::ClassMemo.memoized?(Mica::Regex::CodePointSet.new([{0x61, 0x7A}, {0x400, 0x4FF}])).should be_false
+      Mica::Regex::ClassMemo.memoized?(Mica::Regex::CodePointSet.new([] of {Int32, Int32})).should be_false
+      dot = Mica::Regex::Syntax.compile("x.", dialect: :crystal, compile_limits: TRUSTED)
+      again = Mica::Regex::Syntax.compile("x.", dialect: :crystal, compile_limits: TRUSTED)
+      again.list_of_states.should eq(dot.list_of_states)
+      # Merged suffixes: fewer states than the trie bound of `.`.
+      dot.state_count.should be < 3 + 1 + 22
     end
 
     it_satisfies "REGEX-R1-preflight", "copies a repeated small class exactly as it would rebuild it" do

@@ -16,12 +16,17 @@ module Mica::Regex
   # program is the same whether its blocks came from the memo or were
   # built for it.
   #
-  # Only sets of at least `MIN_RANGES` ranges are kept, and at most
+  # Only sets of at least `MIN_RANGES` ranges or reaching
+  # `MIN_WIDE_CODE_POINT` are kept, and at most
   # `MAX_ENTRIES`; after that, each large class's block is built for the
   # compilation that needs it.
   module ClassMemo
-    MIN_RANGES  =  16
-    MAX_ENTRIES = 256
+    MIN_RANGES = 16
+    # A set that reaches this code point is kept too, however few its
+    # ranges: its three- and four-byte sequences make a trie of many nodes
+    # (`.` and `[^"']` are two and three ranges, and twenty states).
+    MIN_WIDE_CODE_POINT = 0x800
+    MAX_ENTRIES         =   256
     # The target that stands for the state after the class.
     EXIT = -2
     # No target.
@@ -55,7 +60,8 @@ module Mica::Regex
     @@blocks = {} of Key => Block
 
     def self.memoized?(set : CodePointSet) : Bool
-      set.range_count >= MIN_RANGES
+      bounds = set.list_of_bounds
+      bounds.size >= MIN_RANGES * 2 || (!bounds.empty? && bounds[-1] >= MIN_WIDE_CODE_POINT)
     end
 
     # Returns the block for *set* (a memoized set), building it under
