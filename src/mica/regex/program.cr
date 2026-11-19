@@ -586,10 +586,16 @@ module Mica::Regex
         Preflight.multiply(32_i64, state_count)), Preflight.multiply(8_i64, slot_count))
     end
 
+    # The transitions `sparse_target` reads in order before it searches
+    # the rest by halves.
+    SPARSE_LINEAR_READS = 4
+
     # Returns the target of the transition of Sparse state *state* (number
     # *state_index*) that holds *byte*, or -1. The ranges are sorted and
-    # disjoint, so this is a binary search, except at the entry state of a
-    # large class, whose target for each byte is one load.
+    # disjoint. At the entry state of a large class the target for each
+    # byte is one load. Otherwise the first `SPARSE_LINEAR_READS` are read
+    # in order, as they hold the low bytes (ASCII text, the common case) and
+    # an in-order read predicts well; the rest are searched by halves.
     def sparse_target(state_index : Int32, state : State, byte : UInt8) : Int32
       table_index = state.low.to_i32 - 1
       if (lookups = @list_of_entry_targets) && 0 <= table_index < lookups.size
@@ -602,6 +608,14 @@ module Mica::Regex
       table = table_of(state)
       low = state.argument
       high = state.argument + state.alternate
+      linear_end = Math.min(high, low + SPARSE_LINEAR_READS)
+      while low < linear_end
+        transition = table.unsafe_fetch(low)
+        if byte <= transition.high
+          return byte >= transition.low ? resolve(state_index, state, transition.target) : -1
+        end
+        low += 1
+      end
       while low < high
         middle = (low + high) >> 1
         transition = table.unsafe_fetch(middle)

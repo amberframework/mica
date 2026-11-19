@@ -129,6 +129,8 @@ module Mica::Regex
     @retry_from : {Int64, Int64}? = nil
     # The same for the reverse cache (see `reverse_thrashing?`).
     @reverse_retry_from : {Int64, Int64}? = nil
+    # True when the span pass read the groups too (see `groups_with_span?`).
+    @groups_with_span = false
     # Where this call found each required byte (see
     # `required_byte_missing?`), or -1.
     @required_at = StaticArray(Int32, StartFilter::MAX_REQUIRED_BYTES).new(-1)
@@ -263,11 +265,15 @@ module Mica::Regex
       if lease && lease.validated?(@haystack)
         plan.remember_short_validated(@haystack) if plan && !plan.short_validated?(@haystack)
       else
-        # Validation reads every byte once: one operation per byte.
+        # Validation reads every byte once: one operation per byte. A
+        # haystack a short search of this plan found valid (the very same
+        # `String`) is charged the same but not read again.
         bytes = @haystack.to_slice
         @meter.charge(bytes.size, 0)
-        if offset = Core::UTF8.first_invalid_offset(bytes)
-          raise Mica::EncodingError.new("The haystack is not valid UTF-8", Core::Position.new(offset.to_i64))
+        unless plan && plan.short_validated?(@haystack)
+          if offset = Core::UTF8.first_invalid_offset(bytes)
+            raise Mica::EncodingError.new("The haystack is not valid UTF-8", Core::Position.new(offset.to_i64))
+          end
         end
         lease.try(&.remember_validated(@haystack))
         @plan.try(&.remember_short_validated(@haystack))
@@ -416,8 +422,10 @@ module Mica::Regex
           return capture_pass(bytes, byte_index, span[0].to_i32, span[1].to_i32, end_anchored)
         end
       end
+      @groups_with_span = false
       return nil unless find_span(bytes, byte_index, anchored, end_anchored, span, want_captures)
       return span unless want_captures
+      return @capture_slots if @groups_with_span
       capture_pass(bytes, byte_index, span[0].to_i32, span[1].to_i32, end_anchored)
     end
 
@@ -622,6 +630,12 @@ module Mica::Regex
                  end
         judge_retry(cache) if cache
         return false if finish == LazyDFA::NO_MATCH
+        if finish >= 0 && !anchored && capture_layout && groups_with_span?(bytes, byte_index, finish, end_anchored)
+          @last_path = Path::LazyDFA
+          span[0] = @capture_slots[0]
+          span[1] = finish.to_i64
+          return true
+        end
         if finish >= 0
           start = anchored ? byte_index : match_start(lease, dfa, cache, bytes, finish, byte_index)
           if start >= 0
@@ -648,13 +662,19 @@ module Mica::Regex
     end
 
     # The start of the leftmost-first match that ends at *finish*, no lower
-    # than *lower_bound*. When every match is short (`SearchPlan#short_match`)
+    # than *lower_bound*. When every match has one length
+    # (`SearchPlan#fixed_match_bytes`) it is that many bytes before
+    # *finish*. When every match is short (`SearchPlan#short_match`)
     # it is the first start, from `ShortMatch#longest` bytes before
     # *finish*, where the forward DFA run anchored finds any match: no
     # earlier start has one, as the match is leftmost. Otherwise the
     # reverse DFA finds it.
     private def match_start(lease : SearchLease, dfa : LazyDFA, cache : DFACache?, bytes : Bytes, finish : Int32,
                             lower_bound : Int32) : Int32
+      # Every match has the same length: the start is that far back.
+      if @engine.auto? && (length = @program.plan.fixed_match_bytes) >= 0 && finish - length >= lower_bound
+        return finish - length
+      end
       if (@engine.auto? || @engine.backtracked_starts?) && (start = backtracked_start(bytes, finish, lower_bound))
         return start
       end
@@ -669,6 +689,45 @@ module Mica::Regex
         return start_from_each_start(dfa, cache, short_match, bytes, finish, lower_bound)
       end
       start
+    end
+
+    # The most bytes from the offset to a match end over which
+    # `groups_with_span?` runs the backtracker.
+    GROUPS_WITH_SPAN_BYTES = 64
+
+    # True when the bounded backtracker, run anchored at *byte_index* over
+    # *byte_index*...*finish* (the end the forward DFA found), found the
+    # match there and read its groups into the capture slots, in place of
+    # the reverse DFA and a capture pass. A match that starts at the offset
+    # is the leftmost one, so this pass is the capture pass itself; when
+    # none starts there, the search goes on with the reverse DFA. It runs only
+    # where the capture pass would run the backtracker anyway (the program
+    # is not one-pass, as a capture pass found), over at most
+    # `GROUPS_WITH_SPAN_BYTES` bytes within the bitset gate, with the
+    # visits it can make inside the call's remaining allowance, and it
+    # stops after `FirstSearch.visit_limit` visits (the search then goes on
+    # with the reverse DFA). As in `backtracked_start`, the leftmost-first
+    # match of the span from the offset is the match the forward DFA
+    # found: it ends at *finish*, and its groups are the ones a capture
+    # pass reads.
+    private def groups_with_span?(bytes : Bytes, byte_index : Int32, finish : Int32, end_anchored : Bool) : Bool
+      return false unless @engine.auto? && !@program.options.first_line?
+      plan = @plan || return false
+      return false unless plan.one_pass_built? && plan.built_one_pass.nil?
+      span = finish - byte_index
+      return false unless span <= GROUPS_WITH_SPAN_BYTES && BoundedBacktracker.fits?(@program, span)
+      visits = BoundedBacktracker.capped_visits(@program, span)
+      return false if 2_i64 * visits > @meter.work_meter.allowance - @meter.operations
+      slots = @capture_slots
+      workspace = backtracker
+      workspace.visit_limit = FirstSearch.visit_limit(@program)
+      found = workspace.search(bytes, byte_index, finish, byte_index, true, end_anchored, @meter, slots, Int32::MAX)
+      workspace.visit_limit = Int64::MAX
+      return false if workspace.gave_up? || !found
+      unless slots[1] == finish
+        raise Mica::Error.new("internal error: the backtracker found no match ending at #{finish}")
+      end
+      @groups_with_span = true
     end
 
     # The start of the match ending at *finish*, found by the bounded

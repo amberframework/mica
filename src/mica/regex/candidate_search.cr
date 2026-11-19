@@ -50,8 +50,9 @@ module Mica::Regex
     @failed_tries = 0
     @failed_bytes = 0_i64
 
-    def initialize(@program : Program, @haystack : String, @byte_index : Int32, @options : MatchOptions,
-                   @limits : SearchLimits, @timeout : Time::Span?)
+    # *plan* is *program*'s plan, read once by the caller.
+    def initialize(@program : Program, @plan : SearchPlan, @haystack : String, @byte_index : Int32,
+                   @options : MatchOptions, @limits : SearchLimits, @timeout : Time::Span?)
     end
 
     # Returns the one-pass DFA when this search applies: no timeout, a
@@ -65,11 +66,10 @@ module Mica::Regex
       bytes = @haystack.to_slice
       return nil if @byte_index < 0 || @byte_index > bytes.size
       return nil if @byte_index < bytes.size && bytes.unsafe_fetch(@byte_index) & 0xC0 == 0x80
-      plan = @program.plan
-      return nil unless plan.candidate_searches_pay? && plan.short_validated?(@haystack)
+      plan = @plan
+      return nil unless plan.short_validated?(@haystack) && plan.candidate_searches_pay?
       return nil unless fits?(bytes.size - @byte_index)
-      one_pass = plan.built_one_pass || plan.short_search_one_pass || return nil
-      one_pass
+      plan.built_one_pass || plan.short_search_one_pass
     end
 
     # Runs the search on *one_pass* (from `#one_pass`) into *slots*
@@ -77,7 +77,7 @@ module Mica::Regex
     # end, `LazyDFA::NO_MATCH`, or `LazyDFA::GAVE_UP` when this search
     # declines (see `#spent`).
     def run(one_pass : OnePassDFA, slots : Slice(Int64), scratch : Slice(Int64)) : Int32
-      plan = @program.plan
+      plan = @plan
       bytes = @haystack.to_slice
       from = @byte_index
       if @program.options.anchored? || @options.anchored? || plan.anchored_start?
@@ -159,14 +159,14 @@ module Mica::Regex
       finish, scanned = one_pass.search(bytes, start, @byte_index, slots, scratch, nil, stop)
       @spent += scanned + 1
       if finish >= 0
-        @program.plan.note_candidate_match
+        @plan.note_candidate_match
         return finish
       end
       return finish if finish == LazyDFA::GAVE_UP
       @failed_tries += 1
       @failed_bytes += scanned + 1
       if @failed_tries >= MAX_TRIES
-        @program.plan.note_candidate_decline
+        @plan.note_candidate_decline
         return LazyDFA::GAVE_UP
       end
       return LazyDFA::GAVE_UP if @failed_bytes > failed_bytes_cap(bytes.size - @byte_index)

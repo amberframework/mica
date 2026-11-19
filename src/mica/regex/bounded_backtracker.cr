@@ -250,6 +250,13 @@ module Mica::Regex
       run_slot = -1
       run_first = 0
       run_end = 0
+      # Locals for the loop, so a visit does not reload them: the visited
+      # bitset does not move during a search, and the visits left are
+      # written back before every return and before `follow_run`, which
+      # counts its own visits.
+      sparse = @sparse
+      visited_words = @visited.to_unsafe
+      visits_left = @visits_left
       while @job_count > 0
         job = pop_job
         if job.state < 0
@@ -259,8 +266,18 @@ module Mica::Regex
         current = job.state
         at = job.at.to_i32
         while true
-          break unless first_visit?(current.to_i64 * columns + (at - start))
-          if (@visits_left -= 1) < 0
+          bit = current.to_i64 * columns + (at - start)
+          if sparse
+            break unless mark_sparse?(bit)
+          else
+            word = bit >> 6
+            mask = 1_u64 << (bit & 63)
+            visited = visited_words + word
+            break if visited.value & mask != 0
+            visited.value |= mask
+          end
+          if (visits_left -= 1) < 0
+            @visits_left = visits_left
             @gave_up = true
             return false
           end
@@ -278,8 +295,10 @@ module Mica::Regex
               end
             end
             if run_first <= current < run_end
+              @visits_left = visits_left
               current, at = follow_run(program, program.list_of_runs.unsafe_fetch(run_slot), current, at, haystack,
                 start, columns, end_bound, meter)
+              visits_left = @visits_left
               return false if current == GAVE_UP
               break if current < 0
               next
@@ -317,12 +336,14 @@ module Mica::Regex
             current = state.next_state
           when .match?
             break if end_anchored && at != haystack.size
+            @visits_left = visits_left
             return true
           else
             break
           end
         end
       end
+      @visits_left = visits_left
       false
     end
 

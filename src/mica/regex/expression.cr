@@ -134,15 +134,16 @@ module Mica::Regex
       spent = 0_i64
       short = ShortSearch.new(@program, string, byte_index, options, limits, timeout)
       if short.applies?
-        return nil if short.rejects?
+        plan = @program.plan
+        return nil if short.rejects?(plan)
         slot_count = Math.min(@program.slot_count, ShortSearch::MAX_SLOTS)
         slots = Slice.new(buffer.to_unsafe, slot_count)
         scratch = Slice.new(buffer.to_unsafe + ShortSearch::MAX_SLOTS, slot_count)
-        finish = short.run(slots, scratch)
+        finish = short.run(plan, slots, scratch)
         return nil if finish == LazyDFA::NO_MATCH
         return MatchData.new(self, string, byte_index, slots) unless finish == LazyDFA::GAVE_UP
-      else
-        candidates = CandidateSearch.new(@program, string, byte_index, options, limits, timeout)
+      elsif timeout.nil?
+        candidates = CandidateSearch.new(@program, @program.plan, string, byte_index, options, limits, timeout)
         if one_pass = candidates.one_pass
           slots = Slice.new(buffer.to_unsafe, @program.slot_count)
           scratch = Slice.new(buffer.to_unsafe + ShortSearch::MAX_SLOTS, @program.slot_count)
@@ -219,7 +220,7 @@ module Mica::Regex
         return !searcher.find(byte_index, options, false).nil?
       end
       short = ShortSearch.new(@program, string, byte_index, options, limits, timeout)
-      return false if short.applies? && short.rejects?
+      return false if short.applies? && short.rejects?(@program.plan)
       searcher = Searcher.open(@program, string, limits, timeout, @cache_pool)
       searcher.matches?(byte_index, options)
     ensure
