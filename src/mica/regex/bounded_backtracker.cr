@@ -155,7 +155,7 @@ module Mica::Regex
     # `detach`): its bitset at its largest (`MAX_VISITED_BITS`, 32 KiB),
     # the first chunks of its job stack and a hash set of up to
     # `SPARE_SPARSE_SLOTS` pairs.
-    SPARE_JOB_CHUNKS   =    3
+    SPARE_JOB_CHUNKS   =    2
     SPARE_SPARSE_SLOTS = 2048
 
     # Points this backtracker at *program* for its next searches, keeping
