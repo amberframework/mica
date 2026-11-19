@@ -398,6 +398,7 @@ it did in R2) picks the fastest correct path for each search:
 
 | Phase | Path | When | Cost |
 |---|---|---|---|
+| 1 | **Required bytes**: no engine when the haystack lacks a byte every match reads (see "Required bytes") | `Auto` | one `memchr` pass per required byte, at most once per call |
 | 1 | **Literal search** | the pattern is a finite set of literals with no assertion (`LiteralSet#exact?`), and the search is not anchored | O(n) prefilter scan plus the literal bytes compared at each candidate |
 | 1 | **One-pass search**: span and groups in one pass | the pattern is one-pass and the search is anchored with groups wanted, or the pattern has prefix literals: tried at each prefilter candidate (see "Short searches") | one transition per byte read |
 | 1 | **Lazy DFAs**: forward for `e`, reverse for `s` | every program without `\G`, unless `FirstLine` or `EndAnchored` is set | one table read per byte; O(m) per state built |
@@ -423,6 +424,9 @@ one-pass DFA without the literal search and prefilters), `EachStart` (as
 program whose matches are short made from each start; see "Short
 matches"), `ReversedClasses` (as `NoAccelerators`, with every match start
 found by the reverse DFA reading classes backward; see "Lazy DFA"),
+`BacktrackedStarts` (as `NoAccelerators`, with every match start found by
+the backtracker over the span up to the match end when it fits; see
+"First searches"),
 `TwoPhase` (R2's two phases), `PikeVM` and `Backtracker`.
 
 **Calls reuse their workspaces.** A program keeps one *hot lease*: the
@@ -436,6 +440,66 @@ that string (as the parked searcher does), so its address cannot be
 reused while identity is compared. The lease is the `CachePool` member, so taking it and
 handing it back is one atomic operation each (see "Short searches").
 
+## First searches
+
+An expression compiled and searched once (a pattern built per request, a
+validator run on one field) should pay for what that search reads and no
+more. Building a plan costs more than a search of a short haystack does
+on the bounded backtracker: the byte classes, the start filter and the
+reverse NFA of a pattern with `\w` come to tens of microseconds, the
+backtracker's search to well under one. So a program's first
+`FirstSearch::SEARCHES` (2) single searches (`match`,
+`match_at_byte_index`, `search`, `matches?`) run on the bounded
+backtracker alone, with no `SearchPlan`, no lease and no lazy-DFA cache
+reserved from the `CachePool`, when:
+
+- the span from the offset to the end is at most 256 bytes (64 when the
+  pattern has prefix literals, whose plan is cheap and whose prefilter
+  skips to them faster than the backtracker tries each start), and fits
+  the backtracker's bitset gate (`BoundedBacktracker.fits?`);
+- validation, the required-byte scans (below) and the backtracker's most
+  work over that span (one operation per visit and one per slot write, at
+  most one of each per (state, position) pair) fit the call's work
+  allowance, checked before the haystack is read.
+
+The deadline is read and the haystack validated before the search, as on
+every path. The search is O(m·(L + 1) + c) and finds the span and the
+groups in one pass. A pattern that backtracks hard over the haystack
+(`(a|a)*$` over a run of a's) could make the backtracker cost more than
+the plan, so a first search makes at most `FirstSearch.visit_limit`
+visits (256 plus 8 per state, about what building the plan costs); one
+still undecided then goes on in the same call, under the same meter and
+deadline, on the plan's engines, having spent at most about what the plan
+costs. Later searches, iteration calls (`scan`, `gsub`, `split`) and
+longer haystacks build the plan, whose automata pay for themselves over
+many searches.
+
+The plan itself builds what a search reads when it first reads it: the
+start filter (read only by short searches) on first use, and the reverse
+DFA only once the plan has found `FirstSearch::SEARCHES` match starts
+without it. Until then, when the forward DFA has found a match end `e`,
+the bounded backtracker finds the start over `offset...e` (when the span
+is at most 256 bytes, fits the bitset gate and the call's remaining
+allowance, and the backtracker decides within its visit limit): the
+leftmost-first match of that span ends at `e`, as cutting bytes off after
+the match only removes matches.
+
+## Required bytes
+
+`Program#list_of_required_bytes` holds up to three ASCII bytes every match
+reads (`c` in `(a|aa)*c`, `H`, `m` and `l` in `\w+\s+Holmes`), the rarest
+first, found once per program in one pass over the NFA (assertions taken
+as passing, so the set never claims too much). Before any engine runs, an
+`Auto` search looks for each with `memchr` from its offset and returns no
+match when one is missing: a ReDoS pattern over a haystack with no
+possible match costs one scan, not a DFA pass. The scan reads in the
+windows the meter allows and charges each byte it reads. A call remembers
+where it found each byte, so an iteration call, whose next search starts
+after a match that contains the byte, reads the haystack at most once
+per required byte. A first search checks them too when finding them is
+cheap next to the span (the program's states and sparse transitions at
+most 256 plus 4 per byte).
+
 ## Short searches
 
 Many searches read a short haystack (a route segment, a form field, one
@@ -443,7 +507,7 @@ log line) or find a short match, so the fixed cost of a call matters as
 much as the cost per byte:
 
 - **No engine for a short haystack that cannot match.** A program's
-  `StartFilter` (built with its plan) holds the fewest bytes a match spans,
+  `StartFilter` (built on its first use) holds the fewest bytes a match spans,
   the bytes a match can start with, and up to three ASCII bytes every
   match contains (`:` in `.*:(\d+)`), read from the NFA with every
   assertion taken as passing. `match`, `match_at_byte_index`, `search` and
@@ -696,7 +760,11 @@ Mica::Regex.configure_cache_pool(max_bytes: 32_i64 * 1024 * 1024)
 
 A cache or workspace is freed with its lease; the bytes it reserved go back
 to the pool then (a finalizer on a small reservation object, so collection needs no
-cycle through the program).
+cycle through the program). A process that makes and drops expressions faster than the
+collector runs could fill the pool with bytes no live lease holds, so a
+reservation that finds freed members and still has no room after
+evicting collects garbage once (running those finalizers) and tries again
+before it gives up.
 
 ## Search complexity
 

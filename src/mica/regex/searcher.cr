@@ -28,10 +28,16 @@ module Mica::Regex
     # DFA `Auto` widens to when its states grow wide. For the differential
     # fuzzers and the conformance replay.
     ReversedClasses
+    # As `NoAccelerators`, with every match start the forward DFA leads to
+    # found by the bounded backtracker over the span up to the match end
+    # whenever it fits (see `Searcher#backtracked_start`), as `Auto` does
+    # for a plan's first starts. For the differential fuzzers and the
+    # conformance replay.
+    BacktrackedStarts
 
     # True when the engine may use the lazy DFAs and the one-pass DFA.
     def automata? : Bool
-      auto? || no_accelerators? || each_start? || reversed_classes?
+      auto? || no_accelerators? || each_start? || reversed_classes? || backtracked_starts?
     end
   end
 
@@ -123,6 +129,11 @@ module Mica::Regex
     @retry_from : {Int64, Int64}? = nil
     # The same for the reverse cache (see `reverse_thrashing?`).
     @reverse_retry_from : {Int64, Int64}? = nil
+    # Where this call found each required byte (see
+    # `required_byte_missing?`), or -1.
+    @required_at = StaticArray(Int32, StartFilter::MAX_REQUIRED_BYTES).new(-1)
+    # True for a program's first search (see `Searcher.first_search`).
+    @first_search = false
 
     def initialize(@program : Program, @haystack : String, limits : SearchLimits, timeout : Time::Span?,
                    @engine : Engine = Engine::Auto, @cache_pool : CachePool = CachePool.default,
@@ -153,6 +164,23 @@ module Mica::Regex
       end
     end
 
+    # Returns a searcher for a program's first search (see `FirstSearch`):
+    # the bounded backtracker with no plan and no lease. It checks first
+    # that the haystack holds the bytes every match contains, and it makes
+    # at most `FirstSearch.visit_limit` visits: a search the backtracker
+    # has not decided by then (a pattern that backtracks hard over this
+    # haystack) goes on, in the same call and under the same meter, on the
+    # plan's engines (`Auto`), so it costs at most about twice what the
+    # plan would have.
+    def self.first_search(program : Program, haystack : String, limits : SearchLimits, timeout : Time::Span?,
+                          cache_pool : CachePool) : Searcher
+      searcher = new(program, haystack, limits, timeout, Engine::Backtracker, cache_pool)
+      searcher.first_search = true
+      searcher
+    end
+
+    protected setter first_search : Bool
+
     # True when this call should find matches without their groups and
     # leave the groups to be read on first use (see
     # `SearchPlan#defers_groups?`).
@@ -170,11 +198,24 @@ module Mica::Regex
       @start_search_waste = 0_i64
       @start_search_off = false
       @searches_started = 0
+      @required_at.fill(-1)
       @dfa_gave_up = false
       @last_path = Path::None
       @cache_pool = lease.pool
       attach(lease)
       begin_call_or_finish
+    end
+
+    # Moves a first search the backtracker gave up on (see `first_search`)
+    # to the plan's engines: the call keeps its meter, and the lease
+    # remembers that the haystack was validated.
+    private def take_the_plan : Nil
+      @first_search = false
+      @engine = Engine::Auto
+      plan = @plan = @program.plan
+      lease = plan.lease(@cache_pool)
+      lease.remember_validated(@haystack)
+      attach(lease)
     end
 
     private def attach(lease : SearchLease) : Nil
@@ -243,6 +284,7 @@ module Mica::Regex
       bytes = @haystack.to_slice
       return nil if byte_index > bytes.size
       check_start(bytes, byte_index)
+      return nil if required_byte_missing?(bytes, byte_index)
       anchored = @program.options.anchored? || options.anchored? || anchored_start?
       end_anchored = @program.options.end_anchored? || options.end_anchored?
       case @engine
@@ -256,10 +298,16 @@ module Mica::Regex
       in .backtracker?
         slots = @capture_slots
         @last_path = Path::Backtracker
-        found = backtracker.search(bytes, byte_index, bytes.size, byte_index, anchored, end_anchored, @meter, slots,
+        workspace = backtracker
+        workspace.visit_limit = FirstSearch.visit_limit(@program) if @first_search
+        found = workspace.search(bytes, byte_index, bytes.size, byte_index, anchored, end_anchored, @meter, slots,
           first_line_end(bytes, byte_index, anchored))
+        if @first_search && workspace.gave_up?
+          take_the_plan
+          return find(byte_index, options, captures)
+        end
         found ? slots : nil
-      in .auto?, .no_accelerators?, .two_phase?, .each_start?, .reversed_classes?
+      in .auto?, .no_accelerators?, .two_phase?, .each_start?, .reversed_classes?, .backtracked_starts?
         find_in_two_phases(bytes, byte_index, anchored, end_anchored, captures)
       end
     end
@@ -271,6 +319,7 @@ module Mica::Regex
       bytes = @haystack.to_slice
       return false if byte_index > bytes.size
       check_start(bytes, byte_index)
+      return false if required_byte_missing?(bytes, byte_index)
       anchored = @program.options.anchored? || options.anchored? || anchored_start?
       end_anchored = @program.options.end_anchored? || options.end_anchored?
       if dfa = automaton(end_anchored)
@@ -504,6 +553,9 @@ module Mica::Regex
     # reverse DFA finds it.
     private def match_start(lease : SearchLease, dfa : LazyDFA, cache : DFACache?, bytes : Bytes, finish : Int32,
                             lower_bound : Int32) : Int32
+      if (@engine.auto? || @engine.backtracked_starts?) && (start = backtracked_start(bytes, finish, lower_bound))
+        return start
+      end
       # The match bound is analyzed only when a start may come from it.
       if cache && !@engine.reversed_classes? && (@engine.each_start? || reverse_thrashing?(lease))
         if (short_match = @program.plan.short_match) && (@engine.each_start? || !reverse_retry?(lease))
@@ -515,6 +567,39 @@ module Mica::Regex
         return start_from_each_start(dfa, cache, short_match, bytes, finish, lower_bound)
       end
       start
+    end
+
+    # The start of the match ending at *finish*, found by the bounded
+    # backtracker over *lower_bound*...*finish* while the plan has not built
+    # its reverse DFA and is still finding its first starts
+    # (`SearchPlan#backtrack_start?`), or nil (the reverse DFA finds it).
+    #
+    # The leftmost-first match of the span ends at *finish*: its start is
+    # the match's, as no match starts earlier, and the match from there
+    # that the forward DFA found ranks first among those that end by
+    # *finish*. The span must fit the backtracker's bitset and its most
+    # work (a visit and a slot write per (state, position) pair) the
+    # call's remaining allowance, so a reverse DFA built for one search is
+    # not built at all, and the search stays within O(m·(L + 1)). A
+    # backtracker still undecided after `FirstSearch.visit_limit` visits
+    # leaves the start to the reverse DFA.
+    private def backtracked_start(bytes : Bytes, finish : Int32, lower_bound : Int32) : Int32?
+      plan = @plan || return nil
+      span = finish - lower_bound
+      return nil unless span <= FirstSearch::MAX_BYTES && BoundedBacktracker.fits?(@program, span)
+      visits = @program.state_count.to_i64 * (span.to_i64 + 1)
+      return nil if 2_i64 * visits > @meter.work_meter.allowance - @meter.operations
+      return nil unless @engine.backtracked_starts? || plan.backtrack_start?
+      slots = @capture_slots
+      workspace = backtracker
+      workspace.visit_limit = FirstSearch.visit_limit(@program)
+      found = workspace.search(bytes, lower_bound, finish, lower_bound, false, false, @meter, slots, Int32::MAX)
+      workspace.visit_limit = Int64::MAX
+      return nil if workspace.gave_up?
+      unless found && slots[1] == finish
+        raise Mica::Error.new("internal error: the backtracker found no match ending at #{finish}")
+      end
+      slots[0].to_i32
     end
 
     # The start of the match ending at *finish*: the first position, from
@@ -635,6 +720,51 @@ module Mica::Regex
         return nil
       end
       scan
+    end
+
+    # True when the bytes from *byte_index* lack one of the ASCII bytes
+    # every match contains (`Program#list_of_required_bytes`), so nothing
+    # matches there: `Auto` and first searches (when the analysis is cheap,
+    # see `Program#required_bytes_for_first_search`) check this before any
+    # engine runs (`(a|aa)*b` over a run of a's never starts one).
+    #
+    # Each byte is found with `memchr`, reading in the windows the meter
+    # allows and charging one operation per byte read. The call remembers
+    # where it found each byte, and a later search of the call starting at
+    # or before that position does not scan again; a later search starts
+    # after the end of the match before it, which contains the byte, so an
+    # iteration call reads each byte at most once per required byte.
+    private def required_byte_missing?(bytes : Bytes, byte_index : Int32) : Bool
+      list_of_bytes = if @engine.auto?
+                        @program.list_of_required_bytes
+                      elsif @first_search
+                        @program.required_bytes_for_first_search(bytes.size - byte_index) || return false
+                      else
+                        return false
+                      end
+      list_of_bytes.each_with_index do |byte, index|
+        next if @required_at[index] >= byte_index
+        found = find_byte(bytes, byte, byte_index)
+        return true if found < 0
+        @required_at[index] = found
+      end
+      false
+    end
+
+    # The first position of *byte* at or after *from*, or -1, charging the
+    # bytes read.
+    private def find_byte(bytes : Bytes, byte : UInt8, from : Int32) : Int32
+      at = from
+      while at < bytes.size
+        window = @meter.readable(bytes.size - at, at)
+        if found = bytes[at, window].index(byte)
+          @meter.charge(found + 1, at)
+          return at + found
+        end
+        @meter.charge(window, at)
+        at += window
+      end
+      -1
     end
 
     # Returns the last position where an unanchored search from *start*

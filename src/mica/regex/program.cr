@@ -104,6 +104,52 @@ module Mica::Regex
     # fully built.
     @plan = Atomic(SearchPlan?).new(nil)
     @plan_mutex = Mutex.new
+    # Single searches run on the backtracker so far (see `FirstSearch`),
+    # or `FIRST_SEARCHES_ENDED`.
+    @first_searches = Atomic(Int32).new(0)
+
+    # Set by `end_first_searches`: past `FirstSearch::SEARCHES`, so one load
+    # answers `first_searches_left?`, and apart from any count.
+    private FIRST_SEARCHES_ENDED = Int32::MAX // 2
+
+    # :nodoc:
+    # True while this program may still run first searches (one relaxed
+    # load, so a program past them pays nothing more per search).
+    def first_searches_left? : Bool
+      @first_searches.get(:relaxed) < FirstSearch::SEARCHES
+    end
+
+    # :nodoc:
+    # Counts one more first search (see `FirstSearch`) and returns true
+    # while the program has had fewer than `FirstSearch::SEARCHES`, so
+    # exactly that many return true, however threads race.
+    def count_first_search : Bool
+      return false if @first_searches.get(:relaxed) >= FirstSearch::SEARCHES
+      @first_searches.add(1, :relaxed) < FirstSearch::SEARCHES
+    end
+
+    # :nodoc:
+    # The first searches this program ran (at most `FirstSearch::SEARCHES`;
+    # none after `end_first_searches`).
+    def first_search_count : Int32
+      count = @first_searches.get(:relaxed)
+      count >= FIRST_SEARCHES_ENDED ? 0 : Math.min(count, FirstSearch::SEARCHES)
+    end
+
+    # :nodoc:
+    # True once `end_first_searches` ran.
+    def first_searches_ended? : Bool
+      @first_searches.get(:relaxed) >= FIRST_SEARCHES_ENDED
+    end
+
+    # :nodoc:
+    # Ends this program's first searches without counting any, so its next
+    # single searches take the plan's engines and a plan built after this
+    # finds every match start with its reverse DFA (for the specs of those
+    # engines).
+    def end_first_searches : Nil
+      @first_searches.set(FIRST_SEARCHES_ENDED, :relaxed)
+    end
 
     # :nodoc:
     # The engines and caches of this program's searches (built on the first
@@ -119,6 +165,49 @@ module Mica::Regex
         @plan.set(built)
         built
       end
+    end
+
+    # The ASCII bytes every match contains (see
+    # `StartFilter.required_bytes`), found on first use.
+    @required_bytes = Atomic(Array(UInt8)?).new(nil)
+
+    # :nodoc:
+    # The ASCII bytes every match contains, rarest first (see
+    # `StartFilter.required_bytes`; found once, on first use).
+    def list_of_required_bytes : Array(UInt8)
+      if found = @required_bytes.get(:acquire)
+        return found
+      end
+      found = StartFilter.required_bytes(self)
+      # Threads racing here find the same bytes; the first to publish wins.
+      @required_bytes.compare_and_set(nil, found)
+      @required_bytes.get(:acquire) || found
+    end
+
+    # :nodoc:
+    # The required bytes when a first search (see `FirstSearch`) of
+    # *span_bytes* bytes should check them, or nil: once they are found,
+    # always; before that, only when finding them (one pass over the
+    # states and sparse transitions) costs no more than about a few passes
+    # over the span, so a short first search of a large program does not
+    # pay for the analysis.
+    def required_bytes_for_first_search(span_bytes : Int32) : Array(UInt8)?
+      if found = @required_bytes.get(:acquire)
+        return found
+      end
+      edges = state_count.to_i64 + @list_of_transitions.size
+      return nil if edges > REQUIRED_BYTES_BASE_EDGES + REQUIRED_BYTES_EDGES_PER_BYTE * span_bytes
+      list_of_required_bytes
+    end
+
+    # See `required_bytes_for_first_search`.
+    REQUIRED_BYTES_BASE_EDGES     = 256_i64
+    REQUIRED_BYTES_EDGES_PER_BYTE =   4_i64
+
+    # :nodoc:
+    # True once a search has built the plan (for specs).
+    def plan_built? : Bool
+      !@plan.get.nil?
     end
 
     # Returns the number of states (m in the bounds).

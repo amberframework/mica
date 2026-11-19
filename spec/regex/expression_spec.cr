@@ -183,7 +183,9 @@ describe Mica::Regex::Expression do
     it_satisfies "REGEX-R2-limits", "raises SearchLimitError naming max_work when a search runs out of work" do
       tight = Mica::Regex::SearchLimits.custom(work_ceiling: 10_000_i64)
       error = expect_raises(Mica::Regex::SearchLimitError) do
-        expression("(a|aa)*c").match("a" * 5_000, limits: tight)
+        # The haystack holds the c every match needs, so the search runs
+        # rather than stopping at the required-byte check.
+        expression("(a|aa)*c").match("a" * 5_000 + "c", limits: tight)
       end
       error.limit_name.should eq("max_work")
       error.limit_value.should eq(10_000)

@@ -82,6 +82,12 @@ module Mica::Regex
     @chunk_index = -1
     @chunk_size = 0_i64
     @in_chunk = 0_i64
+    # The most visits one search may make before it gives up (see
+    # `gave_up?`); unlimited unless set.
+    setter visit_limit : Int64 = Int64::MAX
+    @visits_left = Int64::MAX
+    # True when the last search reached `visit_limit` before it decided.
+    getter? gave_up = false
 
     def initialize(@program : Program, @slot_count : Int32)
       @slots = Slice(Int64).new(@slot_count, PikeVM::UNSET)
@@ -109,6 +115,8 @@ module Mica::Regex
       end
       # Each visit pushes at most one job, after the one each start pushes.
       limit_jobs(bits + 1)
+      @visits_left = @visit_limit
+      @gave_up = false
       at = start
       while at <= end_bound
         if at == start || (!anchored && boundary?(haystack, at) && at <= first_line_end)
@@ -117,6 +125,7 @@ module Mica::Regex
             @slot_count.times { |slot| slots[slot] = @slots[slot] }
             return true
           end
+          return false if @gave_up
         end
         break if anchored
         at += 1
@@ -145,6 +154,10 @@ module Mica::Regex
             break
           end
           @visited[word] |= mask
+          if (@visits_left -= 1) < 0
+            @gave_up = true
+            return false
+          end
           meter.charge(1, at)
           state = @program.list_of_states.unsafe_fetch(current)
           case state.kind

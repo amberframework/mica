@@ -40,21 +40,23 @@ module Mica::Regex
     # the start state passes `\A` before it reads a byte): a search is
     # then anchored at its offset, and the reverse DFA is not needed.
     getter? anchored_start : Bool
-    # The fewest bytes and the first bytes of a match (see `StartFilter`).
-    getter start_filter : StartFilter
     # The lazily built parts are published through atomics, so a search
     # on another thread that sees one sees it fully built.
     @reverse = Atomic(LazyDFA?).new(nil)
     @reverse_with_reversed_classes = Atomic(LazyDFA?).new(nil)
     # Set once `widen_reverse` found the widened DFA too large.
     @widen_refused = Atomic(Int32).new(0)
+    # Match starts found by the backtracker (see `backtrack_start?`).
+    @backtracked_starts : Atomic(Int32)
     @one_pass = Atomic(OnePassDFA?).new(nil)
     # Set (after @one_pass) once the one-pass build ran, as its result may
     # be nil.
     @one_pass_built = Atomic(Int32).new(0)
     # Short searches seen before the one-pass DFA was built (see
-    # `short_search_one_pass`).
-    @short_searches = Atomic(Int32).new(0)
+    # `short_search_one_pass`), counting from the first searches the
+    # program ran without a plan (`FirstSearch`): a program searched that
+    # often is searched again.
+    @short_searches : Atomic(Int32)
     # Unanchored short searches that ran out of tries (see `ShortSearch`).
     @short_declines = Atomic(Int32).new(0)
     # The last haystack a short search found to be valid UTF-8.
@@ -63,19 +65,39 @@ module Mica::Regex
     @groups_read = Atomic(Int32).new(0)
     @short_match = Atomic(ShortMatch?).new(nil)
     @short_match_built = Atomic(Int32).new(0)
+    @start_filter = Atomic(StartFilter?).new(nil)
     @mutex = Mutex.new
     @list_of_idle_leases = [] of SearchLease
     # The most recently returned lease, taken without the mutex.
     @hot_lease = Atomic(SearchLease?).new(nil)
 
     def initialize(@program : Program)
+      @short_searches = Atomic(Int32).new(@program.first_search_count)
+      @backtracked_starts = Atomic(Int32).new(@program.first_searches_ended? ? FirstSearch::SEARCHES : 0)
       @byte_classes = ByteClasses.new(@program)
       @forward = LazyDFA.supports?(@program) ? LazyDFA.new(@program, @byte_classes, false) : nil
       literal_set = @program.literal_set
       @prefilter = literal_set ? Prefilter.new(literal_set) : nil
       @literal_search = !!literal_set.try(&.exact?)
       @anchored_start = SearchPlan.anchored_start?(@program)
-      @start_filter = StartFilter.new(@program)
+    end
+
+    # The fewest bytes and the first bytes of a match (see `StartFilter`),
+    # made on first use: only short searches read it, so a plan whose
+    # haystacks are long never pays for it.
+    @[AlwaysInline]
+    def start_filter : StartFilter
+      @start_filter.get(:acquire) || build_start_filter
+    end
+
+    private def build_start_filter : StartFilter
+      @mutex.synchronize do
+        built = @start_filter.get
+        return built if built
+        built = StartFilter.new(@program)
+        @start_filter.set(built)
+        built
+      end
     end
 
     # True when every path from *program*'s start state reaches a
@@ -171,6 +193,17 @@ module Mica::Regex
         @reverse_with_reversed_classes.set(built)
         built
       end
+    end
+
+    # True while match starts should come from the bounded backtracker
+    # rather than the reverse DFA (see `Searcher#backtracked_start`): the
+    # reverse DFA is not built yet and the plan has found fewer than
+    # `FirstSearch::SEARCHES` starts this way, so a program searched once
+    # or twice never builds its reverse NFA. Counts the start.
+    def backtrack_start? : Bool
+      return false unless @reverse.get.nil?
+      return false if @backtracked_starts.get(:relaxed) >= FirstSearch::SEARCHES
+      @backtracked_starts.add(1, :relaxed) < FirstSearch::SEARCHES
     end
 
     # The one-pass DFA (built on first use), or nil when the program is not
