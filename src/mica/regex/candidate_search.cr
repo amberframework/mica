@@ -129,7 +129,9 @@ module Mica::Regex
       at = @byte_index
       while at <= last
         byte = bytes.unsafe_fetch(at)
-        if filter.starts?(byte) && byte & 0xC0 != 0x80
+        # `last` leaves at least `minimum_bytes` bytes, so `at + 1` is in
+        # the haystack whenever `second?` can be false.
+        if filter.starts?(byte) && byte & 0xC0 != 0x80 && (at + 1 >= bytes.size || filter.second?(bytes.unsafe_fetch(at + 1)))
           finish = try(one_pass, bytes, at, slots, scratch)
           unless finish == LazyDFA::NO_MATCH
             @spent += at + 1 - @byte_index

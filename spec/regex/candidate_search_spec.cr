@@ -85,6 +85,17 @@ describe "Mica::Regex candidate searches" do
     end
   end
 
+  it_satisfies "REGEX-R3-short-search", "tries only positions whose next byte a match can have second" do
+    camel = planned_expression("([a-z\\d])([A-Z])").program.plan.start_filter
+    camel.second?('A'.ord.to_u8).should be_true
+    camel.second?('b'.ord.to_u8).should be_false
+    pixels = planned_expression("\\d+px").program.plan.start_filter
+    {pixels.second?('7'.ord.to_u8), pixels.second?('p'.ord.to_u8), pixels.second?('x'.ord.to_u8)}.should eq({true, true, false})
+    # A match can be one byte long, so every byte may follow.
+    short = planned_expression("a|bc").program.plan.start_filter
+    short.second?('z'.ord.to_u8).should be_true
+  end
+
   it_satisfies "REGEX-R3-short-search", "keeps a match of up to four groups in the value, so a call allocates nothing" do
     pattern = planned_expression("([a-z])([A-Z])")
     haystack = "camelCaseWordsHere and more " * 20

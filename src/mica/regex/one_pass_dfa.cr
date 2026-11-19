@@ -221,11 +221,19 @@ module Mica::Regex
       write(edge, at, slots)
     end
 
+    # The line and text ends, the assertions a match path most often
+    # checks at every byte (`^.*$`), are tested here without a call.
+    @[AlwaysInline]
     private def holds?(edge : Edge, haystack : Bytes, at : Int32, search_start : Int32) : Bool
       looks = edge.looks
       while looks != 0
-        kind = looks.trailing_zeros_count
-        return false unless Look.holds?(Program::LookKind.new(kind.to_i32), haystack, at, search_start)
+        kind = Program::LookKind.new(looks.trailing_zeros_count.to_i32)
+        held = case kind
+               when .end_of_line? then at == haystack.size || haystack.unsafe_fetch(at) == Look::LINE_FEED
+               when .end_of_text? then at == haystack.size
+               else                    Look.holds?(kind, haystack, at, search_start)
+               end
+        return false unless held
         looks &= looks - 1
       end
       true

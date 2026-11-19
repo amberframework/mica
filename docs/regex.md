@@ -606,8 +606,10 @@ much as the cost per byte:
   each *candidate* start, with no lease, no searcher and no meter
   (`CandidateSearch`): `memchr` finds the next byte of the prefilter's one
   literal, or a scan finds the next byte a match can start with
-  (`StartFilter#starts?`), and the first try that matches gives the span
-  and the groups. Its work is bounded before it reads a byte: the scan
+  (`StartFilter#starts?`) and whose next byte one can have second
+  (`StartFilter#second?`, when every match spans two bytes or more:
+  `([a-z\d])([A-Z])` is tried only where a capital follows), and the
+  first try that matches gives the span and the groups. Its work is bounded before it reads a byte: the scan
   reads each byte from the offset once, the failed tries read at most the
   remaining bytes plus room for `MAX_TRIES` (16) tries of
   `TRY_REACH` (64), and the try that matches at most the remaining
