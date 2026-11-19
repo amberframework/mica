@@ -33,6 +33,9 @@ module Mica::Regex
     NONE = -1
     # No transition holds the byte (in `Block#entry_targets`).
     NO_TRANSITION = Int32::MIN + 1
+    # The slot of `Block#entry_targets` past the 256 byte values: where the
+    # entry state's transitions begin in the shared table.
+    ENTRY_FIRST_SLOT = 256
 
     # A class automaton: its states and transitions with targets relative
     # to the block (`EXIT` for the exit), and, for a block of the memo,
@@ -42,8 +45,9 @@ module Mica::Regex
     #
     # A memoized block also keeps *entry_targets*: for each byte value, the
     # shared-table target of the entry state's transition that holds it, or
-    # `NO_TRANSITION`, so a first search reads a copy's lead byte with one
-    # load (see `BoundedBacktracker`).
+    # `NO_TRANSITION`, so a search reads the lead byte of a sequence with
+    # one load (see `Program#sparse_target`), and in slot
+    # `ENTRY_FIRST_SLOT` where the entry's transitions begin in the table.
     record Block, list_of_states : Array(Program::State), list_of_transitions : Array(Program::Transition),
       entry : Int32, shared_table : Array(Program::Transition)? = nil, entry_targets : Slice(Int32)? = nil
 
@@ -135,12 +139,14 @@ module Mica::Regex
     end
 
     # The target in *table* for each byte value at *entry* (a `Sparse`
-    # state; nil for any other), `NO_TRANSITION` where it has none.
+    # state; nil for any other), `NO_TRANSITION` where it has none, and
+    # the entry's first transition in slot `ENTRY_FIRST_SLOT`.
     private def self.entry_targets(entry : Program::State, table : Array(Program::Transition),
                                    ledger : AllocationLedger) : Slice(Int32)?
       return nil unless entry.kind.sparse?
-      ledger.charge(AllocationLedger.granules(256 * sizeof(Int32)), "a class entry table", 0)
-      targets = Slice(Int32).new(256, NO_TRANSITION)
+      ledger.charge(AllocationLedger.granules((ENTRY_FIRST_SLOT + 1) * sizeof(Int32)), "a class entry table", 0)
+      targets = Slice(Int32).new(ENTRY_FIRST_SLOT + 1, NO_TRANSITION)
+      targets[ENTRY_FIRST_SLOT] = entry.argument
       entry.alternate.times do |offset|
         transition = table[entry.argument + offset]
         (transition.low..transition.high).each { |byte| targets[byte] = transition.target }

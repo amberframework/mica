@@ -83,11 +83,10 @@ module Mica::Regex
     # `Program#list_of_shared_tables`); a `Sparse` state names one by its
     # position plus one, in a byte, so at most `MAX_SHARED_TABLES`.
     @list_of_shared_tables = [] of Array(Program::Transition)
-    # For each shared table, where its block's entry state reads it and
-    # that entry's target for each byte (`ClassMemo::Block#entry_targets`),
-    # or -1 and an empty slice (see `Program#sparse_target`).
-    @list_of_entry_firsts = [] of Int32
-    @list_of_entry_targets = [] of Slice(Int32)
+    # For each shared table, its block's `ClassMemo::Block#entry_targets`
+    # (an empty slice for a table without), made when the first table with
+    # them is added (see `Program#sparse_target`).
+    @list_of_entry_targets : Array(Slice(Int32))? = nil
     # The runs of class copies held as their block (`Program::ClassRun`),
     # in state order, and the states they stand for: state numbers count
     # them, `@list_of_states` does not hold them.
@@ -236,7 +235,7 @@ module Mica::Regex
       @ledger.charge_object(instance_sizeof(Program), "the program", 0)
       Program.new(@list_of_states, @list_of_transitions, start, @pattern.capture_count, group_names,
         @pattern.options, @limits.max_pike_bytes - workspace_charge, @pattern.source_end, literal_set,
-        @list_of_class_blocks, @list_of_shared_tables, @list_of_runs, @list_of_entry_firsts, @list_of_entry_targets)
+        @list_of_class_blocks, @list_of_shared_tables, @list_of_runs, @list_of_entry_targets)
     end
 
     private def charge_literal_set(literal_set : LiteralSet) : Nil
@@ -720,14 +719,15 @@ module Mica::Regex
       end
       return nil if @list_of_shared_tables.size >= MAX_SHARED_TABLES
       @ledger.charge_append(sizeof(Array(Program::Transition)), "a shared class table", 0)
-      @ledger.charge_append(sizeof(Int32) + sizeof(Slice(Int32)), "a shared class table", 0)
-      entry_targets = block.try(&.entry_targets)
-      if block && entry_targets
-        @list_of_entry_firsts << block.list_of_states[block.entry].argument
-        @list_of_entry_targets << entry_targets
-      else
-        @list_of_entry_firsts << -1
-        @list_of_entry_targets << Slice(Int32).empty
+      if entry_targets = block.try(&.entry_targets)
+        @ledger.charge_array(0, sizeof(Slice(Int32)), "the shared tables' entry targets", 0) unless @list_of_entry_targets
+        list_of_entry_targets = @list_of_entry_targets ||= [] of Slice(Int32)
+        @ledger.charge_appends(@list_of_shared_tables.size + 1 - list_of_entry_targets.size, sizeof(Slice(Int32)),
+          "the shared tables' entry targets", 0)
+        while list_of_entry_targets.size < @list_of_shared_tables.size
+          list_of_entry_targets << Slice(Int32).empty
+        end
+        list_of_entry_targets << entry_targets
       end
       @list_of_shared_tables << table
       @list_of_shared_tables.size.to_u8

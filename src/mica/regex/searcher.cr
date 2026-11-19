@@ -775,10 +775,10 @@ module Mica::Regex
     # pays for one cache, not four.
     private def find_end_or_hand_over(dfa : LazyDFA, cache : DFACache, bytes : Bytes, byte_index : Int32,
                                       anchored : Bool, earliest : Bool) : Int32
-      cache.gives_up_when_thrashing = !anchored && !@plan.try(&.short_match).nil?
+      cache.hands_over_to = anchored ? nil : @plan
       dfa.find_end(cache, bytes, byte_index, anchored, earliest, prefilter_scan(bytes, anchored), @meter)
     ensure
-      cache.gives_up_when_thrashing = false
+      cache.hands_over_to = nil
     end
 
     # Reports a retry of the unanchored DFA (see `from_each_start?`) to

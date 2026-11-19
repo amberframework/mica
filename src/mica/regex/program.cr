@@ -178,13 +178,12 @@ module Mica::Regex
     # of `\w` emits its states but none of its transitions. Never changed.
     getter list_of_shared_tables : Array(Array(Transition))
 
-    # For shared table n - 1, the first transition its block's entry state
-    # reads (-1 for none) and that entry's target for each byte
-    # (`ClassMemo::Block#entry_targets`): `sparse_target` reads an entry
-    # state's target with one load instead of a binary search. Never
-    # changed.
-    @list_of_entry_firsts : Array(Int32)
-    @list_of_entry_targets : Array(Slice(Int32))
+    # For shared table n - 1, its block's entry targets
+    # (`ClassMemo::Block#entry_targets`; empty, or past the list, for a
+    # table without), or nil when no table has them: `sparse_target` reads
+    # an entry state's target with one load instead of a binary search.
+    # Never changed.
+    @list_of_entry_targets : Array(Slice(Int32))?
 
     # The target in a shared table that stands for the state's
     # `next_state` (the state after the class).
@@ -198,8 +197,7 @@ module Mica::Regex
                    list_of_class_blocks : Array(ClassBlock) = [] of ClassBlock,
                    @list_of_shared_tables : Array(Array(Transition)) = [] of Array(Transition),
                    @list_of_runs : Array(ClassRun) = [] of ClassRun,
-                   @list_of_entry_firsts : Array(Int32) = [] of Int32,
-                   @list_of_entry_targets : Array(Slice(Int32)) = [] of Slice(Int32))
+                   @list_of_entry_targets : Array(Slice(Int32))? = nil)
       @list_of_physical_states = list_of_states
       @list_of_recorded_blocks = list_of_class_blocks
       @state_count = list_of_states.size + @list_of_runs.sum(&.size)
@@ -594,10 +592,12 @@ module Mica::Regex
     # large class, whose target for each byte is one load.
     def sparse_target(state_index : Int32, state : State, byte : UInt8) : Int32
       table_index = state.low.to_i32 - 1
-      if table_index >= 0 && table_index < @list_of_entry_firsts.size &&
-         @list_of_entry_firsts.unsafe_fetch(table_index) == state.argument
-        target = @list_of_entry_targets.unsafe_fetch(table_index).unsafe_fetch(byte)
-        return target == ClassMemo::NO_TRANSITION ? -1 : resolve(state_index, state, target)
+      if (lookups = @list_of_entry_targets) && 0 <= table_index < lookups.size
+        targets = lookups.unsafe_fetch(table_index)
+        if targets.size > ClassMemo::ENTRY_FIRST_SLOT && targets.unsafe_fetch(ClassMemo::ENTRY_FIRST_SLOT) == state.argument
+          target = targets.unsafe_fetch(byte)
+          return target == ClassMemo::NO_TRANSITION ? -1 : resolve(state_index, state, target)
+        end
       end
       table = table_of(state)
       low = state.argument
