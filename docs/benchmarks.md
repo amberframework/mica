@@ -128,9 +128,11 @@ Method: one verified iteration (its count must equal the baseline's), up to
 passed with at least 3. An iteration slower than 2 s is sampled once.
 An operation shorter than 10 us (a few ticks of the 41.67 ns Apple Silicon
 clock) is timed in calibrated batches, by the same code for every engine:
-the batch doubles until one timed loop of it takes at least 10 us, then
-each sample times one batch and divides by the batch size. Longer
-operations are timed one at a time, as before. Each metric records its
+the batch doubles until two timed loops of it in a row each take at
+least 10 us, then each sample times one batch and divides by the batch
+size; when the median sample still fell short of 10 us, the batch
+doubles and the phase is sampled again. Longer operations are timed one
+at a time, as before. Each metric records its
 batch as `iterations_per_sample` in `results.jsonl`, and the slower-cases
 table shows the primary metric's batch for both engines. The
 report gives the median, p25/p75 and min/max; ratios use medians, and group

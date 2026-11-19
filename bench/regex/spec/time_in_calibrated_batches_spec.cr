@@ -42,8 +42,9 @@ describe RegexBench::TimeInCalibratedBatches do
       statistics.median.should be_close(100e-9, 1e-15)
       statistics.sample_count.should eq(settings.max_samples)
       (statistics.min * statistics.iterations_per_sample).should be >= settings.min_batch_seconds
-      # Calibration (1 + 2 + ... + 128 operations), then every sample's batch.
-      clock.operations.should eq(255 + 128 * settings.max_samples)
+      # Calibration (1 + 2 + ... + 128 operations, and 128 again to confirm),
+      # then every sample's batch.
+      clock.operations.should eq(255 + 128 + 128 * settings.max_samples)
     end
 
     it "resolves an operation of a few clock ticks to well under one tick" do
@@ -54,14 +55,39 @@ describe RegexBench::TimeInCalibratedBatches do
       end
     end
 
-    it "keeps an operation of 10 us or more to a batch of one, its first timing its first sample" do
-      {10e-6, 50e-6, 0.3}.each do |seconds|
+    it "keeps an operation of 10 us or more to a batch of one, its calibration timings its first samples" do
+      {12e-6, 50e-6, 0.3}.each do |seconds|
         clock = SimulatedClock.new
         statistics = measure(seconds, clock)
         statistics.iterations_per_sample.should eq(1)
         statistics.median.should be_close(seconds, 1e-12)
         clock.operations.should eq(statistics.sample_count)
       end
+    end
+
+    it "doubles past a batch one slow timing made look long enough" do
+      # A 40 ns operation whose 5th call stalls for 20 us (a collection),
+      # inside the calibration timing of a batch of 4.
+      clock = SimulatedClock.new(TICK)
+      calls = 0
+      statistics = RegexBench::TimeInCalibratedBatches.new(settings, ->clock.read).measure do
+        calls += 1
+        clock.run(calls == 5 ? 20e-6 : 40e-9)
+      end
+      (statistics.median * statistics.iterations_per_sample).should be >= settings.min_batch_seconds
+      statistics.median.should be_close(40e-9, 40e-9 / 100)
+    end
+
+    it "samples again with a larger batch when the median batch fell short of 10 us" do
+      # Calibration sees 1 us operations; every later call takes 100 ns.
+      clock = SimulatedClock.new
+      calls = 0
+      statistics = RegexBench::TimeInCalibratedBatches.new(settings, ->clock.read).measure do
+        calls += 1
+        clock.run(calls <= 47 ? 1e-6 : 100e-9)
+      end
+      statistics.iterations_per_sample.should eq(128)
+      statistics.median.should be_close(100e-9, 1e-15)
     end
 
     it "batches a short operation whose first call alone took 10 us or more" do

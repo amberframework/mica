@@ -194,8 +194,9 @@ module RegexBench
       io << ", at least " << run.min_samples << ", stopping once " << run.phase_seconds
       io << " s have passed; an iteration slower than 2 s is sampled once.\n"
       io << "- An operation shorter than " << Report.format_seconds(MeasurementSettings.new.min_batch_seconds)
-      io << " is timed in calibrated batches, the same way for every engine: the batch doubles until one timed loop "
-      io << "takes at least that long, each sample times one batch and divides by its size, and the batch size is "
+      io << " is timed in calibrated batches, the same way for every engine: the batch doubles until two timed loops in a row each "
+      io << "take at least that long, each sample times one batch and divides by its size (sampled again with a doubled "
+      io << "batch while the median sample falls short), and the batch size is "
       io << "recorded per case and metric (`iterations_per_sample`; the slower-cases table shows the primary metric's). "
       io << "Longer operations are timed one at a time.\n"
       io << "- Reported: median with p25/p75 and min/max (relative spread = (p75 - p25) / median). Ratios use medians; "

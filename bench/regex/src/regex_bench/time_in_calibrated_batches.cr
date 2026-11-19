@@ -5,14 +5,19 @@ module RegexBench
   #
   # The monotonic clock ticks every 41.67 ns on Apple Silicon, so an
   # operation of a few hundred nanoseconds reads as 1 to 3 ticks and its
-  # median cannot be compared with another engine's. Calibration times one
-  # operation; while that takes less than `MeasurementSettings#min_batch_seconds`
-  # (10 us), it doubles the batch and times the whole batch again, until
-  # one batch takes at least that long. Every sample then times that many
-  # operations in one timed loop and divides by the batch size. An
-  # operation that takes 10 us or more on its own, twice in a row, keeps a
-  # batch of one, and those two timings are its first samples, as before
-  # batching.
+  # median cannot be compared with another engine's. Calibration times a
+  # batch of one operation, and doubles the batch until two timings of it
+  # in a row each take at least `MeasurementSettings#min_batch_seconds`
+  # (10 us): two, so a one-off slow call (a lazily built structure, a page
+  # fault, a collection) does not decide the batch. Every sample then times
+  # that many operations in one timed loop and divides by the batch size.
+  # When the samples' median batch still took less than 10 us, the batch
+  # doubles and the phase is sampled again, so the median sample is always
+  # at least 10 us long.
+  #
+  # An operation that takes 10 us or more on its own keeps a batch of one,
+  # and its two calibration timings are its first samples, as before
+  # batching; one slower than `slow_iteration_seconds` is timed once.
   #
   # Every engine runs this same code over the same operation, in its own
   # process; the batch size each one settled on is recorded in
@@ -38,39 +43,44 @@ module RegexBench
 
     # Calibrates the batch for the block's operation, then samples it.
     def measure(& : -> _) : Statistics
-      phase_started = @clock.call
       list_of_seconds = [] of Float64
       iterations_per_sample = 1
-      seconds = time_a_batch(1) { yield }
-      # An operation timed alone keeps a batch of one only when two timings
-      # in a row reach `min_batch_seconds`, so a one-off slow first call
-      # (a lazily built structure, a page fault) does not decide the batch.
-      # Both timings are its first samples; one past
-      # `slow_iteration_seconds` is its only sample.
-      if seconds >= @settings.min_batch_seconds
-        list_of_seconds << seconds
-        unless seconds >= @settings.slow_iteration_seconds
-          seconds = time_a_batch(1) { yield }
-          if seconds >= @settings.min_batch_seconds
-            list_of_seconds << seconds
-          else
-            list_of_seconds.clear
-          end
+      loop do
+        first = time_a_batch(iterations_per_sample) { yield }
+        if iterations_per_sample == 1 && first >= @settings.slow_iteration_seconds
+          list_of_seconds << first
+          break
         end
+        next iterations_per_sample *= 2 unless long_enough?(first, iterations_per_sample)
+        second = time_a_batch(iterations_per_sample) { yield }
+        next iterations_per_sample *= 2 unless long_enough?(second, iterations_per_sample)
+        # A batch of one keeps its calibration timings as its first samples.
+        list_of_seconds.concat({first, second}) if iterations_per_sample == 1
+        break
       end
-      if list_of_seconds.empty?
-        while seconds < @settings.min_batch_seconds && iterations_per_sample < MAX_ITERATIONS_PER_SAMPLE
-          iterations_per_sample *= 2
-          seconds = time_a_batch(iterations_per_sample) { yield }
-        end
-        # Sampling starts after calibration, which is not a sample.
-        phase_started = @clock.call
-      end
-      until enough?(list_of_seconds, phase_started)
-        list_of_seconds << time_a_batch(iterations_per_sample) { yield }
+      loop do
+        take_samples(list_of_seconds, iterations_per_sample) { yield }
+        break if long_enough?(Statistics.of(list_of_seconds).median, iterations_per_sample)
+        list_of_seconds.clear
+        iterations_per_sample *= 2
       end
       Statistics.of(list_of_seconds.map { |batch_seconds| batch_seconds / iterations_per_sample },
         iterations_per_sample)
+    end
+
+    # True when a batch of *iterations_per_sample* operations took *seconds*,
+    # at least `min_batch_seconds`, or the batch cannot grow.
+    private def long_enough?(seconds : Float64, iterations_per_sample : Int32) : Bool
+      seconds >= @settings.min_batch_seconds || iterations_per_sample >= MAX_ITERATIONS_PER_SAMPLE
+    end
+
+    # Adds batch timings to *list_of_seconds* until the sample loop's rules
+    # say there are enough; the phase clock starts now.
+    private def take_samples(list_of_seconds : Array(Float64), iterations_per_sample : Int32, & : -> _) : Nil
+      phase_started = @clock.call
+      until enough?(list_of_seconds, phase_started)
+        list_of_seconds << time_a_batch(iterations_per_sample) { yield }
+      end
     end
 
     # The seconds *iterations* operations take, timed as one.
