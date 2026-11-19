@@ -11,6 +11,7 @@ data_directory = File.expand_path("../data/regex", __DIR__)
 list_of_engines = %w[pcre2-jit pcre2-interpreter mica]
 list_of_corpora = RegexBench::Corpus::LIST_OF_CORPORA.dup
 case_filter = ""
+list_of_case_ids = [] of String
 max_amber_bytes = Int64::MAX
 max_samples = 11
 min_samples = 3
@@ -29,6 +30,7 @@ OptionParser.parse do |parser|
   parser.on("--engines LIST", "Comma-separated engines (pcre2-jit is the baseline)") { |value| list_of_engines = value.split(',') }
   parser.on("--corpora LIST", "Comma-separated corpora: rebar, amber, redos") { |value| list_of_corpora = value.split(',') }
   parser.on("--only TEXT", "Run only cases whose id contains TEXT") { |value| case_filter = value }
+  parser.on("--case-list FILE", "Run only the cases whose ids FILE lists, one per line") { |value| list_of_case_ids = File.read_lines(value).reject(&.empty?) }
   parser.on("--max-amber-bytes N", "Skip Amber haystacks larger than N bytes") { |value| max_amber_bytes = value.to_i64 }
   parser.on("--max-samples N", "Samples per measurement at most") { |value| max_samples = value.to_i }
   parser.on("--min-samples N", "Samples per measurement at least") { |value| min_samples = value.to_i }
@@ -47,7 +49,7 @@ end
 settings = RegexBench::DriverSettings.new(
   runner_directory: runner_directory, output_directory: output_directory, corpus_directory: corpus_directory,
   data_directory: data_directory, list_of_engines: list_of_engines,
-  list_of_corpora: list_of_corpora, case_filter: case_filter, max_amber_bytes: max_amber_bytes,
+  list_of_corpora: list_of_corpora, case_filter: case_filter, list_of_case_ids: list_of_case_ids, max_amber_bytes: max_amber_bytes,
   max_samples: max_samples, min_samples: min_samples, phase_seconds: phase_seconds,
   case_timeout_seconds: case_timeout_seconds, redos_timeout_seconds: redos_timeout_seconds,
   mica_ref: mica_ref, mica_commit: mica_commit, harness_commit: harness_commit)

@@ -7,6 +7,7 @@
 #   bench/regex/run.sh --engines pcre2-jit,pcre2-interpreter --out DIR
 #   bench/regex/run.sh --quick                          # smaller sizes, fewer samples
 #   bench/regex/run.sh -- --only redos/                 # anything after -- goes to the driver
+#   bench/regex/run.sh --engines pcre2-jit,mica,mica-static   # with Mica::Regex.static
 #
 # --mica-ref checks the ref out into a detached worktree under
 # bench/data/regex/ and builds the Mica runner against that worktree's src/
@@ -61,6 +62,14 @@ mkdir -p "$BIN"
 crystal-alpha build --release bench/regex/pcre2_jit_runner.cr -o "$BIN/pcre2_jit_runner"
 crystal-alpha build --release bench/regex/pcre2_interpreter_runner.cr -o "$BIN/pcre2_interpreter_runner"
 crystal-alpha build --release "$MICA_ENTRY" -o "$BIN/mica_runner"
+# The mica-static runner compiles every corpus pattern with
+# Mica::Regex.static while it builds, from this checkout's src/.
+case ",$ENGINES," in
+  *,mica-static,*)
+    /usr/bin/ruby bench/regex/scripts/write_static_patterns.rb
+    crystal-alpha build --release bench/regex/mica_static_runner.cr -o "$BIN/mica_static_runner"
+    ;;
+esac
 crystal-alpha build --release bench/regex/run_cases.cr -o "$BIN/run_cases"
 crystal-alpha build --release bench/regex/write_report.cr -o "$BIN/write_report"
 
