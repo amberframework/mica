@@ -23,6 +23,10 @@ module RegexBench
   # process; the batch size each one settled on is recorded in
   # `Statistics#iterations_per_sample`.
   #
+  # *before_each_batch* runs before each batch's clock starts, with the
+  # batch size: `MeasureACase` makes each run's own haystack copy there, so
+  # the copy is never timed. The block gets the run's index in its batch.
+  #
   # The sample loop's rules (`max_samples`, `min_samples`, `phase_seconds`,
   # `slow_iteration_seconds`) count batches: a batch is one sample.
   class TimeInCalibratedBatches
@@ -41,25 +45,28 @@ module RegexBench
 
     private START = Time.instant
 
+    # Leaves the setup before each batch empty.
+    NO_PREPARATION = ->(_iterations : Int32) { nil }
+
     # Calibrates the batch for the block's operation, then samples it.
-    def measure(& : -> _) : Statistics
+    def measure(before_each_batch : Int32 -> Nil = NO_PREPARATION, & : Int32 -> _) : Statistics
       list_of_seconds = [] of Float64
       iterations_per_sample = 1
       loop do
-        first = time_a_batch(iterations_per_sample) { yield }
+        first = time_a_batch(iterations_per_sample, before_each_batch) { |index| yield index }
         if iterations_per_sample == 1 && first >= @settings.slow_iteration_seconds
           list_of_seconds << first
           break
         end
         next iterations_per_sample *= 2 unless long_enough?(first, iterations_per_sample)
-        second = time_a_batch(iterations_per_sample) { yield }
+        second = time_a_batch(iterations_per_sample, before_each_batch) { |index| yield index }
         next iterations_per_sample *= 2 unless long_enough?(second, iterations_per_sample)
         # A batch of one keeps its calibration timings as its first samples.
         list_of_seconds.concat({first, second}) if iterations_per_sample == 1
         break
       end
       loop do
-        take_samples(list_of_seconds, iterations_per_sample) { yield }
+        take_samples(list_of_seconds, iterations_per_sample, before_each_batch) { |index| yield index }
         break if long_enough?(Statistics.of(list_of_seconds).median, iterations_per_sample)
         list_of_seconds.clear
         iterations_per_sample *= 2
@@ -76,17 +83,20 @@ module RegexBench
 
     # Adds batch timings to *list_of_seconds* until the sample loop's rules
     # say there are enough; the phase clock starts now.
-    private def take_samples(list_of_seconds : Array(Float64), iterations_per_sample : Int32, & : -> _) : Nil
+    private def take_samples(list_of_seconds : Array(Float64), iterations_per_sample : Int32,
+                             before_each_batch : Int32 -> Nil, & : Int32 -> _) : Nil
       phase_started = @clock.call
       until enough?(list_of_seconds, phase_started)
-        list_of_seconds << time_a_batch(iterations_per_sample) { yield }
+        list_of_seconds << time_a_batch(iterations_per_sample, before_each_batch) { |index| yield index }
       end
     end
 
-    # The seconds *iterations* operations take, timed as one.
-    private def time_a_batch(iterations : Int32, & : -> _) : Float64
+    # The seconds *iterations* operations take, timed as one, after the
+    # batch's untimed setup.
+    private def time_a_batch(iterations : Int32, before_each_batch : Int32 -> Nil, & : Int32 -> _) : Float64
+      before_each_batch.call(iterations)
       started = @clock.call
-      iterations.times { yield }
+      iterations.times { |index| yield index }
       @clock.call - started
     end
 

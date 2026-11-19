@@ -71,6 +71,8 @@ module RegexBench
         primary_ratio: eligible ? ratio(engine_result.primary_median, baseline.primary_median) : 0.0,
         compile_ratio: eligible ? ratio(engine_result.compile.median, baseline.compile.median) : 0.0,
         cold_ratio: eligible ? ratio(engine_result.cold_first_search.median, baseline.cold_first_search.median) : 0.0,
+        process_cold_ratio: eligible ? ratio(engine_result.process_first_search_seconds, baseline.process_first_search_seconds) : 0.0,
+        engine_seconds: metric_seconds(engine_result), baseline_seconds: metric_seconds(baseline),
         baseline_primary_median_seconds: baseline.primary_median,
         engine_primary_median_seconds: engine_result.primary_median,
         baseline_relative_spread: primary_statistics(baseline).relative_spread,
@@ -78,6 +80,11 @@ module RegexBench
         count: engine_result.count, baseline_count: baseline.count,
         engine_iterations_per_sample: primary_statistics(engine_result).iterations_per_sample,
         baseline_iterations_per_sample: primary_statistics(baseline).iterations_per_sample)
+    end
+
+    private def metric_seconds(case_result : CaseResult) : MetricSeconds
+      MetricSeconds.new(warm: case_result.primary_median, compile: case_result.compile.median,
+        cold: case_result.cold_first_search.median, process_cold: case_result.process_first_search_seconds)
     end
 
     private def primary_statistics(case_result : CaseResult) : Statistics
@@ -110,6 +117,9 @@ module RegexBench
         primary_geometric_mean: Statistics.geometric_mean(eligible.map(&.primary_ratio).select(&.> 0)),
         compile_geometric_mean: Statistics.geometric_mean(eligible.map(&.compile_ratio).select(&.> 0)),
         cold_geometric_mean: Statistics.geometric_mean(eligible.map(&.cold_ratio).select(&.> 0)),
+        process_cold_geometric_mean: Statistics.geometric_mean(eligible.map(&.process_cold_ratio).select(&.> 0)),
+        engine_seconds: MetricSeconds.geometric_means(eligible.map(&.engine_seconds)),
+        baseline_seconds: MetricSeconds.geometric_means(eligible.map(&.baseline_seconds)),
         slower_count: eligible.count(&.slower_than_the_baseline?))
     end
 

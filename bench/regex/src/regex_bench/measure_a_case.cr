@@ -9,7 +9,8 @@ module RegexBench
     min_batch_seconds : Float64 = 10e-6
 
   # When an engine runner is handed a case, then it builds the haystack,
-  # times the process-cold first search, verifies the model's count, and
+  # times the process-cold first search (compile plus first search, the
+  # first regex work of the runner process), verifies the model's count, and
   # takes compile, cold-first-search and warm-search samples, then reports
   # peak memory.
   #
@@ -21,6 +22,10 @@ module RegexBench
   # An operation shorter than `min_batch_seconds` (10 us) is timed in
   # calibrated batches (see `TimeInCalibratedBatches`), for every engine
   # alike, and its batch size is recorded with its statistics.
+  #
+  # Every timed cold and warm search gets its own String equal to the
+  # haystack, made before its batch's clock starts (see `HaystackCopies`),
+  # as a web app gets a new String per request.
   class MeasureACase
     def initialize(@engine : Engine, @benchmark_case : BenchmarkCase, @settings : MeasurementSettings,
                    @rebar_haystack_directory : String)
@@ -54,17 +59,18 @@ module RegexBench
       count = workload.run
       verify_seconds = elapsed_since(started)
 
+      copies = HaystackCopies.new(haystack)
       compile_statistics = sample { compile }
       cold_statistics = if takes_one_slow_search?(process_first)
                           Statistics.of([process_first])
                         else
-                          sample { compile.find(haystack, 0, true, false) }
+                          sample_over_copies(copies) { |copy| compile.find(copy, 0, true, false) }
                         end
       warm_statistics = if verify_seconds >= @settings.slow_iteration_seconds
                           Statistics.of([verify_seconds])
                         else
-                          warm_up(workload, verify_seconds)
-                          sample { workload.run }
+                          warm_up(workload, copies, verify_seconds)
+                          sample_over_copies(copies) { |copy| workload.run(copy) }
                         end
 
       result("ok", count: count, compile: compile_statistics, cold_first_search: cold_statistics,
@@ -82,11 +88,12 @@ module RegexBench
       @benchmark_case.model == "first-match" && seconds >= @settings.slow_iteration_seconds
     end
 
-    private def warm_up(workload : Workload, spent : Float64) : Nil
+    private def warm_up(workload : Workload, copies : HaystackCopies, spent : Float64) : Nil
       iterations = 1
       while iterations < 3 && spent < @settings.warmup_seconds
+        copies.prepare(1)
         started = Time.instant
-        workload.run
+        workload.run(copies[0])
         spent += elapsed_since(started)
         iterations += 1
       end
@@ -94,6 +101,13 @@ module RegexBench
 
     private def sample(& : -> _) : Statistics
       TimeInCalibratedBatches.new(@settings).measure { yield }
+    end
+
+    # Samples the block over a fresh copy of the haystack per run; the
+    # copies for each batch are made before its clock starts.
+    private def sample_over_copies(copies : HaystackCopies, & : String -> _) : Statistics
+      prepare = ->(iterations : Int32) { copies.prepare(iterations) }
+      TimeInCalibratedBatches.new(@settings).measure(prepare) { |index| yield copies[index] }
     end
 
     private def elapsed_since(started : Time::Instant) : Float64

@@ -116,10 +116,20 @@ Per case and engine:
 
 - **compile**: compile alone;
 - **cold first search**: compile plus one search, a new compiled pattern
-  each sample, plus the very first one in the fresh process;
+  each sample, in a process that has already run the case once;
+- **process-cold**: compile plus the first search as the first regex work
+  of a fresh runner process (one process per case and engine), timed once;
 - **warm search**: one full iteration of the case's model (rebar's
   `count`, `count-spans`, `count-captures`, `grep`, `grep-captures`, or
   `first-match` for ReDoS) with a compiled pattern;
+- every timed cold and warm search gets its own String, equal to the
+  haystack but a separate object, as a web app gets a new String with
+  every request. The copies for a batch are made before its clock starts
+  (`HaystackCopies`), so the copy is not timed, for every engine alike;
+  a batch whose copies would pass 256 MiB rotates through as many as fit,
+  never fewer than two, so consecutive searches still differ. An engine
+  that remembers the last String it validated by identity therefore pays
+  validation on every search, as PCRE2 does on a first search;
 - **peak memory**: the process's peak RSS, and the part above the RSS
   right after the haystack was built.
 
@@ -137,7 +147,8 @@ batch as `iterations_per_sample` in `results.jsonl`, and the slower-cases
 table shows the primary metric's batch for both engines. The
 report gives the median, p25/p75 and min/max; ratios use medians, and group
 summaries are geometric means of ratios over eligible cases (both engines
-finished and their counts agree). `run.json` records the machine, the
+finished and their counts agree), each shown with the geometric means of
+both engines' medians behind it. `run.json` records the machine, the
 toolchain, the commits and the settings.
 
 ## The report
@@ -146,7 +157,8 @@ toolchain, the commits and the settings.
 
 1. engine status counts and the headline geometric means;
 2. per group: cases, eligible cases, and the geometric-mean ratio to
-   `pcre2-jit` for warm search, compile and cold first search;
+   `pcre2-jit` for warm search, compile, cold first search and
+   process-cold, each with its absolute times;
 3. every case where Mica is slower than PCRE2-JIT, with the margin;
 4. the ReDoS table (family by n, every engine);
 5. the deadline and budget suite: for each engine and ReDoS family, whether

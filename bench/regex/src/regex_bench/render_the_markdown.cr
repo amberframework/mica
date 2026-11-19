@@ -32,6 +32,13 @@ module RegexBench
     def self.format_percent(fraction : Float64) : String
       "#{(fraction * 100).round(1)}%"
     end
+
+    # A ratio with the two absolute times behind it: "0.5x (20.0 µs / 40.0 µs)",
+    # engine first.
+    def self.format_ratio_with_seconds(ratio : Float64, engine_seconds : Float64, baseline_seconds : Float64) : String
+      return "-" unless ratio > 0
+      "#{format_ratio(ratio)} (#{format_seconds(engine_seconds)} / #{format_seconds(baseline_seconds)})"
+    end
   end
 
   # Writes a `ReportDocument` (and the raw results for the appendix) as
@@ -77,10 +84,13 @@ module RegexBench
         if overall.eligible_count == 0
           io << "- `" << engine << "`: no eligible cases (" << pending_or_status(engine) << ").\n"
         else
-          io << "- `" << engine << "` over " << overall.eligible_count << " eligible cases: warm search "
-          io << Report.format_ratio(overall.primary_geometric_mean) << ", compile "
-          io << Report.format_ratio(overall.compile_geometric_mean) << ", cold first search "
-          io << Report.format_ratio(overall.cold_geometric_mean) << " (geometric means); slower than the baseline on "
+          engine_seconds = overall.engine_seconds
+          baseline_seconds = overall.baseline_seconds
+          io << "- `" << engine << "` over " << overall.eligible_count << " eligible cases (geometric means, engine / baseline time in parentheses): warm search "
+          io << Report.format_ratio_with_seconds(overall.primary_geometric_mean, engine_seconds.warm, baseline_seconds.warm) << ", compile "
+          io << Report.format_ratio_with_seconds(overall.compile_geometric_mean, engine_seconds.compile, baseline_seconds.compile) << ", cold first search "
+          io << Report.format_ratio_with_seconds(overall.cold_geometric_mean, engine_seconds.cold, baseline_seconds.cold) << ", process-cold "
+          io << Report.format_ratio_with_seconds(overall.process_cold_geometric_mean, engine_seconds.process_cold, baseline_seconds.process_cold) << "; slower than the baseline on "
           io << overall.slower_count << " cases.\n"
         end
       end
@@ -96,14 +106,22 @@ module RegexBench
     private def write_group_table(io : IO) : Nil
       io << "## Geometric means per group\n\n"
       io << "Ratio to `" << @document.baseline_engine << "` over each group's eligible cases (both engines finished and their counts agree). "
-      io << "Warm search is the model's primary metric (compile time for rebar's `compile` model).\n\n"
-      io << "| Engine | Group | Cases | Eligible | Warm search | Compile | Cold first search | Slower cases |\n"
-      io << "|---|---|---|---|---|---|---|---|\n"
+      io << "Warm search is the model's primary metric (compile time for rebar's `compile` model). "
+      io << "Cold first search is compile plus one search in a process that has already run the case; process-cold is compile plus "
+      io << "the first search as the first regex work of a fresh runner process. Beside each ratio: the geometric means of the "
+      io << "engine's and the baseline's medians.\n\n"
+      io << "| Engine | Group | Cases | Eligible | Warm search | Compile | Cold first search | Process-cold | Slower cases |\n"
+      io << "|---|---|---|---|---|---|---|---|---|\n"
       @document.group_summaries.each do |summary|
+        engine_seconds = summary.engine_seconds
+        baseline_seconds = summary.baseline_seconds
         io << "| `" << summary.engine << "` | " << summary.group << " | " << summary.case_count << " | "
-        io << summary.eligible_count << " | " << Report.format_ratio(summary.primary_geometric_mean) << " | "
-        io << Report.format_ratio(summary.compile_geometric_mean) << " | "
-        io << Report.format_ratio(summary.cold_geometric_mean) << " | " << summary.slower_count << " |\n"
+        io << summary.eligible_count << " | "
+        io << Report.format_ratio_with_seconds(summary.primary_geometric_mean, engine_seconds.warm, baseline_seconds.warm) << " | "
+        io << Report.format_ratio_with_seconds(summary.compile_geometric_mean, engine_seconds.compile, baseline_seconds.compile) << " | "
+        io << Report.format_ratio_with_seconds(summary.cold_geometric_mean, engine_seconds.cold, baseline_seconds.cold) << " | "
+        io << Report.format_ratio_with_seconds(summary.process_cold_geometric_mean, engine_seconds.process_cold, baseline_seconds.process_cold) << " | "
+        io << summary.slower_count << " |\n"
       end
       io << "\n"
     end
@@ -190,6 +208,8 @@ module RegexBench
       io << "- Each engine runs every case in its own process (separate linkage and memory); processes run one at a time.\n"
       io << "- Per case: the process-cold first compile + search is timed once; one full iteration verifies the count; "
       io << "then compile, cold first search (compile + one search, a new pattern each sample) and warm search are sampled.\n"
+      io << "- Every timed cold and warm search gets its own String, equal to the haystack but a separate object, as a web app "
+      io << "gets a new String per request; the copies for a batch are made before its clock starts, for every engine alike.\n"
       io << "- Warm search gets up to 3 warm-up iterations (0.5 s), then samples: at most " << run.max_samples
       io << ", at least " << run.min_samples << ", stopping once " << run.phase_seconds
       io << " s have passed; an iteration slower than 2 s is sampled once.\n"
