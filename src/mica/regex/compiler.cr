@@ -219,6 +219,7 @@ module Mica::Regex
 
     private def compile_repetition(node : Hir::Repetition, next_state : Int32) : Nil
       maximum = node.maximum
+      reserve_class_copies(node, maximum)
       if maximum.nil?
         loop_split = emit(Program::StateKind::Split)
         push_task(TaskKind::LoopFinish, node, next_state, loop_split)
@@ -361,13 +362,7 @@ module Mica::Regex
     private def compile_class(set : CodePointSet, next_state : Int32) : Int32
       return emit(Program::StateKind::Fail) if set.empty?
       return compile_class_from_trie(set, next_state) unless ClassMemo.memoized?(set)
-      block = @last_memo_block
-      unless block && set.same?(@last_memo_set)
-        block = ClassMemo.block_for(set, @ledger, @meter)
-        @last_memo_set = set
-        @last_memo_block = block
-      end
-      instantiate(block, next_state)
+      instantiate(memo_block(set), next_state)
     end
 
     # Emits a memoized class block after the current states, its exit
@@ -392,6 +387,32 @@ module Mica::Regex
           argument: state.kind.sparse? ? state.argument + first_transition : state.argument)
       end
       block.entry + first_state
+    end
+
+    # Makes room up front for the transitions of every copy of a repeated
+    # large class (`\p{L}{50}` copies one block fifty times), so they are
+    # appended without growing the list copy by copy. The room is charged
+    # here, before it is allocated, on top of the copies' own charges.
+    private def reserve_class_copies(node : Hir::Repetition, maximum : Int32?) : Nil
+      child = node.child
+      return unless child.is_a?(Hir::Class)
+      set = child.code_point_set
+      return unless ClassMemo.memoized?(set)
+      copies = maximum || Math.max(node.minimum, 1)
+      added = memo_block(set).list_of_transitions.size.to_i64 * copies
+      return if added > Int32::MAX // 2
+      @ledger.charge(AllocationLedger.granules(added * sizeof(Program::Transition)), "the class transitions of a repetition", 0)
+      reserve_transitions(added.to_i32)
+    end
+
+    # The memoized block of *set*, asking the memo once per set object.
+    private def memo_block(set : CodePointSet) : ClassMemo::Block
+      block = @last_memo_block
+      return block if block && set.same?(@last_memo_set)
+      block = ClassMemo.block_for(set, @ledger, @meter)
+      @last_memo_set = set
+      @last_memo_block = block
+      block
     end
 
     # Makes room for *added* more transitions in one step (at least

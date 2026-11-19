@@ -30,37 +30,29 @@ module Mica::Regex
     record Block, list_of_states : Array(Program::State), list_of_transitions : Array(Program::Transition),
       entry : Int32
 
-    # A set's bounds as a hash key: the hash is the set's digest, computed
-    # once when the set was made, and equality is a `memcmp`, so a lookup
-    # costs far less than hashing an `Array(Int32)` element by element.
+    # A set as a hash key: the hash is the set's digest, computed once when
+    # the set was made, and equality is the same object (the shared sets of
+    # `ClassLowering`) or equal bounds, so a lookup costs far less than
+    # hashing an `Array(Int32)` element by element. Sets are never changed
+    # after they are made, so the key holds the set itself.
     struct Key
-      getter bounds : Slice(Int32)
-      @digest : UInt64
+      getter set : CodePointSet
 
-      def initialize(@bounds : Slice(Int32), @digest : UInt64)
+      def initialize(@set : CodePointSet)
       end
 
       def hash(hasher)
-        @digest.hash(hasher)
+        @set.digest.hash(hasher)
       end
 
       def ==(other : Key) : Bool
-        @digest == other.@digest && @bounds == other.bounds
-      end
-
-      # A copy that owns its bounds, for storing.
-      def stored : Key
-        Key.new(@bounds.dup, @digest)
+        other_set = other.set
+        @set.same?(other_set) || (@set.digest == other_set.digest && @set.list_of_bounds == other_set.list_of_bounds)
       end
     end
 
     @@mutex = Mutex.new
     @@blocks = {} of Key => Block
-
-    private def self.key(set : CodePointSet) : Key
-      bounds = set.list_of_bounds
-      Key.new(Slice.new(bounds.to_unsafe, bounds.size, read_only: true), set.digest)
-    end
 
     def self.memoized?(set : CodePointSet) : Bool
       set.range_count >= MIN_RANGES
@@ -69,17 +61,16 @@ module Mica::Regex
     # Returns the block for *set* (a memoized set), building it under
     # *ledger* and *meter* the first time.
     def self.block_for(set : CodePointSet, ledger : AllocationLedger, meter : Core::WorkMeter) : Block
-      lookup = key(set)
+      lookup = Key.new(set)
       if block = @@mutex.synchronize { @@blocks[lookup]? }
         return block
       end
       block = build(set, ledger, meter)
-      stored = lookup.stored
       @@mutex.synchronize do
-        if existing = @@blocks[stored]?
+        if existing = @@blocks[lookup]?
           block = existing
         elsif @@blocks.size < MAX_ENTRIES
-          @@blocks[stored] = block
+          @@blocks[lookup] = block
         end
       end
       block
