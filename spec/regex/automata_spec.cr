@@ -152,8 +152,8 @@ describe "Mica::Regex R3 engines" do
 
     it_satisfies "REGEX-R3-differential", "reads each copy of a large class in place, holding one record per copy" do
       long_words = program("\\b\\w{25,}\\b")
-      # One copy of `\w` alone: the states of its memoized automaton.
-      word = program("\\w").list_of_class_copies.first.list_of_template_states.size
+      # A copy of `\w`: the states of its memoized automaton.
+      word = program("\\w{2}").list_of_class_copies.first.list_of_template_states.size
       word.should be > 300
       long_words.list_of_class_copies.size.should eq(25)
       long_words.held_state_count.should be < 16
@@ -163,6 +163,8 @@ describe "Mica::Regex R3 engines" do
         copy.list_of_template_states.size.should eq(word)
         copy.first_state.should be >= long_words.held_state_count
       end
+      # A class no counted repetition repeats keeps its states in the program.
+      program("(w+)s+(w+)").list_of_class_copies.should be_empty
     end
 
     it_satisfies "REGEX-R3-differential", "finds the same spans on every engine path through class copies" do

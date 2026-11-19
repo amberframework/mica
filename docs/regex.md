@@ -329,14 +329,19 @@ byte ranges in a trie, so a class emits at most the byte ranges the size
 preflight counted for it). A large class (16 ranges or more, such as `\w`
 or `\p{L}`, or any class reaching three-byte sequences, such as `.` or
 `[^"']`) is built once per process as a minimal automaton, its equal
-suffixes sharing states. A program holds no copy of those states: each
-copy is one record (`Program::ClassCopy`: the automaton, the copy's first
-state number and its exit), numbered after the states the program holds,
-and the engines read a copy's state from the automaton in place
-(`Program#state_at`). Its `Sparse` states read the class's transitions
+suffixes sharing states. A program copies its states (one memory copy,
+relocated in place), except the copies a counted repetition makes of
+such a class (`\w{25,}`, `\p{L}{2,8}`): each of those is one record
+(`Program::ClassCopy`: the automaton, the copy's first state number and
+its exit), numbered after the states the program holds. The first search
+that reads a copy's state (`Program#state_at`) writes the copies out
+once, so compiling costs what the first search needs and the engines
+then read every state from one array; the bytes the written-out states
+take are charged to the compilation as the preflight bound. Every copy's
+`Sparse` states read the class's transitions
 from one table shared by every program and copy
 (`Program#list_of_shared_tables`, targets relative to the reading state),
-so a copy of `\w` adds 354 state numbers, one record and no transitions,
+so a copy of `\w` adds 354 states (or one record) and no transitions,
 and `\b\w{25,}\b` compiles in about 2.5 µs instead of 15. The preflight
 counts its exact states, and every bound in m counts the copies' states.
 A class of one escape or property lowers to a set shared by the process,

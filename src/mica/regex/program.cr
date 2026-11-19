@@ -131,18 +131,51 @@ module Mica::Regex
       end
     end
 
+    # Every state, the class copies written out, built on the first read
+    # of a copy's state (see `state_at`) and published through the atomic,
+    # so a thread that sees it sees it whole.
+    @expanded_states = Atomic(Array(State)?).new(nil)
+    @expansion_mutex = Mutex.new
+
     # The number of states the program holds (`list_of_class_copies` adds
     # the rest).
     def held_state_count : Int32
       @list_of_held_states.size
     end
 
-    # Returns state *index*, which must be below `state_count`: a held
-    # state, or a state of a class copy built from its template.
+    # Returns state *index*, which must be below `state_count`. A class
+    # copy's state comes from the program's states written out in full
+    # (`expanded_states`): compiling a program costs no more than its held
+    # states and copy records, and the copies are written out once, by the
+    # first search that reads one, which then reads them as fast as held
+    # states. The bytes they take were charged to the compilation's ledger
+    # as the preflight bound, so this stays within `max_compile_bytes`.
     @[AlwaysInline]
     def state_at(index : Int32) : State
-      return @list_of_held_states.unsafe_fetch(index) if index < @list_of_held_states.size
-      copied_state(index)
+      held = @list_of_held_states
+      return held.unsafe_fetch(index) if index < held.size
+      (@expanded_states.get(:acquire) || expand_states).unsafe_fetch(index)
+    end
+
+    # Writes the class copies out after the held states (see `state_at`).
+    private def expand_states : Array(State)
+      @expansion_mutex.synchronize do
+        if built = @expanded_states.get(:acquire)
+          return built
+        end
+        # One memory copy per block, relocated in place.
+        list = Array(State).new(state_count)
+        list.concat(@list_of_held_states)
+        @list_of_class_copies.each do |copy|
+          list.concat(copy.list_of_template_states)
+          states = list.to_unsafe + copy.first_state
+          copy.list_of_template_states.size.times do |offset|
+            states[offset] = state_of_copy(copy, offset)
+          end
+        end
+        @expanded_states.set(list, :release)
+        list
+      end
     end
 
     # Every state with its number, in order.
@@ -164,25 +197,9 @@ module Mica::Regex
       list
     end
 
-    private def copied_state(index : Int32) : State
-      copies = @list_of_class_copies
-      low = 0
-      high = copies.size
-      while high - low > 1
-        middle = (low + high) >> 1
-        if copies.unsafe_fetch(middle).first_state <= index
-          low = middle
-        else
-          high = middle
-        end
-      end
-      copy = copies[low]
-      state_of_copy(copy, index - copy.first_state)
-    end
-
     @[AlwaysInline]
     private def state_of_copy(copy : ClassCopy, offset : Int32) : State
-      template = copy.list_of_template_states[offset]
+      template = copy.list_of_template_states.unsafe_fetch(offset)
       return template.copy_with(low: copy.table_id, next_state: copy.exit) if template.kind.sparse?
       target = template.next_state
       return template if target == ClassMemo::NONE

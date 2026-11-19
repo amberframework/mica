@@ -399,12 +399,33 @@ describe Mica::Regex::Syntax do
     end
 
     it_satisfies "REGEX-R1-preflight", "copies a repeated small class exactly as it would rebuild it" do
-      {".{3}" => "...", "[a-zé]{2,3}" => "[a-zé][a-zé](?:[a-zé])?", "x[^\"']{0,2}" => "x(?:[^\"'](?:[^\"'])?)?",
-       "é{1,3}?" => "é(?:é(?:é)??)??", "\\w{0,2}" => "(?:\\w(?:\\w)?)?"}.each do |repeated, written|
+      {"[a-zé]{2,3}" => "[a-zé][a-zé](?:[a-zé])?", "é{1,3}?" => "é(?:é(?:é)??)??"}.each do |repeated, written|
         copied = Mica::Regex::Syntax.compile(repeated, dialect: :crystal, compile_limits: TRUSTED)
         rebuilt = Mica::Regex::Syntax.compile(written, dialect: :crystal, compile_limits: TRUSTED)
         copied.list_of_states.should eq(rebuilt.list_of_states)
         copied.list_of_transitions.should eq(rebuilt.list_of_transitions)
+      end
+    end
+
+    it_satisfies "REGEX-R1-preflight", "reads the copies of a repeated large class in place, matching as written out" do
+      limits = Mica::Regex::SearchLimits::TRUSTED_INPUT
+      {".{3}" => "...", "x[^\"']{0,2}" => "x(?:[^\"'](?:[^\"'])?)?",
+       "\\w{0,2}" => "(?:\\w(?:\\w)?)?"}.each do |repeated, written|
+        copied = Mica::Regex::Syntax.compile(repeated, dialect: :crystal, compile_limits: TRUSTED)
+        rebuilt = Mica::Regex::Syntax.compile(written, dialect: :crystal, compile_limits: TRUSTED)
+        copied.list_of_class_copies.size.should be >= 2
+        rebuilt.list_of_class_copies.should be_empty
+        copied.state_count.should eq(rebuilt.state_count)
+        copied.list_of_transitions.should eq(rebuilt.list_of_transitions)
+        ["", "abc", "xé\"y", "x'é_9", "日本語!", "a\nb"].each do |haystack|
+          spans = {copied, rebuilt}.map do |program|
+            searcher = Mica::Regex::Searcher.new(program, haystack, limits, nil, Mica::Regex::Engine::PikeVM)
+            found = searcher.find(0, Mica::Regex::MatchOptions::None, true).try(&.to_a)
+            searcher.finish
+            found
+          end
+          spans[0].should eq(spans[1])
+        end
       end
     end
 
