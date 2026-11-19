@@ -638,7 +638,7 @@ module Mica::Regex
         syntax_error("subpattern name expected", @pos)
       end
       first, first_length = Core::UTF8.decode(@bytes, @pos, @bytes.size)
-      if Unicode.includes?(Unicode::Tables::SET_GC_ND, first)
+      if decimal_digit?(first)
         @pos += first_length
         syntax_error("subpattern name must start with a non-digit", @pos)
       end
@@ -661,9 +661,20 @@ module Mica::Regex
       group_name
     end
 
+    # Letters (`L`), decimal digits (`Nd`) and the underscore; an ASCII
+    # name character is answered without the Unicode tables.
     private def group_name_character?(code_point : Int32) : Bool
-      code_point == '_'.ord || Unicode.includes?(Unicode::Tables::SET_GC_ND, code_point) ||
-        Unicode.includes?(Unicode::Tables::SET_GCG_L, code_point)
+      if code_point < 0x80
+        return code_point == '_'.ord || ('0'.ord <= code_point <= '9'.ord) ||
+          ('a'.ord <= code_point | 0x20 <= 'z'.ord)
+      end
+      Unicode.includes?(Unicode::Tables::SET_GC_ND, code_point) || Unicode.includes?(Unicode::Tables::SET_GCG_L, code_point)
+    end
+
+    # True for a decimal digit (`Nd`); an ASCII one without the tables.
+    private def decimal_digit?(code_point : Int32) : Bool
+      return '0'.ord <= code_point <= '9'.ord if code_point < 0x80
+      Unicode.includes?(Unicode::Tables::SET_GC_ND, code_point)
     end
 
     # Records a group name the way PCRE2 does: the same name on the same

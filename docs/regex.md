@@ -543,6 +543,28 @@ and scans every path makes cost more than the plan would save. A
 backtracked start reads at most `FirstSearch::MAX_BYTES` (256) bytes, so
 a long match end goes to the reverse DFA.
 
+While a program's runs are pending, the backtracker reads a `ClassRun`'s
+states from the run's block rather than through `Program#state_at`: once
+it has found the run (the binary search, charged as before), it follows
+the copies one byte at a time, reading each copy's lead byte from the
+block's `ClassMemo::Block#entry_targets` (one load for a large class) and
+the other bytes from its shared table. A copy is a deterministic
+automaton over one UTF-8 sequence, entered only at its entry, so a pair
+inside a copy can be reached from one entry pair alone: the search marks
+only the entry pairs, which keeps every pair visited at most once, and
+charges one operation and one visit per state it steps through, with no
+run lookup per state. `\p{L}{256}` over 256 letters went from about 13
+to 4 us cold, and `[0-9A-Za-z_]{256}` from about 6.6 to 2.5 us.
+
+A first search has no lease, so its backtracker would allocate a bitset
+and a job stack every time. The `CachePool` keeps one spare backtracker
+instead (`CachePool#take_spare_backtracker`, one atomic exchange): a
+first search takes it, points it at its program, and gives it back when
+the call finishes, detached from the program and trimmed to
+`BoundedBacktracker.spare_retained_bytes` (60 KiB: the largest bitset,
+the first job chunks and a small hash set). Like the backtracker a lease
+keeps, it is outside the pool's cap.
+
 The plan itself builds what a search reads when it first reads it: the
 start filter (read only by short searches) on first use, and the reverse
 DFA only once the plan has found `FirstSearch::SEARCHES` match starts
