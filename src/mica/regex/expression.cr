@@ -113,6 +113,7 @@ module Mica::Regex
     # matched never pays for them.
     def match_at_byte_index(string : String, byte_index : Int32 = 0, options : MatchOptions = MatchOptions::None, *,
                             limits : SearchLimits, timeout : Time::Span? = nil) : MatchData?
+      return nil if rejects_short?(string, byte_index, options, limits, timeout)
       searcher = Searcher.open(@program, string, limits, timeout, @cache_pool)
       if searcher.defers_groups?
         found = searcher.find(byte_index, options, false)
@@ -125,6 +126,29 @@ module Mica::Regex
       end
     ensure
       searcher.try(&.finish)
+    end
+
+    # The longest haystack `rejects_short?` reads.
+    private SHORT_HAYSTACK_BYTES = 256
+
+    # True when a search of the short *string* from *byte_index* cannot
+    # match, decided from the program's `StartFilter` without a lease or an
+    # engine: too few bytes remain, or none of them can start a match. It
+    # answers only where the search itself would return no match without
+    # raising: the haystack is valid UTF-8 and its validation fits the work
+    # allowance, *byte_index* is a character boundary inside it, and no
+    # timeout is set (a timeout already passed must still fail). Anything
+    # else goes to the searcher.
+    private def rejects_short?(string : String, byte_index : Int32, options : MatchOptions, limits : SearchLimits,
+                               timeout : Time::Span?) : Bool
+      bytes = string.to_slice
+      return false if timeout || bytes.size > SHORT_HAYSTACK_BYTES || byte_index < 0 || byte_index > bytes.size
+      return false if byte_index < bytes.size && bytes.unsafe_fetch(byte_index) & 0xC0 == 0x80
+      plan = @program.plan
+      anchored = @program.options.anchored? || options.anchored? || plan.anchored_start?
+      return false unless plan.start_filter.rejects?(bytes, byte_index, anchored)
+      return false if limits.max_work(@program.state_count, bytes.size.to_i64) < bytes.size
+      Core::UTF8.first_invalid_offset(bytes).nil?
     end
 
     # :nodoc:
@@ -160,6 +184,7 @@ module Mica::Regex
     # Returns true when *string* has a match at or after byte *byte_index*.
     def matches_at_byte_index?(string : String, byte_index : Int32 = 0, options : MatchOptions = MatchOptions::None, *,
                                limits : SearchLimits, timeout : Time::Span? = nil) : Bool
+      return false if rejects_short?(string, byte_index, options, limits, timeout)
       searcher = Searcher.open(@program, string, limits, timeout, @cache_pool)
       searcher.matches?(byte_index, options)
     ensure

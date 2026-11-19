@@ -422,6 +422,16 @@ Many searches read a short haystack (a route segment, a form field, one
 log line) or find a short match, so the fixed cost of a call matters as
 much as the cost per byte:
 
+- **No engine for a short haystack that cannot match.** A program's
+  `StartFilter` (built with its plan) holds the fewest bytes a match spans
+  and the bytes a match can start with, read from the NFA with every
+  assertion taken as passing. `match`, `match_at_byte_index`, `search` and
+  `matches?` over a haystack of at most 256 bytes return no match at once,
+  with no lease and no engine, when too few bytes remain or none of them
+  can start a match (only the first, when the search is anchored). They do
+  so only where the searcher would also return no match without raising:
+  the haystack is valid UTF-8 and its validation fits the work allowance,
+  the offset is a character boundary, and no timeout is set.
 - **One atomic each way.** A call takes its program's hot lease with one
   atomic exchange and puts it back with one compare-and-set. Who holds a
   lease is decided by where it sits: in the hot slot or the idle list it is

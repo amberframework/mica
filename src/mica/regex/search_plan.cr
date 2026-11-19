@@ -35,6 +35,8 @@ module Mica::Regex
     # the start state passes `\A` before it reads a byte): a search is
     # then anchored at its offset, and the reverse DFA is not needed.
     getter? anchored_start : Bool
+    # The fewest bytes and the first bytes of a match (see `StartFilter`).
+    getter start_filter : StartFilter
     # The lazily built parts are published through atomics, so a search
     # on another thread that sees one sees it fully built.
     @reverse = Atomic(LazyDFA?).new(nil)
@@ -54,6 +56,7 @@ module Mica::Regex
       @prefilter = literal_set ? Prefilter.new(literal_set) : nil
       @literal_search = !!literal_set.try(&.exact?)
       @anchored_start = SearchPlan.anchored_start?(@program)
+      @start_filter = StartFilter.new(@program)
     end
 
     # True when every path from *program*'s start state reaches a

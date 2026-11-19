@@ -164,6 +164,35 @@ describe "Mica::Regex short searches" do
     end
   end
 
+  describe "start filter" do
+    it_satisfies "REGEX-R3-short-search", "reads the fewest bytes and the first bytes of a match from the program" do
+      filter = expression("\\d+px").program.plan.start_filter
+      filter.minimum_bytes.should eq(3)
+      filter.rejects?("12p".to_slice, 0, false).should be_false
+      filter.rejects?("ab px".to_slice, 0, false).should be_true
+      filter.rejects?("1px".to_slice, 1, false).should be_true
+      expression("é|ab").program.plan.start_filter.minimum_bytes.should eq(2)
+      expression("a?").program.plan.start_filter.rejects?("".to_slice, 0, false).should be_false
+      expression("[^\\x00-\\x{10FFFF}]").program.plan.start_filter.rejects?("abc".to_slice, 0, false).should be_true
+    end
+
+    it_satisfies "REGEX-R3-short-search", "answers a short search that cannot match as the searcher would" do
+      digits = expression("\\A\\d+\\z")
+      digits.match("abc", limits: LIMITS).should be_nil
+      digits.matches?("12a", limits: LIMITS).should be_false
+      digits.match("123", limits: LIMITS).try(&.to_s).should eq("123")
+      dot = expression(".")
+      dot.match("\n", limits: LIMITS).should be_nil
+      dot.match_at_byte_index("ab", 2, limits: LIMITS).should be_nil
+      # What the searcher raises, the shortcut leaves to it.
+      expect_raises(Mica::EncodingError) { dot.match(String.new(Bytes[0x0a, 0xff]), limits: LIMITS) }
+      expect_raises(Mica::DeadlineExceededError) { dot.match("\n", limits: LIMITS, timeout: -1.second) }
+      expect_raises(ArgumentError) { dot.match_at_byte_index("é\n", 1, limits: LIMITS) }
+      none = Mica::Regex::SearchLimits.custom(work_ceiling: 0_i64)
+      expect_raises(Mica::Regex::SearchLimitError) { dot.match("\n", limits: none) }
+    end
+  end
+
   describe "allocation" do
     it_satisfies "REGEX-R3-short-search", "allocates nothing per call for a pattern without groups" do
       pattern = expression(",\\s*")
