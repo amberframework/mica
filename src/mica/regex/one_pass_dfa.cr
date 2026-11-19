@@ -188,9 +188,17 @@ module Mica::Regex
         while at < bound
           step = steps[row &+ class_of[bytes[at]]]
           break unless step >= 0 && step & (STEP_TAKES_EDGE | STEP_REACHES_MATCH) == 0
-          row = step >> 2
           reaches_match = false
           at &+= 1
+          if step >> 2 == row
+            # A state that loops on itself (a run of `[^,]`): the row stays
+            # fixed, so each byte's loads no longer wait for the one before.
+            while at < bound && steps[row &+ class_of[bytes[at]]] == step
+              at &+= 1
+            end
+          else
+            row = step >> 2
+          end
         end
         next if at >= bound
         cell = row &+ class_of[bytes[at]]
