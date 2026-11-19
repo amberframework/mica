@@ -28,6 +28,8 @@ module Mica::Regex
     getter states_built = 0_i64
     getter bytes_read = 0_i64
     @searches_since_thrash = 0
+    # The most NFA states one state built so far held.
+    getter widest_key = 0
     @retry_interval = FIRST_RETRY_INTERVAL
     getter dfa : LazyDFA
 
@@ -65,7 +67,7 @@ module Mica::Regex
     end
 
     protected def self.fixed_bytes_of(dfa : LazyDFA) : Int64
-      16_i64 * dfa.program.state_count + 4_i64 * LazyDFA::START_FLAG_COUNT + 256
+      16_i64 * dfa.node_count + 4_i64 * LazyDFA::START_FLAG_COUNT + 256
     end
 
     protected def self.state_bytes_of(dfa : LazyDFA, key_size : Int32) : Int64
@@ -80,7 +82,7 @@ module Mica::Regex
       @list_of_keys = [] of Array(Int32)
       @state_ids = {} of Array(Int32) => Int32
       @start_states = Array(Int32).new(LazyDFA::START_FLAG_COUNT, -1)
-      @builder = DFABuilder.new(@dfa.program.state_count)
+      @builder = DFABuilder.new(@dfa.node_count)
       reset_states
     end
 
@@ -179,6 +181,7 @@ module Mica::Regex
         return LazyDFA::GAVE_UP if @bytes_used + cost > @pool.max_cache_bytes
       end
       return LazyDFA::GAVE_UP unless reserve(@bytes_used + cost)
+      @widest_key = key.size if key.size > @widest_key
       add_state(key.dup, cost)
     end
 

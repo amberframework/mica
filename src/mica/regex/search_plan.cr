@@ -10,10 +10,12 @@ module Mica::Regex
   #    no assertion (`LiteralSet#exact?`): the prefilter finds the match.
   # 2. **Lazy DFA**, forward for the end and reverse for the start, with
   #    the prefilter skipping ahead while the forward DFA is in its start
-  #    state, for every program without `\G`. A program whose matches are
-  #    short (`short_match`) finds the start with the forward DFA run
-  #    anchored from each start instead, and is searched that way while
-  #    the forward cache thrashes.
+  #    state, for every program without `\G`. The reverse DFA is widened
+  #    to read classes backward (`widen_reverse`) once its states grow
+  #    wide. A program whose matches are short (`short_match`) finds the
+  #    start with the forward DFA run anchored from each start while the
+  #    reverse cache thrashes, and is searched that way while the forward
+  #    cache thrashes.
   # 3. **Pike VM** (span layout) when neither applies, under
   #    `CompileOptions::FirstLine` or `EndAnchored`, and whenever a lazy DFA
   #    gives up (cache thrash, a full `CachePool`, a Unicode word assertion
@@ -41,6 +43,7 @@ module Mica::Regex
     # The lazily built parts are published through atomics, so a search
     # on another thread that sees one sees it fully built.
     @reverse = Atomic(LazyDFA?).new(nil)
+    @reverse_with_reversed_classes = Atomic(LazyDFA?).new(nil)
     @one_pass = Atomic(OnePassDFA?).new(nil)
     # Set (after @one_pass) once the one-pass build ran, as its result may
     # be nil.
@@ -87,7 +90,8 @@ module Mica::Regex
       true
     end
 
-    # The reverse lazy DFA (built on first use), or nil.
+    # The reverse lazy DFA (built on first use; replaced once by
+    # `widen_reverse`), or nil.
     def reverse : LazyDFA?
       return nil unless @forward
       if built = @reverse.get
@@ -98,6 +102,41 @@ module Mica::Regex
         return built if built
         built = LazyDFA.new(@program, @byte_classes, true)
         @reverse.set(built)
+        built
+      end
+    end
+
+    # A reverse DFA state holding more NFA states than this makes
+    # `widen_reverse` worth its one-time cost.
+    WIDE_REVERSE_KEY = 128
+
+    # Replaces the reverse DFA with one that reads each class backward
+    # through its `ReversedClass`, once: a search whose reverse states grow
+    # wider than `WIDE_REVERSE_KEY` NFA states calls it (large Unicode
+    # classes next to non-ASCII text). Reversing a class costs milliseconds
+    # the first time in a process, so only programs that need it pay.
+    def widen_reverse : Nil
+      current = @reverse.get
+      return if current && current.with_reversed_classes?
+      return if @program.list_of_class_blocks.empty?
+      widened = reverse_with_reversed_classes || return
+      @mutex.synchronize { @reverse.set(widened) }
+    end
+
+    # The reverse DFA that reads each class backward through its
+    # `ReversedClass` (built on first use), or nil when the program needs
+    # the Pike VM. `widen_reverse` makes it the reverse DFA;
+    # `Engine::ReversedClasses` uses it from the start.
+    def reverse_with_reversed_classes : LazyDFA?
+      return nil unless @forward
+      if built = @reverse_with_reversed_classes.get
+        return built
+      end
+      @mutex.synchronize do
+        built = @reverse_with_reversed_classes.get
+        return built if built
+        built = LazyDFA.new(@program, @byte_classes, true, with_reversed_classes: true)
+        @reverse_with_reversed_classes.set(built)
         built
       end
     end
@@ -234,8 +273,15 @@ module Mica::Regex
     end
 
     # The reverse cache, as `forward_cache`.
+    # A cache made for an earlier reverse DFA (see
+    # `SearchPlan#widen_reverse`) is evicted and replaced.
     def reverse_cache(dfa : LazyDFA) : DFACache?
-      @reverse_cache ||= DFACache.reserve?(dfa, @pool)
+      cache = @reverse_cache
+      if cache && !cache.dfa.same?(dfa)
+        cache.evict
+        cache = @reverse_cache = nil
+      end
+      cache || (@reverse_cache = DFACache.reserve?(dfa, @pool))
     end
 
     # True when *haystack* is the very `String` this lease validated last:

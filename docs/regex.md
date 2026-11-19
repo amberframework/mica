@@ -385,7 +385,7 @@ it did in R2) picks the fastest correct path for each search:
 |---|---|---|---|
 | 1 | **Literal search** | the pattern is a finite set of literals with no assertion (`LiteralSet#exact?`), and the search is not anchored | O(n) prefilter scan plus the literal bytes compared at each candidate |
 | 1 | **Lazy DFAs**: forward for `e`, reverse for `s` | every program without `\G`, unless `FirstLine` or `EndAnchored` is set | one table read per byte; O(m) per state built |
-| 1 | **Forward DFA from each start** ("Short matches"): finds `s` for a program whose matches span at most 256 bytes, and searches it once its forward cache thrashes | the program has a match bound | at most `longest` + 1 table reads per start |
+| 1 | **Forward DFA from each start** ("Short matches"): finds `s` for a program whose matches span at most 256 bytes while its reverse cache thrashes, and searches it while its forward cache thrashes | the program has a match bound | at most `longest` + 1 table reads per start |
 | 1 | **Pike VM**, span layout | otherwise, and whenever a lazy DFA gives up | O(m·(n + 1)) |
 | 2 | **One-pass DFA** | captures asked for and the pattern is one-pass | O(L + c) |
 | 2 | Bounded backtracker, then Pike VM | as in R2 | as in R2 |
@@ -403,9 +403,11 @@ the work budget and the deadline hold on every path.
 `Engine` (internal, for specs, fuzzers and benchmarks) forces a path:
 `Auto` (all of the above), `NoAccelerators` (the lazy DFAs and the
 one-pass DFA without the literal search and prefilters), `EachStart` (as
-`NoAccelerators`, with every unanchored search of a program whose matches
-are short made from each start; see "Short matches"), `TwoPhase` (R2's
-two phases), `PikeVM` and `Backtracker`.
+`NoAccelerators`, with every unanchored search and every match start of a
+program whose matches are short made from each start; see "Short
+matches"), `ReversedClasses` (as `NoAccelerators`, with every match start
+found by the reverse DFA reading classes backward; see "Lazy DFA"),
+`TwoPhase` (R2's two phases), `PikeVM` and `Backtracker`.
 
 **Calls reuse their workspaces.** A program keeps one *hot lease*: the
 lazy-DFA caches, the Pike VM and backtracker workspaces and the searcher
@@ -433,6 +435,23 @@ do, into a `DFACache` leased for the search:
   part), and the scan from `e` back to the search start records every
   position where `[s, e)` matches; the smallest is the start, because the
   forward match starts where the leftmost match starts.
+- **Classes read backward.** A class compiles to a trie of UTF-8
+  sequences sharing their leading bytes; turned around, a continuation
+  byte read backward fits the last byte of every sequence that allows it,
+  so a reverse state for `\w` or `\p{L}` next to Cyrillic text held about
+  1,100 to 1,800 NFA states. The compiler records each class of more than
+  one state (`Program::ClassBlock`), and once a reverse search builds a
+  state wider than 128 NFA states, the plan widens its reverse DFA (once):
+  each class nothing else leads into is read through its `ReversedClass`,
+  the trie of its reversed sequences made deterministic by the subset
+  construction (as Rust regex compiles its reverse NFA), so a byte read
+  backward reaches one node. Reverse states then hold a few NFA states
+  (`\b\w{12,}\b` over Russian subtitles: about 7), and that search goes
+  from 56 ms to 0.5 ms. Reversing a class costs a few milliseconds the
+  first time; the result is memoized process-wide by the class's shape
+  (at most 256 classes), so only programs that meet wide reverse states
+  pay, once. A class whose reversed form would pass 8 nodes per forward
+  state keeps its turned-around edges.
 - **Assertions** are decided when a transition is built: a state carries
   what the bytes already read say (start or end of text, previous byte a
   line feed, an ASCII word character, a continuation byte, not ASCII), and
@@ -475,12 +494,12 @@ a bound uses it twice:
   leftmost-first match, the start is the first position, from
   `max(offset, e − longest)`, where the forward DFA run anchored reaches
   any match: no earlier position starts one, since the match is leftmost,
-  and the match is at most `longest` bytes long. This replaces the
-  reverse DFA, whose states for large Unicode classes hold hundreds of NFA
-  states each (read backward, a continuation byte fits the last byte of
-  every UTF-8 sequence that allows it): `\p{L}{8,13}` over Russian text
-  built 3,091 reverse states of about 1,100 NFA states each for 3,475
-  matches.
+  and the match is at most `longest` bytes long. This takes the reverse
+  DFA's place while the reverse cache thrashes (with the same periodic,
+  backed-off retries as below) and when the reverse DFA gives up, so such
+  a search never falls back to the Pike VM. The alternation of
+  `\p{L}{14}` down to `\p{L}{5}` over Russian text goes from 1.9 s to
+  37 ms.
 - **Searching from each start** (`LazyDFA#find_from_each_start`). A
   forward cache that is cleared with fewer than 10 bytes read per state
   built since its last clear is marked thrashing, and the unanchored
@@ -696,7 +715,9 @@ the prefilters and the literal search take part) and searches each one
 over every string up to length 6 over the alphabet `a`, `b`, `é`, newline
 (5,461 strings) on every engine path: the default path with and without
 captures (accelerators on), the same with the literal accelerators off,
-the path from each start (`Engine::EachStart`, also iterated),
+the path from each start (`Engine::EachStart`, also iterated), the
+reverse DFA reading classes backward (`Engine::ReversedClasses`, also
+iterated),
 R2's two phases, a Pike VM with every slot, the bounded backtracker,
 `matches?` on the default, unaccelerated and Pike VM paths, and a whole
 `String#scan`-style iteration on one searcher (later searches start inside
@@ -768,10 +789,9 @@ exception, within the work budget, deterministically.
   thrashes and the Pike VM runs over tens of thousands of states), and
   the per-call cost of very short searches. DFA blowups such as
   `[a-q][^u-z]{13}x` are searched from each start ("Short matches").
-  Unbounded patterns over large Unicode classes (`\b\w{12,}\b` over
-  Russian text) still pay for wide reverse-DFA states; a reverse program
-  compiled from reversed UTF-8 sequences, as Rust regex builds it, would
-  keep those states small. A code-point-level class state, shared by every engine, is
+  Reversing a class (see "Lazy DFA") costs a few milliseconds once per
+  process; building it from the code point set rather than by subset
+  construction over the trie would cut that. A code-point-level class state, shared by every engine, is
   the design change that closes the first two.
 - The reverse-suffix and reverse-inner literal optimizations (roadmap
   6.2.2, with the 2·n reverse-byte budget), which would skip to a required

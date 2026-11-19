@@ -83,6 +83,8 @@ module Mica::Regex
     getter program : Program
     getter byte_classes : ByteClasses
     getter? reverse : Bool
+    # True for a reverse DFA that reads classes through `ReversedClass`.
+    getter? with_reversed_classes : Bool
     # Entries per state in the transition table: one per class, then the
     # end of input, then (forward) a line feed that ends the haystack.
     getter stride : Int32
@@ -94,7 +96,10 @@ module Mica::Regex
     # plain class or an edge symbol.
     @word_offset : Int32
 
-    def initialize(@program : Program, @byte_classes : ByteClasses, @reverse : Bool)
+    # A reverse DFA *with_reversed_classes* reads each class backward
+    # through its `ReversedClass` (see `SearchPlan#widen_reverse`).
+    def initialize(@program : Program, @byte_classes : ByteClasses, @reverse : Bool,
+                   @with_reversed_classes : Bool = false)
       looks = LazyDFA.looks_used(@program)
       @unicode_words = looks.any? { |kind| LazyDFA.unicode_word?(kind) }
       class_count = @byte_classes.class_count
@@ -104,7 +109,7 @@ module Mica::Regex
       # so a row offset leaves two low bits free for flags (see `find_end`).
       symbols = @unicode_words ? @word_offset + class_count : @word_offset
       @stride = (symbols + 3) & ~3
-      @reverse_nfa = @reverse ? ReverseNFA.new(@program) : nil
+      @reverse_nfa = @reverse ? ReverseNFA.new(@program, @with_reversed_classes) : nil
       line_start = looks.includes?(Program::LookKind::StartOfLine)
       text_start = looks.includes?(Program::LookKind::StartOfText)
       text_end = looks.includes?(Program::LookKind::EndOfText)
@@ -128,6 +133,16 @@ module Mica::Regex
       relevant |= PREVIOUS_WORD if ascii_words
       relevant |= PREVIOUS_UNICODE_WORD if @unicode_words
       @relevant_flags = relevant
+    end
+
+    # The NFA states a DFA state can hold: the program's, or (reverse) the
+    # `ReverseNFA`'s nodes.
+    def node_count : Int32
+      if reverse_nfa = @reverse_nfa
+        reverse_nfa.node_count
+      else
+        @program.state_count
+      end
     end
 
     # True when the lazy DFA can run *program*: everything but `\G`.

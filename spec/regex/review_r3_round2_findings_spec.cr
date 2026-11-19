@@ -4,7 +4,7 @@ require "../spec_helper"
 # in one pattern, and the per-cache ceiling on a cache's first reservation.
 private UNTRUSTED = Mica::Regex::CompileLimits::UNTRUSTED_PATTERN
 private REQUEST   = Mica::Regex::SearchLimits::REQUEST
-private ENGINES   = {Mica::Regex::Engine::Auto, Mica::Regex::Engine::NoAccelerators, Mica::Regex::Engine::EachStart, Mica::Regex::Engine::TwoPhase,
+private ENGINES   = {Mica::Regex::Engine::Auto, Mica::Regex::Engine::NoAccelerators, Mica::Regex::Engine::EachStart, Mica::Regex::Engine::ReversedClasses, Mica::Regex::Engine::TwoPhase,
                      Mica::Regex::Engine::PikeVM, Mica::Regex::Engine::Backtracker}
 
 # Every non-overlapping match of *program* in *haystack* on *engine*, as

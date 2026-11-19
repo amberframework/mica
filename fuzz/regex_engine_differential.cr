@@ -11,6 +11,9 @@
 # - the same with every unanchored search of a program whose matches are
 #   short made from each start (`Engine::EachStart`), the path the default
 #   one takes once its forward cache thrashes;
+# - the same with every match start found by the reverse DFA reading each
+#   class backward (`Engine::ReversedClasses`), the reverse DFA the default
+#   path widens to;
 # - R2's two-phase search (Pike VM span, then the backtracker or a Pike
 #   VM over the span);
 # - one Pike VM pass with every slot;
@@ -130,6 +133,10 @@ module EngineDifferential
     iterated = scan(program, haystack, Mica::Regex::Engine::Auto)
     iterated_two_phase = scan(program, haystack, Mica::Regex::Engine::TwoPhase)
     return "scan #{iterated} vs two-phase scan #{iterated_two_phase}" unless iterated == iterated_two_phase
+    reversed = find(program, haystack, Mica::Regex::Engine::ReversedClasses, true)
+    return "reversed classes #{reversed} vs two-phase #{two_phase}" unless reversed == two_phase
+    reversed_scan = scan(program, haystack, Mica::Regex::Engine::ReversedClasses)
+    return "reversed classes scan #{reversed_scan} vs #{iterated_two_phase}" unless reversed_scan == iterated_two_phase
     check_each_start(program, haystack, two_phase, iterated_two_phase)
   end
 
