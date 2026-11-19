@@ -41,19 +41,18 @@ module Mica::Regex
     # a state's longest path to the match state is known once its
     # successors' are, and a successor still on the stack is a loop.
     def self.longest_match(program : Program) : Int32?
-      states = program.list_of_states
       # UNSEEN, ON_STACK, or the longest path in bytes.
-      longest = Array(Int32).new(states.size, UNSEEN)
+      longest = Array(Int32).new(program.state_count, UNSEEN)
       list_of_pending = [program.start_state]
       while index = list_of_pending.last?
         if longest[index] == UNSEEN
           longest[index] = ON_STACK
-          return nil unless push_successors(program, index, states[index], longest, list_of_pending)
+          return nil unless push_successors(program, index, program.state_at(index), longest, list_of_pending)
           next
         end
         list_of_pending.pop
         next if longest[index] >= 0
-        state = states[index]
+        state = program.state_at(index)
         result = case state.kind
                  when .byte_range?
                    longest[state.next_state] + 1
@@ -110,11 +109,10 @@ module Mica::Regex
     # nothing), or an empty list when they are more than `MAX_FINAL_BYTES`
     # or the start state reaches the match state reading nothing.
     def self.final_bytes(program : Program) : Array(UInt8)
-      states = program.list_of_states
       # The states that reach a match state reading nothing, found by
       # walking the steps that read nothing backward from the match states.
-      list_of_predecessors = Array(Array(Int32)?).new(states.size, nil)
-      states.each_with_index do |state, index|
+      list_of_predecessors = Array(Array(Int32)?).new(program.state_count, nil)
+      program.each_state do |state, index|
         case state.kind
         when .split?
           (list_of_predecessors[state.next_state] ||= [] of Int32) << index
@@ -123,9 +121,9 @@ module Mica::Regex
           (list_of_predecessors[state.next_state] ||= [] of Int32) << index
         end
       end
-      reaches_match = Array(Bool).new(states.size, false)
+      reaches_match = Array(Bool).new(program.state_count, false)
       list_of_pending = [] of Int32
-      states.each_with_index do |state, index|
+      program.each_state do |state, index|
         next unless state.kind.match?
         reaches_match[index] = true
         list_of_pending << index
@@ -140,7 +138,7 @@ module Mica::Regex
       none = [] of UInt8
       return none if reaches_match[program.start_state]
       list_of_final_bytes = [] of UInt8
-      states.each_with_index do |state, index|
+      program.each_state do |state, index|
         if state.kind.byte_range?
           next unless reaches_match[state.next_state]
           return none unless add_final_bytes(list_of_final_bytes, state.low, state.high)

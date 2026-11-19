@@ -103,12 +103,11 @@ module Mica::Regex
     # True when every path from *program*'s start state reaches a
     # `StartOfText` assertion before it reads a byte or matches.
     def self.anchored_start?(program : Program) : Bool
-      states = program.list_of_states
       visited = Set(Int32).new
       list_of_pending = [program.start_state]
       while index = list_of_pending.pop?
         next unless visited.add?(index)
-        state = states[index]
+        state = program.state_at(index)
         case state.kind
         when .split?
           list_of_pending << state.next_state << state.alternate

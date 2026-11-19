@@ -329,12 +329,16 @@ byte ranges in a trie, so a class emits at most the byte ranges the size
 preflight counted for it). A large class (16 ranges or more, such as `\w`
 or `\p{L}`, or any class reaching three-byte sequences, such as `.` or
 `[^"']`) is built once per process as a minimal automaton, its equal
-suffixes sharing states. A program copies only its states (one memory
-copy, relocated in place): their `Sparse` states read the class's
-transitions from one table shared by every program and copy
+suffixes sharing states. A program holds no copy of those states: each
+copy is one record (`Program::ClassCopy`: the automaton, the copy's first
+state number and its exit), numbered after the states the program holds,
+and the engines read a copy's state from the automaton in place
+(`Program#state_at`). Its `Sparse` states read the class's transitions
+from one table shared by every program and copy
 (`Program#list_of_shared_tables`, targets relative to the reading state),
-so a copy of `\w` adds 354 states and no transitions. The preflight
-counts its exact states.
+so a copy of `\w` adds 354 state numbers, one record and no transitions,
+and `\b\w{25,}\b` compiles in about 2.5 µs instead of 15. The preflight
+counts its exact states, and every bound in m counts the copies' states.
 A class of one escape or property lowers to a set shared by the process,
 and so does every written class of up to 32 items (`[0-9a-f]`, kept for
 up to 512 classes, the table emptied and refilled when full), each ASCII
@@ -419,7 +423,7 @@ it did in R2) picks the fastest correct path for each search:
 |---|---|---|---|
 | 1 | **Required bytes**: no engine when the haystack lacks a byte every match reads (see "Required bytes") | `Auto` | one `memchr` pass per required byte, at most once per call |
 | 1 | **Literal search** | the pattern is a finite set of literals with no assertion (`LiteralSet#exact?`), and the search is not anchored | O(n) prefilter scan plus the literal bytes compared at each candidate |
-| 1 | **One-pass search**: span and groups in one pass | the pattern is one-pass and the search is anchored with groups wanted, or the pattern has prefix literals: tried at each prefilter candidate (see "Short searches") | one transition per byte read |
+| 1 | **One-pass search**: span and groups in one pass | the pattern is one-pass and the search is anchored with groups wanted (once a search built the one-pass DFA, or when the forward DFA has read max(4096, 64·m) bytes undecided; a DFA with no left-out paths then reads to the match end), or the pattern has prefix literals: tried at each prefilter candidate (see "Short searches") | one transition per byte read |
 | 1 | **Lazy DFAs**: forward for `e`, reverse for `s` | every program without `\G`, unless `FirstLine` or `EndAnchored` is set | one table read per byte; O(m) per state built |
 | 1 | **Forward DFA from each start** ("Short matches"): finds `s` for a program whose matches span at most 512 bytes while its reverse cache thrashes, and searches it while its forward cache thrashes | the program has a match bound | at most `longest` + 1 table reads per start |
 | 1 | **Pike VM**, span layout | otherwise, and whenever a lazy DFA gives up | O(m·(n + 1)) |
@@ -428,7 +432,12 @@ it did in R2) picks the fastest correct path for each search:
 
 While the forward DFA sits in its start state, the prefilter (when the
 pattern has prefix literals) skips to the next position where a literal
-starts. A pattern whose every match starts at `\A` is searched anchored,
+starts. A DFA state that loops to itself (`.*`, `[^"]*`, and the start
+state of a pattern without literals) is stepped in a run whose table
+loads do not wait on each other; after a run shorter than 32 bytes the
+forward DFA steps byte by byte for the next 1,024, so the letters of a
+word under `\w+` cost nothing extra. The one-pass DFA steps such states
+the same way. A pattern whose every match starts at `\A` is searched anchored,
 with no reverse DFA. A lazy DFA gives up, and the search runs on the Pike
 VM, when its cache thrashes or when the `CachePool` has no room. Once a DFA gives up in a call, the
 call's later searches go straight to the Pike VM, so the work a thrashing

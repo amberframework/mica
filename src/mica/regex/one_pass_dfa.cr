@@ -326,7 +326,6 @@ module Mica::Regex
 
     private def explore(dfa_state : Int32) : Bool
       class_count = @byte_classes.class_count
-      states = @program.list_of_states
       stack = [Path.new(@list_of_roots[dfa_state], 0_u64, 0_u32)]
       matched = false
       while path = stack.pop?
@@ -336,7 +335,7 @@ module Mica::Regex
         while true
           return false if @seen[current] == dfa_state
           @seen[current] = dfa_state
-          state = states[current]
+          state = @program.state_at(current)
           case state.kind
           when .byte_range?
             @list_of_shadows[dfa_state] = true if matched

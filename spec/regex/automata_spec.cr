@@ -149,6 +149,34 @@ describe "Mica::Regex R3 engines" do
         end
       end
     end
+
+    it_satisfies "REGEX-R3-differential", "reads each copy of a large class in place, holding one record per copy" do
+      long_words = program("\\b\\w{25,}\\b")
+      # One copy of `\w` alone: the states of its memoized automaton.
+      word = program("\\w").list_of_class_copies.first.list_of_template_states.size
+      word.should be > 300
+      long_words.list_of_class_copies.size.should eq(25)
+      long_words.held_state_count.should be < 16
+      long_words.state_count.should eq(long_words.held_state_count + 25 * word)
+      long_words.list_of_states.size.should eq(long_words.state_count)
+      long_words.list_of_class_copies.each do |copy|
+        copy.list_of_template_states.size.should eq(word)
+        copy.first_state.should be >= long_words.held_state_count
+      end
+    end
+
+    it_satisfies "REGEX-R3-differential", "finds the same spans on every engine path through class copies" do
+      haystack = "short words, then Donaudampfschifffahrtsgesellschaftskapitän and " \
+                 "Привет_Привет_Привет_Привет_мир, ok\n" + "abcdefghijklmnopqrstuvwxyzé" * 3
+      ["\\b\\w{25,}\\b", "(\\w{2,4})+\\s", "\\w{3}(\\pL{2})?", "(?:\\pL{0,2}|\\d)*_", "^\\w{25}$", "(?m)^\\w{25,}$",
+       "[^\\s,]{20}", "(?i)\\w{5}k\\w*"].each do |source|
+        expected = span(source, haystack, Mica::Regex::Engine::PikeVM).first
+        Mica::Regex::Engine.values.each do |engine|
+          next if engine.backtracker? && !Mica::Regex::BoundedBacktracker.fits?(program(source), haystack.bytesize)
+          span(source, haystack, engine).first.should eq(expected), "#{source} on #{engine}"
+        end
+      end
+    end
   end
 
   describe "literal sets and prefilters" do

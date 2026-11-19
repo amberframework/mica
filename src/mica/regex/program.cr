@@ -74,8 +74,12 @@ module Mica::Regex
     # (see `ReverseNFA`).
     record ClassBlock, first_state : Int32, end_state : Int32, entry : Int32, exit : Int32
 
-    # Every state, indexed by number.
-    getter list_of_states : Array(State)
+    # A copy of a large class's memoized automaton (`ClassMemo::Block`) that
+    # the program reads in place rather than holding its states: states
+    # `first_state` up to `first_state + list_of_template_states.size` are
+    # the template's, its `Sparse` states reading shared table `table_id`
+    # and its exit leading to `exit` (see `state_at`).
+    record ClassCopy, first_state : Int32, list_of_template_states : Array(State), table_id : UInt8, exit : Int32
     # The ranges of every `Sparse` state.
     getter list_of_transitions : Array(Transition)
     # The state every search starts from.
@@ -106,12 +110,83 @@ module Mica::Regex
     # `next_state` (the state after the class).
     SHARED_EXIT = Int32::MIN
 
-    def initialize(@list_of_states : Array(State), @list_of_transitions : Array(Transition), @start_state : Int32,
+    # The states the program holds: numbers 0 up to `held_state_count`.
+    # The class copies (`list_of_class_copies`) number after them.
+    @list_of_held_states : Array(State)
+    # The copies of large classes the program reads in place, in state
+    # order, numbered from `held_state_count` on.
+    getter list_of_class_copies : Array(ClassCopy)
+    @state_count : Int32
+
+    def initialize(@list_of_held_states : Array(State), @list_of_transitions : Array(Transition), @start_state : Int32,
                    @capture_count : Int32, @list_of_group_names : Array(Ast::GroupName), @options : CompileOptions,
                    @backtracker_allowance : Int64, @source_end : Ast::SourceEnd = Ast::SourceEnd::Closed,
                    @literal_set : LiteralSet? = nil,
                    @list_of_class_blocks : Array(ClassBlock) = [] of ClassBlock,
-                   @list_of_shared_tables : Array(Array(Transition)) = [] of Array(Transition))
+                   @list_of_shared_tables : Array(Array(Transition)) = [] of Array(Transition),
+                   @list_of_class_copies : Array(ClassCopy) = [] of ClassCopy)
+      @state_count = @list_of_held_states.size
+      if last_copy = @list_of_class_copies.last?
+        @state_count = last_copy.first_state + last_copy.list_of_template_states.size
+      end
+    end
+
+    # The number of states the program holds (`list_of_class_copies` adds
+    # the rest).
+    def held_state_count : Int32
+      @list_of_held_states.size
+    end
+
+    # Returns state *index*, which must be below `state_count`: a held
+    # state, or a state of a class copy built from its template.
+    @[AlwaysInline]
+    def state_at(index : Int32) : State
+      return @list_of_held_states.unsafe_fetch(index) if index < @list_of_held_states.size
+      copied_state(index)
+    end
+
+    # Every state with its number, in order.
+    def each_state(& : State, Int32 ->) : Nil
+      @list_of_held_states.each_with_index { |state, index| yield state, index }
+      @list_of_class_copies.each do |copy|
+        copy.list_of_template_states.size.times do |offset|
+          index = copy.first_state + offset
+          yield state_of_copy(copy, offset), index
+        end
+      end
+    end
+
+    # Every state, indexed by number (built on each call: for specs and
+    # diagnostics; the engines read `state_at`).
+    def list_of_states : Array(State)
+      list = Array(State).new(state_count)
+      each_state { |state, _| list << state }
+      list
+    end
+
+    private def copied_state(index : Int32) : State
+      copies = @list_of_class_copies
+      low = 0
+      high = copies.size
+      while high - low > 1
+        middle = (low + high) >> 1
+        if copies.unsafe_fetch(middle).first_state <= index
+          low = middle
+        else
+          high = middle
+        end
+      end
+      copy = copies[low]
+      state_of_copy(copy, index - copy.first_state)
+    end
+
+    @[AlwaysInline]
+    private def state_of_copy(copy : ClassCopy, offset : Int32) : State
+      template = copy.list_of_template_states[offset]
+      return template.copy_with(low: copy.table_id, next_state: copy.exit) if template.kind.sparse?
+      target = template.next_state
+      return template if target == ClassMemo::NONE
+      template.copy_with(next_state: target == ClassMemo::EXIT ? copy.exit : copy.first_state + target)
     end
 
     # Published through an atomic, so a thread that sees the plan sees it
@@ -221,7 +296,7 @@ module Mica::Regex
       edges = state_count.to_i64 + @list_of_transitions.size
       return false if edges > allowance
       return true if @list_of_shared_tables.empty?
-      @list_of_states.each do |state|
+      each_state do |state, _|
         next unless state.kind.sparse? && state.low != 0
         edges += state.alternate
         return false if edges > allowance
@@ -241,7 +316,7 @@ module Mica::Regex
 
     # Returns the number of states (m in the bounds).
     def state_count : Int32
-      @list_of_states.size
+      @state_count
     end
 
     # Returns the capture slots of a full match (c in the bounds): two per
@@ -319,7 +394,7 @@ module Mica::Regex
 
     # Writes the program one state per line, for specs and diagnostics.
     def to_s(io : IO) : Nil
-      @list_of_states.each_with_index do |state, index|
+      each_state do |state, index|
         io << index << ": " << state.kind
         case state.kind
         when .byte_range?

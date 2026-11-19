@@ -192,7 +192,7 @@ module Mica::Regex
           state_index = @current_dense[index].to_i32
           index += 1
           meter.charge(1, at)
-          state = @program.list_of_states.unsafe_fetch(state_index)
+          state = @program.state_at(state_index)
           target = -1
           case state.kind
           when .match?
@@ -277,7 +277,7 @@ module Mica::Regex
           dense[size] = current.to_u32
           size += 1
           meter.charge(1, at)
-          state = @program.list_of_states.unsafe_fetch(current)
+          state = @program.state_at(current)
           case state.kind
           when .byte_range?, .sparse?, .match?
             meter.charge(slots_per_thread, at)
@@ -333,7 +333,7 @@ module Mica::Regex
           dense[size] = current.to_u32
           size += 1
           meter.charge(1, at)
-          state = @program.list_of_states.unsafe_fetch(current)
+          state = @program.state_at(current)
           case state.kind
           when .byte_range?, .sparse?, .match?
             meter.charge(1, at)

@@ -83,13 +83,31 @@ module Mica::Regex
     # `Program#list_of_shared_tables`); a `Sparse` state names one by its
     # position plus one, in a byte, so at most `MAX_SHARED_TABLES`.
     @list_of_shared_tables = [] of Array(Program::Transition)
+    # The copies of large classes the program reads in place
+    # (`Program::ClassCopy`), numbered from `COPY_BASE` while compiling.
+    @list_of_class_copies = [] of Program::ClassCopy
+    @copied_state_count = 0
+    # The states the held list may take before it grows to the bound.
+    @held_capacity : Int32
+    # The preflight's bound on states, where the held list grows to.
+    @state_bound : Int32
+
+    # While compiling, the state numbers of class copies start here, past
+    # any held state; `relocate_copies` moves them to follow the held
+    # states once their number is known.
+    private COPY_BASE = 1 << 30
+    # The held states allocated up front: a program bound to more starts
+    # with this many and grows to its bound only when it holds more, so
+    # one whose states are mostly class copies allocates no more.
+    private FIRST_HELD_STATES = 512
 
     private def initialize(@pattern : Hir::Pattern, @estimate : Int64, @limits : CompileLimits,
                            @ledger : AllocationLedger, @meter : Core::WorkMeter)
-      capacity = @estimate.clamp(1_i64, @limits.max_program_states).to_i32
+      @state_bound = @estimate.clamp(1_i64, @limits.max_program_states).to_i32
+      @held_capacity = Math.min(@state_bound, FIRST_HELD_STATES)
       @ledger.charge_object(instance_sizeof(Compiler), "the compiler", 0)
-      @ledger.charge_array(capacity, sizeof(Program::State), "the program states", 0)
-      @list_of_states = Array(Program::State).new(capacity)
+      @ledger.charge_array(@held_capacity, sizeof(Program::State), "the program states", 0)
+      @list_of_states = Array(Program::State).new(@held_capacity)
       # A program of few states has few transitions; it skips the bound
       # and grows its list as it emits.
       transition_bound = @estimate >= PRESIZE_MIN_STATES ? transitions_bound : 0_i64
@@ -201,6 +219,7 @@ module Mica::Regex
       run_tasks
       body = @list_of_values.pop
       start = emit_save(0, body)
+      start = relocate_copies(start)
       workspace_charge = check_pike_bytes
       group_names = @pattern.list_of_group_names
       literal_set = LiteralSet.extract(@pattern, @meter)
@@ -208,7 +227,52 @@ module Mica::Regex
       @ledger.charge_object(instance_sizeof(Program), "the program", 0)
       Program.new(@list_of_states, @list_of_transitions, start, @pattern.capture_count, group_names,
         @pattern.options, @limits.max_pike_bytes - workspace_charge, @pattern.source_end, literal_set,
-        @list_of_class_blocks, @list_of_shared_tables)
+        @list_of_class_blocks, @list_of_shared_tables, @list_of_class_copies)
+    end
+
+    # Numbers the class copies after the held states: every reference to a
+    # copy's state (from held states, own transitions, class blocks and
+    # other copies' exits) moves from `COPY_BASE` to the held count.
+    # Returns *start*, moved the same way.
+    private def relocate_copies(start : Int32) : Int32
+      return start if @list_of_class_copies.empty?
+      shift = @list_of_states.size - COPY_BASE
+      states = @list_of_states.to_unsafe
+      @list_of_states.size.times do |index|
+        charge_work
+        state = states[index]
+        if state.next_state >= COPY_BASE || state.alternate >= COPY_BASE
+          states[index] = state.copy_with(next_state: copied(state.next_state, shift), alternate: copied(state.alternate, shift))
+        end
+      end
+      transitions = @list_of_transitions.to_unsafe
+      @list_of_transitions.size.times do |index|
+        transition = transitions[index]
+        transitions[index] = transition.copy_with(target: transition.target + shift) if transition.target >= COPY_BASE
+      end
+      @list_of_class_copies.map! do |copy|
+        copy.copy_with(first_state: copy.first_state + shift, exit: copied(copy.exit, shift))
+      end
+      @list_of_class_blocks.map! do |block|
+        block.copy_with(first_state: copied(block.first_state, shift), end_state: copied(block.end_state, shift),
+          entry: copied(block.entry, shift), exit: copied(block.exit, shift))
+      end
+      copied(start, shift)
+    end
+
+    private def copied(target : Int32, shift : Int32) : Int32
+      target >= COPY_BASE ? target + shift : target
+    end
+
+    # Grows the held states to the preflight's bound when *added* more do
+    # not fit (see `FIRST_HELD_STATES`), charging the new list first.
+    private def reserve_held_states(added : Int32) : Nil
+      return if @list_of_states.size + added <= @held_capacity
+      @ledger.charge_array(@state_bound, sizeof(Program::State), "the program states", 0)
+      grown = Array(Program::State).new(@state_bound)
+      grown.concat(@list_of_states)
+      @list_of_states = grown
+      @held_capacity = @state_bound
     end
 
     private def charge_literal_set(literal_set : LiteralSet) : Nil
@@ -508,8 +572,14 @@ module Mica::Regex
     # `Program::ClassBlock` when they are more than one.
     private def compile_recorded_class(set : CodePointSet, next_state : Int32) : Int32
       first_state = @list_of_states.size
+      copies = @list_of_class_copies.size
       entry = compile_class(set, next_state)
       end_state = @list_of_states.size
+      if @list_of_class_copies.size > copies
+        copy = @list_of_class_copies.last
+        first_state = copy.first_state
+        end_state = first_state + copy.list_of_template_states.size
+      end
       if end_state - first_state > 1
         @ledger.charge_append(sizeof(Program::ClassBlock), "a class block", 0)
         @list_of_class_blocks << Program::ClassBlock.new(first_state, end_state, entry, next_state)
@@ -577,6 +647,7 @@ module Mica::Regex
       block_states = block.list_of_states
       block_transitions = block.list_of_transitions
       check_state_room(block_states.size)
+      reserve_held_states(block_states.size)
       @ledger.charge(sizeof(Program::Transition).to_i64 * AllocationLedger::GROWTH_FACTOR * block_transitions.size,
         "a class transition", 0)
       @meter.enforce { Core::Position.new(0_i64) } if @meter.charge(block_states.size)
@@ -615,26 +686,21 @@ module Mica::Regex
       @list_of_shared_tables.size.to_u8
     end
 
-    # Emits a memoized class block's states after the current ones, its
-    # exit leading to *next_state*, with its `Sparse` states reading their
-    # transitions from shared table *table_id* (one memory copy of the
-    # states, relocated in place; no transitions are copied), and returns
-    # its entry state.
+    # Adds a copy of a memoized class block, its exit leading to
+    # *next_state* and its `Sparse` states reading their transitions from
+    # shared table *table_id*, and returns its entry state. The program
+    # reads the copy's states from the block in place
+    # (`Program::ClassCopy`), so a copy costs one record however many
+    # states the class has: `\w{25}` holds 25 records, not 25 copies of
+    # `\w`'s 354 states.
     private def instantiate_shared(block : ClassMemo::Block, table_id : UInt8, next_state : Int32) : Int32
-      first_state = @list_of_states.size
       block_states = block.list_of_states
       check_state_room(block_states.size)
       @meter.enforce { Core::Position.new(0_i64) } if @meter.charge(block_states.size)
-      @list_of_states.concat(block_states)
-      states = @list_of_states.to_unsafe + first_state
-      block_states.size.times do |index|
-        state = states[index]
-        states[index] = if state.kind.sparse?
-                          state.copy_with(low: table_id, next_state: next_state)
-                        else
-                          state.copy_with(next_state: absolute_target(state.next_state, first_state, next_state))
-                        end
-      end
+      first_state = COPY_BASE + @copied_state_count
+      @ledger.charge_append(sizeof(Program::ClassCopy), "a class copy", 0)
+      @list_of_class_copies << Program::ClassCopy.new(first_state, block_states, table_id, next_state)
+      @copied_state_count += block_states.size
       block.entry + first_state
     end
 
@@ -824,6 +890,7 @@ module Mica::Regex
     # would be a compiler defect, and it is reported as one.
     private def add_state(state : Program::State) : Int32
       check_state_room(1)
+      reserve_held_states(1)
       charge_work
       @list_of_states << state
       @list_of_states.size - 1
@@ -832,7 +899,7 @@ module Mica::Regex
     # Raises unless *added* more states fit under `max_program_states` and
     # within the preflight bound.
     private def check_state_room(added : Int32) : Nil
-      count = @list_of_states.size.to_i64 + added
+      count = @list_of_states.size.to_i64 + @copied_state_count + added
       limit = @limits.max_program_states
       if count > limit
         raise CompileLimitError.new("max_program_states", limit, "A program of #{count} states", Core::Position.new(0_i64))
@@ -873,7 +940,7 @@ module Mica::Regex
     # has none. A search on a program with groups runs both phases in its
     # capture workspace, so no second workspace is ever alive beside it.
     private def check_pike_bytes : Int64
-      states = @list_of_states.size.to_i64
+      states = @list_of_states.size.to_i64 + @copied_state_count
       slots = (@pattern.capture_count.to_i64 + 1) * 2
       captures = @pattern.capture_count > 0
       bytes = PikeVM.workspace_charge(states, slots, captures)

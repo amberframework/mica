@@ -37,14 +37,13 @@ module Mica::Regex
     # With *reverse_classes*, each recorded class is read backward through
     # its `ReversedClass` (see the class description).
     def initialize(program : Program, reverse_classes : Bool = false)
-      states = program.list_of_states
       @accept_node = program.start_state
-      @start_node = states.index(&.kind.match?) || raise Mica::Error.new("internal error: the program has no match state")
+      @start_node = ReverseNFA.match_state(program)
       # The reversed classes' edges as {node, transition}; the forward
       # program's edges are counted, then placed, in two passes.
       list_of_class_edges = [] of {Int32, Program::Transition}
-      reversed = Array(Bool).new(states.size, false)
-      node_count = states.size
+      reversed = Array(Bool).new(program.state_count, false)
+      node_count = program.state_count
       if reverse_classes
         closed = ReverseNFA.closed_blocks(program)
         program.list_of_class_blocks.each_with_index do |block, index|
@@ -175,8 +174,14 @@ module Mica::Regex
 
     private BYTE_EDGE = -2
 
+    # The program's match state.
+    protected def self.match_state(program : Program) : Int32
+      program.each_state { |state, index| return index if state.kind.match? }
+      raise Mica::Error.new("internal error: the program has no match state")
+    end
+
     protected def self.each_forward_edge(program : Program, & : Int32, Int32, Int32, UInt8, UInt8 ->) : Nil
-      program.list_of_states.each_with_index do |state, source|
+      program.each_state do |state, source|
         case state.kind
         when .byte_range?
           yield source, state.next_state, BYTE_EDGE, state.low, state.high
