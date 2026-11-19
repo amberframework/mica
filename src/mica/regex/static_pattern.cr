@@ -13,13 +13,11 @@ module Mica::Regex
   # when the application builds, and a pattern the runtime compiler
   # rejects is a compile error at the call.
   #
-  # A pattern outside the static limits (a DFA over
-  # `Static::BuildTheTables::MAX_DFA_STATES` states, tables over
-  # `Static::BuildTheTables::MAX_TABLE_BYTES` bytes, a capture pass over
-  # `Static::BuildTheTables::MAX_SCRATCH_WORDS` words of stack, or `\G`)
-  # becomes a `StaticFallback` with the same methods, on the runtime
-  # engine, and the compiler prints a note saying why. The call site stays
-  # the same either way.
+  # A pattern outside the static limits (a DFA over 4,096 states in either
+  # direction, tables over 512 KiB, a capture pass over 64 KiB of stack, or
+  # `\G`; see docs/regex.md, "Static patterns") becomes a `StaticFallback`
+  # with the same methods, on the runtime engine, and the compiler prints a
+  # note saying why. The call site stays the same either way.
   #
   # ```
   # ROUTE_ID = Mica::Regex.static(/\A[0-9]+\z/)

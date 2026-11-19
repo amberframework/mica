@@ -57,6 +57,7 @@ it, one process at a time, so linkage and memory stay separate.
 | `pcre2-jit` | `bench/regex/pcre2_jit_runner.cr` | The baseline. Stdlib `Regex` exactly as a Crystal program uses it: `Regex.new` (UTF, UCP, DUPNAMES, then JIT compile), `match_at_byte_index` with a `MatchData` per match, `NO_UTF_CHECK` after the first search over a haystack (as `String#scan` does), groups read with `MatchData#[]?`. |
 | `pcre2-interpreter` | `bench/regex/pcre2_interpreter_runner.cr` | PCRE2's interpreter through a direct binding in the harness only: `pcre2_compile_8` with the same options and no JIT compile, so compile and cold-search times are the interpreter's own; `pcre2_match_8` with one reused match-data block. |
 | `mica` | `bench/regex/mica_runner.cr` | Mica::Regex through `bench/regex/src/regex_bench/engines/mica_engine.cr`. It references no stdlib `Regex`, so the program links no PCRE2. |
+| `mica-static` | `bench/regex/mica_static_runner.cr` | `Mica::Regex.static` (docs/regex.md, "Static patterns"): every corpus pattern is compiled while the runner builds (`bench/regex/scripts/write_static_patterns.rb` writes the table; `run.sh` does both when `--engines` names it). Its "compile" is a lookup in the runner's index plus the first read of the pattern's constant; the index (the harness's own, which an application does not have) is built before any case is timed. Searches use the same limits and deadlines as `mica`. A pattern outside the static limits reports `unsupported` (outside the static limits), so the row holds static searches only. Not in the default `--engines`. |
 
 The Mica adapter is written against the native API in the design
 (followup-17 section 6.2.6): `Mica::Regex.compile(pattern, dialect:,
@@ -170,3 +171,29 @@ toolchain, the commits and the settings.
 7. cases outside the comparison (unsupported, rebar count differences);
 8. every case, with the baseline's times and spread and each engine's
    ratio.
+
+## GC-free study tools (`bench/regex/gc_study/`)
+
+The tools behind the GC-free study (what the collector costs the runtime
+engine, and what `Mica::Regex.static` gains), kept for re-measuring:
+
+- `measure_allocations.cr` counts the heap allocations (calls and bytes)
+  of a compile, a process's first search and a warm search for every
+  corpus case, times each warm workload with the collector on and off
+  (interleaved), and records each pattern's table shapes.
+  `summarize_allocations.rb` turns its JSON lines into per-group tables.
+- `allocation_cost.cr` measures one `GC.malloc` at the sizes searches use.
+- `run_study.sh OUT_DIR [CASE_LIST]` builds the PCRE2-JIT, Mica and
+  Mica-static runners with `--release` and runs the cases a list names
+  (`case_list.txt`: the Amber corpus and the rebar cases whose haystack is
+  at most 4 KiB), and `compare_engines.rb` compares the three engines per
+  group. `run.sh --engines pcre2-jit,mica,mica-static` measures every case.
+- `static_differential.cr` checks the static path against the runtime
+  engine and PCRE2 on the Amber patterns and a generated sample
+  (`list_differential_patterns.cr`, `write_differential_patterns.rb`) over
+  generated Amber haystacks, and sums the heap bytes the static searches
+  allocate. `spec/regex/static_corpus_differential_spec.cr` is the
+  differential the spec suite runs on every corpus pattern.
+- `build_cost.rb OUT_DIR` measures the build-time program per corpus
+  pattern and the build of a small application with and without static
+  patterns, and the size of each binary.
