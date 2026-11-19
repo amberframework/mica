@@ -83,6 +83,14 @@ module Mica::Regex
       @list_of_ascii_loops = Array(Bool).new(@match_edges.size) { |state| ascii_loop?(state) }
     end
 
+    # :nodoc:
+    # The tables `Static::BuildTheTables` writes into an application's
+    # source: the steps, the edge index per cell, the match edge per state,
+    # the edges and the ASCII-loop flag per state.
+    def static_parts : {Array(Int32), Array(Int32), Array(Int32), Array(Edge), Array(Bool)}
+      {@steps, @table, @match_edges, @list_of_edges, @list_of_ascii_loops}
+    end
+
     private def ascii_loop?(state : Int32) : Bool
       row = state * @class_count
       class_of = @byte_classes.table
