@@ -104,13 +104,15 @@ module Mica::Regex
     @word_offset : Int32
     # The symbols of the ASCII bytes, found on first use (see
     # `list_of_ascii_symbols`).
-    @list_of_ascii_symbols : Array(Int32)? = nil
+    # Published with release ordering and read with acquire, so a thread
+    # that sees the list sees its contents.
+    @list_of_ascii_symbols = Atomic(Array(Int32)?).new(nil)
 
     # The distinct symbols of the ASCII bytes, for a forward DFA (none for
     # a reverse one; see `DFACache#mark_ascii_loop`), found on first use.
     # Threads racing here find the same list.
     def list_of_ascii_symbols : Array(Int32)
-      if found = @list_of_ascii_symbols
+      if found = @list_of_ascii_symbols.get(:acquire)
         return found
       end
       list = [] of Int32
@@ -123,7 +125,8 @@ module Mica::Regex
           list << symbol
         end
       end
-      @list_of_ascii_symbols = list
+      @list_of_ascii_symbols.set(list, :release)
+      list
     end
 
     # A reverse DFA *with_reversed_classes* reads each class backward

@@ -104,3 +104,97 @@ describe "Mica::Regex R3 sixth review findings" do
   end
 end
 
+# The declared type of instance variable *name* of *type*, as written by
+# the compiler.
+private macro instance_variable_type(type, name)
+  {% for variable in type.resolve.instance_vars %}
+    {% if variable.name.stringify == name %}
+      {{ variable.type.stringify }}
+    {% end %}
+  {% end %}
+end
+
+private def program_ivar_types : Array(String)
+  [instance_variable_type(Mica::Regex::Program, "materialized"),
+   instance_variable_type(Mica::Regex::Program, "materialized_blocks")]
+end
+
+private def lazy_dfa_ivar_type : String
+  instance_variable_type(Mica::Regex::LazyDFA, "list_of_ascii_symbols")
+end
+
+private def program_with_runs : Mica::Regex::Program
+  program = Mica::Regex::Expression.new("(?:\\w{2}x){50}q", compile_limits: TRUSTED).program
+  program.list_of_runs.size.should be > 0
+  program.runs_pending?.should be_true
+  program
+end
+
+# Runs *work* on *count* threads at once when the build has execution
+# contexts (`-Dpreview_mt -Dexecution_context`), else on as many fibers,
+# and waits for all of them.
+private def on_threads(count : Int32, &work : Int32 -> Nil) : Nil
+  done = Channel(Exception?).new(count)
+  spawner = parallel_spawner(count)
+  count.times do |index|
+    spawner.call(-> do
+      work.call(index)
+      done.send(nil)
+  rescue error
+    done.send(error)
+    end)
+  end
+  count.times do
+    if error = done.receive
+      raise error
+    end
+  end
+end
+
+{% if flag?(:execution_context) %}
+  private def parallel_spawner(count : Int32) : Proc(Proc(Nil), Nil)
+    context = Fiber::ExecutionContext::Parallel.new("round6", count)
+    ->(body : Proc(Nil)) { context.spawn { body.call }; nil }
+  end
+{% else %}
+  private def parallel_spawner(count : Int32) : Proc(Proc(Nil), Nil)
+    ->(body : Proc(Nil)) { spawn { body.call }; nil }
+  end
+{% end %}
+
+describe "Mica::Regex R3 sixth review findings, publication of lazily built arrays" do
+  it_satisfies "REGEX-R2-limits", "publishes a program's states and class blocks, and a lazy DFA's ASCII symbols, through release/acquire atomics" do
+    program_ivar_types.each(&.should(start_with("Atomic(")))
+    lazy_dfa_ivar_type.should start_with("Atomic(")
+  end
+
+  it_satisfies "REGEX-R2-limits", "gives every thread that builds or reads a program's states the same, complete arrays" do
+    20.times do
+      program = program_with_runs
+      expected = program_with_runs.list_of_states
+      seen = Array(Array(Mica::Regex::Program::State)?).new(8, nil)
+      on_threads(8) do |index|
+        if index.even?
+          seen[index] = program.list_of_states
+        else
+          # A reader that races the build reads each state through
+          # `state_at`, before or after the array is published.
+          states = Array(Mica::Regex::Program::State).new(program.state_count) { |state_index| program.state_at(state_index) }
+          seen[index] = states
+        end
+      end
+      seen.each { |states| states.should eq(expected) }
+      program.list_of_class_blocks.size.should eq(program_with_runs.list_of_class_blocks.size)
+    end
+  end
+
+  it_satisfies "REGEX-R2-limits", "gives every thread the same ASCII symbol list of a shared lazy DFA" do
+    program = Mica::Regex::Expression.new("[a-f]+x|[0-9]{3}", compile_limits: TRUSTED).program
+    dfa = program.plan.forward || raise "the program has no forward DFA"
+    other = Mica::Regex::Expression.new("[a-f]+x|[0-9]{3}", compile_limits: TRUSTED).program.plan.forward
+    expected = (other || raise "the program has no forward DFA").list_of_ascii_symbols
+    seen = Array(Array(Int32)?).new(8, nil)
+    on_threads(8) { |index| seen[index] = dfa.list_of_ascii_symbols }
+    seen.each { |symbols| symbols.should eq(expected) }
+  end
+end

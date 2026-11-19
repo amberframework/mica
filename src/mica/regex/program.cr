@@ -139,9 +139,13 @@ module Mica::Regex
 
     # The states not in a `ClassRun`, in order.
     @list_of_physical_states : Array(State)
-    # Every state, once built (see `list_of_states`).
-    @materialized : Array(State)?
-    @materialized_blocks : Array(ClassBlock)?
+    # Every state and class block, once built (see `list_of_states`).
+    # Published with release ordering and read with acquire, so a thread
+    # that sees an array sees it fully built: on ARM64 a plain store could
+    # reach another core before the array's contents. The blocks are
+    # published first, so a thread that sees the states sees the blocks.
+    @materialized = Atomic(Array(State)?).new(nil)
+    @materialized_blocks = Atomic(Array(ClassBlock)?).new(nil)
     # The class blocks the compiler recorded outside runs.
     @list_of_recorded_blocks : Array(ClassBlock)
     # The program's runs, in state order.
@@ -210,8 +214,8 @@ module Mica::Regex
       # A binary search over the runs, then the run it found.
       @run_reads_per_state = @list_of_runs.empty? ? 0 : @list_of_runs.size.bit_length + 1
       if @list_of_runs.empty?
-        @materialized = list_of_states
-        @materialized_blocks = list_of_class_blocks
+        @materialized_blocks.set(list_of_class_blocks, :release)
+        @materialized.set(list_of_states, :release)
       else
         @materialize_mutex = Mutex.new
       end
@@ -222,17 +226,17 @@ module Mica::Regex
     # searches read states through `state_at` and build nothing).
     @[AlwaysInline]
     def list_of_states : Array(State)
-      @materialized || materialize
+      @materialized.get(:acquire) || materialize
     end
 
     # The classes of more than one state, in emission order (built with
     # `list_of_states`).
     def list_of_class_blocks : Array(ClassBlock)
-      if blocks = @materialized_blocks
+      if blocks = @materialized_blocks.get(:acquire)
         return blocks
       end
       materialize
-      @materialized_blocks || raise Mica::Error.new("internal error: the program's class blocks were not built")
+      @materialized_blocks.get(:acquire) || raise Mica::Error.new("internal error: the program's class blocks were not built")
     end
 
     # State *index*, read without building `list_of_states`. Before the
@@ -240,7 +244,7 @@ module Mica::Regex
     # search over the runs: at most `run_reads_per_state` runs read.
     @[AlwaysInline]
     def state_at(index : Int32) : State
-      if states = @materialized
+      if states = @materialized.get(:acquire)
         states.unsafe_fetch(index)
       else
         run_state_at(index) { }
@@ -256,7 +260,7 @@ module Mica::Regex
     # lookups as it bounds the visits.
     @[AlwaysInline]
     def state_at(index : Int32, meter : SearchMeter, at : Int32) : State
-      if states = @materialized
+      if states = @materialized.get(:acquire)
         states.unsafe_fetch(index)
       else
         run_state_at(index) { meter.charge(1, at) }
@@ -274,13 +278,13 @@ module Mica::Regex
     # True while the program's runs have not been built into
     # `list_of_states` (for specs).
     def runs_pending? : Bool
-      @materialized.nil?
+      @materialized.get(:acquire).nil?
     end
 
     # Yields every state with its number, in order, without building
     # `list_of_states`: a run's states are worked out from its block.
     def each_state(& : State, Int32 ->) : Nil
-      if states = @materialized
+      if states = @materialized.get(:acquire)
         states.each_with_index { |state, index| yield state, index }
         return
       end
@@ -311,7 +315,7 @@ module Mica::Regex
     # of a copy). Reads each physical state and each run's block once,
     # without building `list_of_states`.
     def each_distinct_state(& : State, Int32 ->) : Nil
-      if states = @materialized
+      if states = @materialized.get(:acquire)
         states.each { |state| yield state, 1 }
         return
       end
@@ -369,7 +373,7 @@ module Mica::Regex
     private def materialize : Array(State)
       mutex = @materialize_mutex || raise Mica::Error.new("internal error: a program without runs has every state")
       mutex.synchronize do
-        if built = @materialized
+        if built = @materialized.get(:acquire)
           return built
         end
         states = Array(State).new(@state_count)
@@ -396,8 +400,8 @@ module Mica::Regex
           blocks << @list_of_recorded_blocks[recorded]
           recorded += 1
         end
-        @materialized_blocks = blocks
-        @materialized = states
+        @materialized_blocks.set(blocks, :release)
+        @materialized.set(states, :release)
         states
       end
     end
