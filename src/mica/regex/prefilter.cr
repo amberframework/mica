@@ -193,13 +193,22 @@ module Mica::Regex
     # True when *literal* occurs in *haystack* at *at*. Up to
     # `SHORT_LITERAL` bytes a byte loop beats a `memcmp` call; the first
     # byte is already known to match, and a one-byte literal needs no
-    # compare.
+    # compare. A longer literal (at most `LiteralSet::MAX_LITERAL_BYTES`) is
+    # compared eight bytes at a time, the last word overlapping the one
+    # before it, which also beats the call.
     @[AlwaysInline]
     protected def self.literal_fits_at?(haystack : Bytes, at : Int32, literal : Bytes) : Bool
       size = literal.size
       return false if at + size > haystack.size
       if size > SHORT_LITERAL
-        return LibC.memcmp(haystack.to_unsafe + at + 1, literal.to_unsafe + 1, size - 1) == 0
+        text = haystack.to_unsafe + at
+        bytes = literal.to_unsafe
+        offset = 0
+        while offset < size - 8
+          return false unless PrefilterScan.word_at(text + offset) == PrefilterScan.word_at(bytes + offset)
+          offset += 8
+        end
+        return PrefilterScan.word_at(text + size - 8) == PrefilterScan.word_at(bytes + size - 8)
       end
       index = 1
       while index < size
