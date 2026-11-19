@@ -388,7 +388,7 @@ module Mica::Regex
         lease = @lease || raise Mica::Error.new("internal error: no lease")
         if cache = lease.forward_cache(dfa)
           unless from_each_start?(cache, anchored)
-            found = dfa.find_end(cache, bytes, byte_index, anchored, true, prefilter_scan(bytes, anchored), @meter)
+            found = find_end_or_hand_over(dfa, cache, bytes, byte_index, anchored, true)
             judge_retry(cache)
             return found >= 0 unless found == LazyDFA::GAVE_UP
           end
@@ -618,7 +618,7 @@ module Mica::Regex
         finish = if cache.nil? || from_each_start?(cache, anchored)
                    LazyDFA::GAVE_UP
                  else
-                   dfa.find_end(cache, bytes, byte_index, anchored, false, prefilter_scan(bytes, anchored), @meter)
+                   find_end_or_hand_over(dfa, cache, bytes, byte_index, anchored, false)
                  end
         judge_retry(cache) if cache
         return false if finish == LazyDFA::NO_MATCH
@@ -765,6 +765,20 @@ module Mica::Regex
       return true unless cache.retry?
       @retry_from = {cache.states_built, cache.bytes_read}
       false
+    end
+
+    # Runs the forward DFA from *byte_index* (`LazyDFA#find_end`). When the
+    # search can go on from each start instead (unanchored, every match
+    # short), the DFA gives up at the first cache clear that finds it
+    # thrashing, rather than building `LazyDFA::MAX_CLEARS` caches' worth
+    # of states first: a program's first search over a long haystack then
+    # pays for one cache, not four.
+    private def find_end_or_hand_over(dfa : LazyDFA, cache : DFACache, bytes : Bytes, byte_index : Int32,
+                                      anchored : Bool, earliest : Bool) : Int32
+      cache.gives_up_when_thrashing = !anchored && !@plan.try(&.short_match).nil?
+      dfa.find_end(cache, bytes, byte_index, anchored, earliest, prefilter_scan(bytes, anchored), @meter)
+    ensure
+      cache.gives_up_when_thrashing = false
     end
 
     # Reports a retry of the unanchored DFA (see `from_each_start?`) to

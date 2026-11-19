@@ -28,6 +28,10 @@ module Mica::Regex
     getter states_built = 0_i64
     getter bytes_read = 0_i64
     @searches_since_thrash = 0
+    # Set by a search that has a cheaper way on when this cache thrashes
+    # (`LazyDFA#find_from_each_start`): a clear that finds it thrashing
+    # then gives up at once, rather than after `LazyDFA::MAX_CLEARS`.
+    setter gives_up_when_thrashing = false
     # The most NFA states one state built so far held, and how many states
     # built held more than `SearchPlan::WIDE_REVERSE_KEY`.
     getter widest_key = 0
@@ -230,13 +234,14 @@ module Mica::Regex
     end
 
     # Clears the cache, charging one operation per state discarded. Returns
-    # false when the cache is thrashing (see `LazyDFA`).
+    # false when the cache is thrashing (see `LazyDFA`), at the first clear
+    # that finds it so when `gives_up_when_thrashing` is set.
     private def clear(meter : SearchMeter) : Bool
       meter.charge(@list_of_keys.size, 0)
       @clears += 1
       sparse = @bytes_since_clear < LazyDFA::MINIMUM_BYTES_PER_STATE.to_i64 * @states_since_clear
       @thrashing = true if sparse
-      thrashing = @clears > LazyDFA::MAX_CLEARS && sparse
+      thrashing = sparse && (@gives_up_when_thrashing || @clears > LazyDFA::MAX_CLEARS)
       @transition_table.clear
       @list_of_marks.clear
       @list_of_keys.clear

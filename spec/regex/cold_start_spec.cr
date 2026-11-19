@@ -88,4 +88,22 @@ describe "Mica::Regex cold start" do
     program.each_distinct_state { |_, copies| states += copies }
     states.should eq(program.state_count)
   end
+  it_satisfies "REGEX-R3-first-search", "hands a thrashing unanchored DFA over to the search from each start at its first clear" do
+    random = Random.new(20261119)
+    letters = "abcdefghijklmnopqrst  "
+    haystack = String.build { |io| 200_000.times { io << letters[random.rand(letters.size)] } } + "a" + "b" * 80 + "x"
+    pool = Mica::Regex::CachePool.new(max_cache_bytes: 256_i64 * 1024)
+    program = Mica::Regex::Expression.new("[a-q][^u-z]{80}x", compile_limits: TRUSTED, cache_pool: pool).program
+    program.end_first_searches
+    searcher = Mica::Regex::Searcher.new(program, haystack, LIMITS, nil, Mica::Regex::Engine::Auto, pool)
+    found = searcher.find(0, NONE, false).try(&.dup)
+    searcher.finish
+    found.should eq(plan_span("[a-q][^u-z]{80}x", haystack))
+    found.should_not be_nil
+    plan = program.plan
+    dfa = plan.forward.should_not be_nil
+    cache = plan.lease(pool).forward_cache(dfa).should_not be_nil
+    cache.thrashing?.should be_true
+    cache.clears.should eq(1)
+  end
 end

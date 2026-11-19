@@ -463,7 +463,12 @@ the same way. A pattern whose every match starts at `\A` is searched anchored,
 with no reverse DFA. A lazy DFA gives up, and the search runs on the Pike
 VM, when its cache thrashes or when the `CachePool` has no room. Once a DFA gives up in a call, the
 call's later searches go straight to the Pike VM, so the work a thrashing
-cache wastes is spent once per call. Every path charges its work to the
+cache wastes is spent once per call. An unanchored forward DFA whose
+program has a match bound gives up at the first cache clear that finds it
+thrashing and goes on from each start in the same call, rather than
+after `LazyDFA::MAX_CLEARS` clears: a program's first search over a long
+haystack builds one cache's worth of states, not four
+(`[a-q][^u-z]{80}x` over 16 MB went from about 15 to 4.7 ms cold). Every path charges its work to the
 call's `SearchMeter` and reads the deadline at the same checkpoints, so
 the work budget and the deadline hold on every path.
 
