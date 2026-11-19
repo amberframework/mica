@@ -384,6 +384,7 @@ it did in R2) picks the fastest correct path for each search:
 | Phase | Path | When | Cost |
 |---|---|---|---|
 | 1 | **Literal search** | the pattern is a finite set of literals with no assertion (`LiteralSet#exact?`), and the search is not anchored | O(n) prefilter scan plus the literal bytes compared at each candidate |
+| 1 | **One-pass search**: span and groups in one pass | the pattern is one-pass and the search is anchored with groups wanted, or the pattern has prefix literals: tried at each prefilter candidate (see "Short searches") | one transition per byte read |
 | 1 | **Lazy DFAs**: forward for `e`, reverse for `s` | every program without `\G`, unless `FirstLine` or `EndAnchored` is set | one table read per byte; O(m) per state built |
 | 1 | **Pike VM**, span layout | otherwise, and whenever a lazy DFA gives up | O(m·(n + 1)) |
 | 2 | **One-pass DFA** | captures asked for and the pattern is one-pass | O(L + c) |
@@ -430,6 +431,21 @@ much as the cost per byte:
 - **No allocation for group 0.** `MatchData` holds the match's span in the
   value itself; a pattern without groups allocates nothing per call. The
   work budget of a repeated call reuses the one the searcher built last.
+- **One pass for a prefix-literal match.** Every match of a pattern with
+  prefix literals starts with one of them, so the first prefilter
+  candidate where an anchored match exists starts the leftmost match.
+  When the pattern is one-pass, the searcher runs the one-pass DFA as a
+  whole anchored search at each candidate, which finds the span and the
+  groups at once: no reverse DFA and no separate capture pass. An anchored
+  search that wants groups does the same at its offset. The one-pass DFA
+  leaves out the paths that rank below a match path; when that match path
+  does not hold (its `$` or `\b` fails) and nothing matches later, a
+  left-out path could still match, so the search hands over to the lazy
+  DFAs. The bytes a try reads that no match keeps (a failed try, or bytes
+  read past a match end while looking for a longer one) are counted per
+  call; past the haystack's size, or once the prefilter proves
+  ineffective, the call stops trying, so the one-pass search adds at most
+  O(n) to a call.
 - **Groups read on first use.** When only the bounded backtracker or the
   Pike VM can read a pattern's groups (the pattern is not one-pass),
   `match`, `match_at_byte_index` and `search` find the span alone and leave

@@ -58,7 +58,7 @@ describe "Mica::Regex R3 second review findings" do
     # each cache reserves no more than the ceiling.
     ceiling = 16_384_i64
     roomy = Mica::Regex::CachePool.new(max_bytes: 1_048_576_i64, max_cache_bytes: ceiling)
-    program = Mica::Regex::Expression.new("\\b[a-c]+d", compile_limits: UNTRUSTED).program
+    program = Mica::Regex::Expression.new("\\b[a-c]*[a-c]d", compile_limits: UNTRUSTED).program
     found = Mica::Regex::Searcher.new(program, "xx abcabd", REQUEST, nil, Mica::Regex::Engine::Auto, roomy)
     found.find(0, Mica::Regex::MatchOptions::None, false).try(&.to_a).should eq([3, 9])
     found.last_path.should eq(Mica::Regex::Searcher::Path::LazyDFA)

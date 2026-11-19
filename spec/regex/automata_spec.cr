@@ -31,8 +31,11 @@ describe "Mica::Regex R3 engines" do
     end
 
     it_satisfies "REGEX-R3-selection", "takes the lazy DFAs for patterns with assertions, classes and repetitions" do
-      span("\\bfoo\\b", "a foo b").should eq({[2_i64, 5_i64], Mica::Regex::Searcher::Path::LazyDFA})
-      span("(?m)^b$", "a\nb\n").should eq({[2_i64, 3_i64], Mica::Regex::Searcher::Path::LazyDFA})
+      span("\\bfo*o\\b", "a foo b").should eq({[2_i64, 5_i64], Mica::Regex::Searcher::Path::LazyDFA})
+      span("(?m)^b*b$", "a\nb\n").should eq({[2_i64, 3_i64], Mica::Regex::Searcher::Path::LazyDFA})
+      # A one-pass pattern runs on the one-pass search at each candidate
+      # of its prefix literal.
+      span("(?m)^b$", "a\nb\n").should eq({[2_i64, 3_i64], Mica::Regex::Searcher::Path::OnePass})
       span("[a-z]+X|[a-z]", "abc").should eq({[0_i64, 1_i64], Mica::Regex::Searcher::Path::LazyDFA})
     end
 
@@ -44,7 +47,8 @@ describe "Mica::Regex R3 engines" do
     end
 
     it_satisfies "REGEX-R3-dfa", "decides Unicode word assertions next to non-ASCII text on the lazy DFAs" do
-      found = searcher("\\bé", "a é")
+      # `[éè]*é` is not one-pass, so the search runs on the lazy DFAs.
+      found = searcher("\\b[éè]*é", "a é")
       found.find(0, Mica::Regex::MatchOptions::None, false).try(&.to_a).should eq([2, 4])
       found.dfa_gave_up?.should be_false
       found.last_path.should eq(Mica::Regex::Searcher::Path::LazyDFA)
@@ -74,7 +78,8 @@ describe "Mica::Regex R3 engines" do
     end
 
     it_satisfies "REGEX-R3-dfa", "reads $ and \\Z before a final line feed and multiline ^ as PCRE2 does" do
-      span("a$", "a\n").should eq({[0_i64, 1_i64], Mica::Regex::Searcher::Path::LazyDFA})
+      span("a$", "a\n").should eq({[0_i64, 1_i64], Mica::Regex::Searcher::Path::OnePass})
+      span("a*a$", "a\n").should eq({[0_i64, 1_i64], Mica::Regex::Searcher::Path::LazyDFA})
       span("a\\Z", "a\n\n").first.should be_nil
       span("(?m)^", "a\n").first.should eq([0, 0])
       found = searcher("(?m)^", "a\n")
@@ -170,9 +175,11 @@ describe "Mica::Regex R3 engines" do
     end
 
     it_satisfies "REGEX-R3-cache-pool", "runs a search on the Pike VM when the pool has no room for a cache" do
+      # The patterns of these specs are not one-pass, so their searches use
+      # the lazy DFAs and lease caches.
       # Room for a Pike VM workspace, not for one cache reservation step.
       pool = Mica::Regex::CachePool.new(max_bytes: 4096_i64, max_cache_bytes: 128_i64 * 1024)
-      found = searcher("[a-c]+d", "xxabcabd", Mica::Regex::Engine::Auto, pool)
+      found = searcher("[a-c]*[a-c]d", "xxabcabd", Mica::Regex::Engine::Auto, pool)
       found.find(0, Mica::Regex::MatchOptions::None, false).try(&.to_a).should eq([2, 8])
       found.dfa_gave_up?.should be_true
       found.last_path.should eq(Mica::Regex::Searcher::Path::PikeVM)
@@ -183,7 +190,7 @@ describe "Mica::Regex R3 engines" do
 
     it_satisfies "REGEX-R3-cache-pool", "raises SearchLimitError when the pool cannot supply a Pike VM workspace" do
       pool = Mica::Regex::CachePool.new(max_bytes: 1_i64, max_cache_bytes: 128_i64 * 1024)
-      found = searcher("[a-c]+d", "xxabcabd", Mica::Regex::Engine::Auto, pool)
+      found = searcher("[a-c]*[a-c]d", "xxabcabd", Mica::Regex::Engine::Auto, pool)
       error = expect_raises(Mica::Regex::SearchLimitError) do
         found.find(0, Mica::Regex::MatchOptions::None, false)
       end
@@ -199,9 +206,9 @@ describe "Mica::Regex R3 engines" do
       # workspace.
       step = Mica::Regex::CachePool::RESERVATION_BYTES
       pool = Mica::Regex::CachePool.new(max_bytes: step * 4 + 8192, max_cache_bytes: step)
-      first = program("[a-c]+d")
-      second = program("[d-f]+g")
-      third = program("[g-i]+j")
+      first = program("[a-c]*[a-c]d")
+      second = program("[d-f]*[d-f]g")
+      third = program("[g-i]*[g-i]j")
       run = ->(target : Mica::Regex::Program, haystack : String) do
         found = Mica::Regex::Searcher.new(target, haystack, LIMITS, nil, Mica::Regex::Engine::Auto, pool)
         span = found.find(0, Mica::Regex::MatchOptions::None, false).try(&.to_a)
@@ -229,12 +236,12 @@ describe "Mica::Regex R3 engines" do
       step = Mica::Regex::CachePool::RESERVATION_BYTES
       # Room for one expression's two caches and a Pike VM workspace.
       pool = Mica::Regex::CachePool.new(max_bytes: step * 2 + 8192, max_cache_bytes: step)
-      warm = Mica::Regex::Expression.new("[a-c]+d", compile_limits: TRUSTED, cache_pool: pool)
+      warm = Mica::Regex::Expression.new("[a-c]*[a-c]d", compile_limits: TRUSTED, cache_pool: pool)
       warm.match("xxabcabd", limits: LIMITS).try(&.[0]).should eq("abcabd")
       invalid = String.new(Bytes[0x61, 0xff, 0x62])
       expect_raises(Mica::EncodingError) { warm.match(invalid, limits: LIMITS) }
       expect_raises(Mica::DeadlineExceededError) { warm.match("xxabcabd", limits: LIMITS, timeout: -1.second) }
-      fresh = program("[d-f]+g")
+      fresh = program("[d-f]*[d-f]g")
       found = Mica::Regex::Searcher.open(fresh, "xxdefdeg", LIMITS, nil, pool)
       found.find(0, Mica::Regex::MatchOptions::None, false).try(&.to_a).should eq([2, 8])
       found.last_path.should eq(Mica::Regex::Searcher::Path::LazyDFA)

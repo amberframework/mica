@@ -76,6 +76,81 @@ module Mica::Regex
       take(@list_of_edges.unsafe_fetch(index), haystack, finish, search_start, slots)
     end
 
+    # Searches *haystack* anchored at *start* for the leftmost-first match
+    # (see `Searcher`'s one-pass search): from *start* it follows one
+    # transition per byte, writing the path's slots into *scratch*, and at
+    # each position whose state has a match path that holds, copies them
+    # with the match path's into *slots*. Every byte edge of a state with a
+    # match path ranks above it (the builder leaves out the paths after the
+    # match), so the search goes on while a transition exists and the last
+    # match recorded is the leftmost-first one.
+    #
+    # The paths the builder left out rank below a match path that the
+    # search may find does not hold here (its assertion fails, as `$` does
+    # before the end). Then a left-out path could still match, so when the
+    # search ends with no match recorded after such a position it returns
+    # `LazyDFA::GAVE_UP`, and the caller searches another way.
+    #
+    # Returns the match end, `LazyDFA::NO_MATCH` or `LazyDFA::GAVE_UP`, and
+    # the bytes read. O(L + c·k) for L bytes read and k positions with a
+    # match path.
+    def search(haystack : Bytes, start : Int32, search_start : Int32, slots : Slice(Int64), scratch : Slice(Int64),
+               meter : SearchMeter) : {Int32, Int32}
+      scratch.fill(PikeVM::UNSET)
+      state = 0
+      at = start
+      charged = start
+      size = haystack.size
+      found = LazyDFA::NO_MATCH
+      undecided = false
+      while true
+        index = @match_edges.unsafe_fetch(state)
+        if index >= 0
+          edge = @list_of_edges.unsafe_fetch(index)
+          if holds?(edge, haystack, at, search_start)
+            slots.copy_from(scratch.to_unsafe, slots.size)
+            write(edge, at, slots)
+            found = at
+            undecided = false
+          else
+            undecided = true
+          end
+        end
+        break if at >= size
+        if at - charged >= PrefilterScan::CHARGE_CHUNK
+          meter.charge(at - charged, at)
+          charged = at
+        end
+        index = @table.unsafe_fetch(state * @class_count + @byte_classes.class_of(haystack.unsafe_fetch(at)))
+        break if index < 0
+        edge = @list_of_edges.unsafe_fetch(index)
+        break unless take(edge, haystack, at, search_start, scratch)
+        state = edge.target
+        at += 1
+      end
+      meter.charge(at - charged + 1, charged)
+      {undecided ? LazyDFA::GAVE_UP : found, at - start}
+    end
+
+    private def holds?(edge : Edge, haystack : Bytes, at : Int32, search_start : Int32) : Bool
+      looks = edge.looks
+      while looks != 0
+        kind = looks.trailing_zeros_count
+        return false unless Look.holds?(Program::LookKind.new(kind.to_i32), haystack, at, search_start)
+        looks &= looks - 1
+      end
+      true
+    end
+
+    private def write(edge : Edge, at : Int32, slots : Slice(Int64)) : Nil
+      saved = edge.slots
+      while saved != 0
+        slot = saved.trailing_zeros_count
+        slots[slot] = at.to_i64
+        saved &= saved - 1
+      end
+    end
+
     private def take(edge : Edge, haystack : Bytes, at : Int32, search_start : Int32, slots : Slice(Int64)) : Bool
       looks = edge.looks
       while looks != 0

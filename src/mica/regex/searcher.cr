@@ -80,6 +80,7 @@ module Mica::Regex
       None
       Literal
       LazyDFA
+      OnePass
       PikeVM
       Backtracker
     end
@@ -96,6 +97,11 @@ module Mica::Regex
     @lease : SearchLease?
     @scan : PrefilterScan?
     @prefilter_off = false
+    # The one-pass search's scratch slots, and the bytes its tries read
+    # that no match kept in this call (see `find_one_pass`).
+    @one_pass_scratch : Slice(Int64)?
+    @one_pass_wasted_bytes = 0_i64
+    @one_pass_off = false
     # Searches started in this call (see `check_resumed_deadline`).
     @searches_started = 0
 
@@ -142,6 +148,8 @@ module Mica::Regex
       @line_feed_at = -1
       @scan.try(&.reset(@haystack.to_slice))
       @prefilter_off = false
+      @one_pass_wasted_bytes = 0_i64
+      @one_pass_off = false
       @searches_started = 0
       @dfa_gave_up = false
       @last_path = Path::None
@@ -265,9 +273,83 @@ module Mica::Regex
                                    captures : Bool) : Slice(Int64)?
       span = @span_slots
       want_captures = captures && @program.slot_count > 2
+      if one_pass = one_pass_search(anchored, end_anchored, want_captures)
+        found = find_one_pass(one_pass, bytes, byte_index, anchored)
+        unless found.nil?
+          return found ? @capture_slots : nil
+        end
+      end
       return nil unless find_span(bytes, byte_index, anchored, end_anchored, span, want_captures)
       return span unless want_captures
       capture_pass(bytes, byte_index, span[0].to_i32, span[1].to_i32, end_anchored)
+    end
+
+    # The one-pass DFA when this search should run on it alone (span and
+    # groups in one pass), or nil. It does when the search starts where a
+    # match must start: anchored (and groups are wanted, since without them
+    # the forward lazy DFA alone is cheaper per byte), or at each position
+    # where the prefilter finds a prefix literal, so the reverse DFA and the
+    # capture pass are not needed.
+    private def one_pass_search(anchored : Bool, end_anchored : Bool, want_captures : Bool) : OnePassDFA?
+      return nil unless @engine.auto? && !@one_pass_off && !end_anchored && !@dfa_gave_up
+      plan = @plan || return nil
+      return nil if @program.options.first_line? || plan.literal_search? || !plan.forward
+      if anchored
+        return nil unless want_captures
+      else
+        return nil unless plan.prefilter
+      end
+      plan.one_pass
+    end
+
+    # Runs the one-pass search (see `one_pass_search`) into the capture
+    # slots. Returns true or false when it decided whether there is a match,
+    # nil when the call should take the other paths instead (the search
+    # starts again from *byte_index* there): the one-pass DFA could not
+    # decide (see `OnePassDFA#search`), or the call turned it off.
+    #
+    # Unanchored, it tries each prefilter candidate in turn: every match
+    # starts with a prefix literal, so the first candidate where an
+    # anchored match exists starts the leftmost match. The bytes a try reads
+    # that no match keeps (all of a failed try, and those a successful one
+    # reads past its match end) may be read again by a later try or search,
+    # so the call counts them, and once they add up to more than the
+    # haystack (or the prefilter proves ineffective) it stops using the
+    # one-pass search: the extra work is then at most n + 1 per try, and the
+    # call stays linear.
+    private def find_one_pass(one_pass : OnePassDFA, bytes : Bytes, byte_index : Int32, anchored : Bool) : Bool?
+      slots = @capture_slots
+      scratch = @one_pass_scratch ||= Slice(Int64).new(@program.slot_count, PikeVM::UNSET)
+      if anchored
+        finish, scanned = one_pass.search(bytes, byte_index, byte_index, slots, scratch, @meter)
+        count_one_pass_waste(bytes, scanned, finish >= 0 ? finish - byte_index : -1)
+        return nil if finish == LazyDFA::GAVE_UP
+        @last_path = Path::OnePass
+        return finish >= 0
+      end
+      scan = prefilter_scan(bytes, false) || return nil
+      at = byte_index
+      while true
+        candidate = scan.find(at, @meter)
+        return false if candidate < 0
+        finish, scanned = one_pass.search(bytes, candidate, byte_index, slots, scratch, @meter)
+        count_one_pass_waste(bytes, scanned, finish >= 0 ? finish - candidate : -1)
+        if finish >= 0
+          @last_path = Path::OnePass
+          return true
+        end
+        return nil if finish == LazyDFA::GAVE_UP || @one_pass_off || scan.ineffective?
+        at = candidate + 1
+      end
+    end
+
+    # Counts the bytes a one-pass try read beyond the *kept* bytes of its
+    # match (-1: no match, so every byte read and one more for the try),
+    # and turns the one-pass search off for the call when they pass the
+    # haystack's size.
+    private def count_one_pass_waste(bytes : Bytes, scanned : Int32, kept : Int32) : Nil
+      @one_pass_wasted_bytes += kept < 0 ? scanned + 1 : scanned - kept
+      @one_pass_off = true if @one_pass_wasted_bytes > bytes.size
     end
 
     # Returns the slots of the match *start*...*finish* that a search from

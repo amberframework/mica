@@ -12,6 +12,8 @@
 #   VM over the span);
 # - one Pike VM pass with every slot;
 # - one bounded backtracker pass with every slot;
+# - `Expression#match_at_byte_index`, whose groups may be read on first
+#   use (see `GroupReader`);
 # - `matches?` on the default path (the forward DFA or the literal search
 #   stopping at the first match) and on the R2 path (the Pike VM);
 # - iteration as `String#scan` does it, one searcher for the whole call
@@ -113,7 +115,9 @@ module EngineDifferential
     matches = matches?(program, haystack, Mica::Regex::Engine::Auto)
     unaccelerated_matches = matches?(program, haystack, Mica::Regex::Engine::NoAccelerators)
     pike_matches = matches?(program, haystack, Mica::Regex::Engine::TwoPhase)
+    public_match = public_slots(expression, haystack)
     return "Pike VM #{pike} vs two-phase #{two_phase}" unless pike == two_phase
+    return "match_at_byte_index #{public_match} vs two-phase #{two_phase}" unless public_match == two_phase
     return "backtracker #{backtracker} vs Pike VM #{pike}" unless backtracker == pike
     return "default path #{default} vs two-phase #{two_phase}" unless default == two_phase
     return "no accelerators #{unaccelerated} vs two-phase #{two_phase}" unless unaccelerated == two_phase
@@ -143,6 +147,22 @@ module EngineDifferential
     end
     searcher.finish
     list_of_matches
+  end
+
+  # The slots of `Expression#match_at_byte_index`'s match (-1 for a group
+  # that did not take part), read through its `MatchData`.
+  private def self.public_slots(expression : Mica::Regex::Expression, haystack : String) : Array(Int64)?
+    match = expression.match_at_byte_index(haystack, 0, limits: SEARCH_LIMITS)
+    return nil unless match
+    list_of_slots = [] of Int64
+    match.size.times do |group|
+      if match[group]?
+        list_of_slots << match.byte_begin(group).to_i64 << match.byte_end(group).to_i64
+      else
+        list_of_slots << -1_i64 << -1_i64
+      end
+    end
+    list_of_slots
   end
 
   private def self.matches?(program : Mica::Regex::Program, haystack : String, engine : Mica::Regex::Engine) : Bool

@@ -86,6 +86,60 @@ describe "Mica::Regex short searches" do
     end
   end
 
+  describe "one-pass search" do
+    it_satisfies "REGEX-R3-short-search", "finds span and groups in one pass at each prefix-literal candidate" do
+      placeholder = expression("\\{\\{([^}]+)\\}\\}")
+      found = Mica::Regex::Searcher.open(placeholder.program, "{x {{a} {{name}} y", LIMITS, nil, Mica::Regex::CachePool.default)
+      found.find(0, Mica::Regex::MatchOptions::None, true).try(&.to_a).should eq([8, 16, 10, 14])
+      found.last_path.should eq(Mica::Regex::Searcher::Path::OnePass)
+      found.finish
+      separator = expression(",\\s*")
+      separator.scan("a,b ,  c,", limits: LIMITS).map { |match| {match.byte_begin, match.byte_end} }
+        .should eq([{1, 2}, {4, 7}, {8, 9}])
+    end
+
+    it_satisfies "REGEX-R3-short-search", "reads an anchored match and its groups in one pass" do
+      route = expression("\\A([a-z]+)-(\\d+)\\z")
+      found = Mica::Regex::Searcher.open(route.program, "post-42", LIMITS, nil, Mica::Regex::CachePool.default)
+      found.find(0, Mica::Regex::MatchOptions::None, true).try(&.to_a).should eq([0, 7, 0, 4, 5, 7])
+      found.last_path.should eq(Mica::Regex::Searcher::Path::OnePass)
+      found.finish
+    end
+
+    it_satisfies "REGEX-R3-short-search", "hands the search to the other paths when a path the one-pass DFA left out could match" do
+      # After "aa" the lazy (bb)?? ranks the match below the loop, and the
+      # match needs $: at offset 2 it does not hold, and the path through
+      # "bb" (left out of the one-pass DFA) is the one that matches.
+      pattern = expression("^(aa(bb)??)+$")
+      pattern.match("aabbaa", limits: LIMITS).try(&.to_a).should eq(["aabbaa", "aa", "bb"])
+      pattern.match("aaaa", limits: LIMITS).try(&.to_a).should eq(["aaaa", "aa", nil])
+    end
+
+    it_satisfies "REGEX-R3-short-search", "adds at most the haystack's size to a call when one-pass tries read past their matches" do
+      # Each match is one x, but the one-pass DFA reads on through the
+      # letters that follow it looking for a b. The call counts those bytes
+      # and stops trying the one-pass search once they pass the haystack's
+      # size, so it adds at most about n to what the lazy DFAs do alone.
+      pattern = expression("x(?:[a-z]*b)?")
+      {500, 1_000, 2_000}.each do |size|
+        haystack = "x" * size
+        list_of_operations = {Mica::Regex::Engine::Auto, Mica::Regex::Engine::NoAccelerators}.map do |engine|
+          searcher = Mica::Regex::Searcher.new(pattern.program, haystack, LIMITS, nil, engine)
+          offset = 0
+          count = 0
+          while found = searcher.find(offset, Mica::Regex::MatchOptions::None, false)
+            offset = found[1].to_i32
+            count += 1
+          end
+          count.should eq(size)
+          searcher.finish
+          searcher.meter.operations
+        end
+        (list_of_operations[0] - list_of_operations[1]).should be <= 3 * size + 64
+      end
+    end
+  end
+
   describe "allocation" do
     it_satisfies "REGEX-R3-short-search", "allocates nothing per call for a pattern without groups" do
       pattern = expression(",\\s*")
@@ -102,7 +156,7 @@ describe "Mica::Regex short searches" do
     it_satisfies "REGEX-R3-short-search", "evicts an idle lease from the hot slot and from the idle list" do
       step = Mica::Regex::CachePool::RESERVATION_BYTES
       pool = Mica::Regex::CachePool.new(max_bytes: step * 4 + 8192, max_cache_bytes: step)
-      first = expression("[a-c]+d", pool)
+      first = expression("[a-c]*[a-c]d", pool)
       # Two calls of one program at once: when both finish, one lease goes
       # to the hot slot and the other to the idle list, each with a forward
       # and a reverse cache.
@@ -115,7 +169,7 @@ describe "Mica::Regex short searches" do
       pool.reserved_bytes.should be >= step * 4
       # Another program needs both leases' room: each is evicted where it
       # waits, so its DFAs still get caches.
-      second = expression("[d-f]+g", pool)
+      second = expression("[d-f]*[d-f]g", pool)
       busy = Mica::Regex::Searcher.open(second.program, "xxdefdeg", LIMITS, nil, pool)
       busy.find(0, Mica::Regex::MatchOptions::None, false).try(&.to_a).should eq([2, 8])
       busy.dfa_gave_up?.should be_false
