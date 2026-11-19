@@ -246,6 +246,38 @@ describe "Mica::Regex R3 engines" do
         end
       end
     end
+
+    it_satisfies "REGEX-R3-accelerators", "looks for a pair of bytes when a literal's rarest byte is common, finding every match" do
+      paired = program("aeaeaeaeae").plan.prefilter.should_not be_nil
+      paired.pair_gap.should eq(1)
+      paired.list_of_needles.should eq(['a'.ord.to_u8, 'e'.ord.to_u8])
+      program("sherlock\\d").plan.prefilter.try(&.pair_gap).should eq(0)
+      random = Random::PCG32.new(20261119_u64)
+      ["aeaeaeaeae", "the", "ea", "aa", "tea tea", "a e"].each do |source|
+        expression = Mica::Regex::Expression.new(source, compile_limits: TRUSTED)
+        expression.program.end_first_searches
+        expression.program.plan.prefilter.try(&.pair_gap).should_not eq(0)
+        40.times do |round|
+          # Matches planted at every offset modulo 8, at the start and at the
+          # very end, among bytes that make false lanes in the word test.
+          haystack = String.build do |io|
+            (round % 9).times { io << "ta e"[random.rand(4)] }
+            io << source if round.odd?
+            (50 + random.rand(200)).times { io << (random.rand(23) == 0 ? source : "aeth \x01"[random.rand(6)].to_s) }
+            io << source if round % 3 == 0
+          end
+          on = Mica::Regex::Searcher.new(expression.program, haystack, LIMITS, nil, Mica::Regex::Engine::Auto)
+          off = Mica::Regex::Searcher.new(expression.program, haystack, LIMITS, nil, Mica::Regex::Engine::PikeVM)
+          offset = 0
+          while true
+            found = on.find(offset, Mica::Regex::MatchOptions::None, false).try(&.to_a)
+            found.should eq(off.find(offset, Mica::Regex::MatchOptions::None, false).try(&.to_a.first(2)))
+            break unless found
+            offset = found[1].to_i32
+          end
+        end
+      end
+    end
   end
 
   describe "the cache pool" do

@@ -751,7 +751,7 @@ alone finds matches, in priority order at the leftmost candidate.
 
 | Searcher | When | How |
 |---|---|---|
-| Rare byte | one literal | `memchr` for its least common byte by a fixed frequency rank (non-ASCII lead bytes rank as common, continuation bytes as rare), then the literal is compared around it |
+| Rare byte | one literal | `memchr` for its least common byte by a fixed frequency rank (non-ASCII lead bytes rank as common, continuation bytes as rare), then the literal is compared around it. When that byte is still common (the space or one of the eleven most common letters), it looks for a pair instead: the two least common bytes at their distance in the literal, eight positions per step in one 64-bit word |
 | First bytes | at most three distinct first bytes | `memchr` for each, keeping where each was last found so no byte is read twice |
 | Packed (Teddy style) | up to 64 literals | three 256-entry masks, one per leading byte, a bit per literal; a position is a candidate when the masks share a bit, and only those literals are compared |
 
@@ -823,7 +823,7 @@ C x its bound, and growth from x1 to x8 must stay under 8 x 1.25.
 
 | Family | Varies | Bound | C | Checked |
 |---|---|---|---|---|
-| Each prefilter on a candidate-dense haystack: rare byte `ab[0-9]{3}x` and first bytes `(?:ab\|ba\|ca)[0-9]` over `"abz"`·k, packed `(?:ab\|bc\|cd\|de\|ef)[0-9]` over `"abzbczcdzdezefz"`·k, the literal search `aaab\|aaac\|aaad` over `"a"`·n | n = 4,000 to 32,000 bytes | m·(n + 1) | 16 | linear growth; the guard turns a dense prefilter off and leaves a sparse one on |
+| Each prefilter on a candidate-dense haystack: rare byte `ab[0-9]{3}x`, rare pair `ea[0-9]{3}x` over `"eaz"`·k and `eaea` over `"eae"`·k, and first bytes `(?:ab\|ba\|ca)[0-9]` over `"abz"`·k, packed `(?:ab\|bc\|cd\|de\|ef)[0-9]` over `"abzbczcdzdezefz"`·k, the literal search `aaab\|aaac\|aaad` over `"a"`·n | n = 4,000 to 32,000 bytes | m·(n + 1) | 16 | linear growth; the guard turns a dense prefilter off and leaves a sparse one on |
 | Cache thrash: `(a\|b)*a(a\|b){20}c` over random `a`/`b` with a 96 KiB cache | n = 8,000 to 64,000 | m·(n + 1) | 8 | the DFA gives up and the Pike VM keeps growth linear |
 | From each start: `[a-q][^u-z]{13}[u-z]` over `"a"`·n on `Engine::EachStart`, where every start reads 14 bytes and none matches | n = 4,000 to 32,000 | m·(n + 1) | 2 | linear growth |
 | Iteration: `\w+` over words, one searcher for the whole scan | n = 5,000 to 40,000 | m·(n + 1) | 4 | linear growth over the whole call |

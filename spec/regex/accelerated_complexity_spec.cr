@@ -37,6 +37,8 @@ describe "Mica::Regex accelerated search complexity" do
     # back to its start state after each.
     families = [
       {"rare byte", "ab[0-9]{3}x", ->(n : Int32) { "abz" * (n // 3) }, Mica::Regex::Prefilter::Kind::RareByte},
+      {"rare pair", "ea[0-9]{3}x", ->(n : Int32) { "eaz" * (n // 3) }, Mica::Regex::Prefilter::Kind::RareByte},
+      {"pair literal search", "eaea", ->(n : Int32) { "eae" * (n // 3) }, Mica::Regex::Prefilter::Kind::RareByte},
       {"first bytes", "(?:ab|ba|ca)[0-9]", ->(n : Int32) { "abz" * (n // 3) }, Mica::Regex::Prefilter::Kind::FirstBytes},
       {"packed", "(?:ab|bc|cd|de|ef)[0-9]", ->(n : Int32) { "abzbczcdzdezefz" * (n // 15) }, Mica::Regex::Prefilter::Kind::Packed},
       {"literal search", "aaab|aaac|aaad", ->(n : Int32) { "a" * n }, Mica::Regex::Prefilter::Kind::FirstBytes},
