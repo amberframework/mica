@@ -203,19 +203,21 @@ module Mica::Core
       started ? Time.instant - started : Time::Span::ZERO
     end
 
-    # Returns true when a timeout is set and has passed. Reads the clock;
-    # formats call it at natural pauses (after an IO refill).
+    # Returns true when a timeout is set and has passed (reached counts:
+    # a zero timeout has passed when the meter starts, whatever the clock
+    # resolution). Reads the clock; formats call it at natural pauses
+    # (after an IO refill).
     def deadline_passed? : Bool
       timeout = @budget.timeout
       return false unless timeout
-      elapsed > timeout
+      elapsed >= timeout
     end
 
     # Checks the budget and the deadline and moves the checkpoint.
     def verdict : Verdict
       return Verdict::BudgetExceeded if @operations > allowance
       if timeout = @budget.timeout
-        return Verdict::DeadlineExceeded if elapsed > timeout
+        return Verdict::DeadlineExceeded if elapsed >= timeout
       end
       @checkpoint = next_checkpoint
       Verdict::Within

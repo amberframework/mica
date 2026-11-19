@@ -113,6 +113,11 @@ module Mica::Regex
     # matched never pays for them.
     def match_at_byte_index(string : String, byte_index : Int32 = 0, options : MatchOptions = MatchOptions::None, *,
                             limits : SearchLimits, timeout : Time::Span? = nil) : MatchData?
+      if FirstSearch.applies?(@program, string, byte_index, limits)
+        searcher = Searcher.first_search(@program, string, limits, timeout, @cache_pool)
+        found = searcher.find(byte_index, options, true)
+        return found ? MatchData.new(self, string, byte_index, found) : nil
+      end
       short = ShortSearch.new(@program, string, byte_index, options, limits, timeout)
       if short.applies?
         return nil if short.rejects?
@@ -173,6 +178,10 @@ module Mica::Regex
     # Returns true when *string* has a match at or after byte *byte_index*.
     def matches_at_byte_index?(string : String, byte_index : Int32 = 0, options : MatchOptions = MatchOptions::None, *,
                                limits : SearchLimits, timeout : Time::Span? = nil) : Bool
+      if FirstSearch.applies?(@program, string, byte_index, limits)
+        searcher = Searcher.first_search(@program, string, limits, timeout, @cache_pool)
+        return !searcher.find(byte_index, options, false).nil?
+      end
       short = ShortSearch.new(@program, string, byte_index, options, limits, timeout)
       return false if short.applies? && short.rejects?
       searcher = Searcher.open(@program, string, limits, timeout, @cache_pool)

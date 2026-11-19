@@ -34,7 +34,7 @@ module SearchConformance
 
   ENGINES = [Mica::Regex::Engine::Auto, Mica::Regex::Engine::NoAccelerators, Mica::Regex::Engine::TwoPhase,
              Mica::Regex::Engine::PikeVM, Mica::Regex::Engine::Backtracker, Mica::Regex::Engine::EachStart,
-             Mica::Regex::Engine::ReversedClasses]
+             Mica::Regex::Engine::ReversedClasses, Mica::Regex::Engine::BacktrackedStarts]
 
   def self.classify(corpus : SearchCorpus::Corpus, verdicts : Hash(String, SearchCorpus::Outcome)) : Array(Classified)
     SearchCorpus.scoped(corpus).map do |id, pattern, scoped|

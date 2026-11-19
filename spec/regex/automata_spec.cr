@@ -8,8 +8,12 @@ require "../spec_helper"
 private TRUSTED = Mica::Regex::CompileLimits::TRUSTED_PATTERN
 private LIMITS  = Mica::Regex::SearchLimits::TRUSTED_INPUT
 
+# A program past its first searches (see first_search_spec.cr), so its
+# plan finds every match start with the reverse DFA.
 private def program(source : String, options = Mica::Regex::CompileOptions::None) : Mica::Regex::Program
-  Mica::Regex::Expression.new(source, options, compile_limits: TRUSTED).program
+  compiled = Mica::Regex::Expression.new(source, options, compile_limits: TRUSTED).program
+  compiled.end_first_searches
+  compiled
 end
 
 private def searcher(source : String, haystack : String, engine = Mica::Regex::Engine::Auto,

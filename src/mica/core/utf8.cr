@@ -147,40 +147,108 @@ module Mica::Core
       size
     end
 
-    # Returns the offset of the first invalid sequence in *bytes*, or nil
-    # when all of it is valid UTF-8. Runs in one pass, reading runs of ASCII
-    # eight bytes at a time.
+    # Returns the offset of the first invalid sequence in *bytes* (its lead
+    # byte, as `decode` reports it), or nil when all of it is valid UTF-8.
+    #
+    # Runs in one pass: the ASCII prefix eight bytes at a time, then runs
+    # of ASCII sixteen bytes at a time and everything else through the
+    # shift DFA below, one table read per byte and a check
+    # for the error state every sixteen bytes, so text in any script
+    # validates at the same speed.
     def self.first_invalid_offset(bytes : Bytes) : Int32?
       size = bytes.size
       pointer = bytes.to_unsafe
-      # All ASCII (the common case): OR every word and the tail together
-      # and test the high bits once, with no branch per word.
-      high_bits = 0_u64
+      # The ASCII prefix, eight bytes then one at a time: a haystack that
+      # is all ASCII (the common case) never reaches the DFA.
       index = 0
-      while index + 8 <= size
-        high_bits |= (pointer + index).as(UInt64*).value
+      while index + 8 <= size && (pointer + index).as(UInt64*).value & 0x8080808080808080_u64 == 0
         index += 8
       end
-      while index < size
-        high_bits |= pointer[index]
+      while index < size && pointer[index] < 0x80
         index += 1
       end
-      return nil if high_bits & 0x8080808080808080_u64 == 0
-      index = 0
+      return nil if index == size
+      table = VALIDATION_TABLE
+      state = ACCEPT_SHIFT
+      lead = index
       while index < size
-        while index + 8 <= size && (pointer + index).as(UInt64*).value & 0x8080808080808080_u64 == 0
-          index += 8
-        end
-        break if index >= size
-        if bytes[index] < 0x80
-          index += 1
+        if state == ACCEPT_SHIFT && index + 16 <= size &&
+           ((pointer + index).as(UInt64*).value | (pointer + index + 8).as(UInt64*).value) & 0x8080808080808080_u64 == 0
+          index += 16
           next
         end
-        _, length = decode(bytes, index, size)
-        return index if length == 0
-        index += length
+        stop = Math.min(index + 16, size)
+        while index < stop
+          lead = index if state == ACCEPT_SHIFT
+          state = (table.unsafe_fetch(pointer[index]) >> state) & 63
+          index += 1
+        end
+        return lead if state == ERROR_SHIFT
       end
-      nil
+      state == ACCEPT_SHIFT ? nil : lead
+    end
+
+    # The states of the validation DFA: the error state, between sequences
+    # (accept), and the bytes still owed by the sequence being read, with
+    # the four leads whose second byte has a narrower range (E0 rules out
+    # overlong forms, ED surrogates, F0 overlong forms, F4 code points
+    # above U+10FFFF).
+    private enum ValidationState
+      Error
+      Accept
+      OneMore
+      TwoMore
+      ThreeMore
+      AfterE0
+      AfterED
+      AfterF0
+      AfterF4
+    end
+
+    # A state is stored as its shift: six bits per state, so the nine fit
+    # one 64-bit row.
+    private ERROR_SHIFT  = ValidationState::Error.value.to_u64 * 6
+    private ACCEPT_SHIFT = ValidationState::Accept.value.to_u64 * 6
+
+    # One row per byte value: for each state, the shift of the state that
+    # byte leads to, at bit `6 × state` ("shift DFA": the next state is
+    # `(row >> state) & 63`).
+    private VALIDATION_TABLE = begin
+      table = StaticArray(UInt64, 256).new(0_u64)
+      256.times do |byte|
+        row = 0_u64
+        ValidationState.each do |state|
+          row |= (validation_step(state, byte).value.to_u64 * 6) << (state.value * 6)
+        end
+        table[byte] = row
+      end
+      table
+    end
+
+    # The state after *byte* in *state* (`decode`'s rules).
+    private def self.validation_step(state : ValidationState, byte : Int32) : ValidationState
+      continuation = 0x80 <= byte <= 0xBF
+      case state
+      when .accept?
+        return ValidationState::Accept if byte < 0x80
+        return ValidationState::Error if byte < 0xC2
+        return ValidationState::OneMore if byte < 0xE0
+        return ValidationState::AfterE0 if byte == 0xE0
+        return ValidationState::AfterED if byte == 0xED
+        return ValidationState::TwoMore if byte < 0xF0
+        return ValidationState::AfterF0 if byte == 0xF0
+        return ValidationState::ThreeMore if byte < 0xF4
+        return ValidationState::AfterF4 if byte == 0xF4
+        ValidationState::Error
+      when .one_more?   then continuation ? ValidationState::Accept : ValidationState::Error
+      when .two_more?   then continuation ? ValidationState::OneMore : ValidationState::Error
+      when .three_more? then continuation ? ValidationState::TwoMore : ValidationState::Error
+      when .after_e0?   then 0xA0 <= byte <= 0xBF ? ValidationState::OneMore : ValidationState::Error
+      when .after_ed?   then 0x80 <= byte <= 0x9F ? ValidationState::OneMore : ValidationState::Error
+      when .after_f0?   then 0x90 <= byte <= 0xBF ? ValidationState::TwoMore : ValidationState::Error
+      when .after_f4?   then 0x80 <= byte <= 0x8F ? ValidationState::TwoMore : ValidationState::Error
+      else                   ValidationState::Error
+      end
     end
   end
 end

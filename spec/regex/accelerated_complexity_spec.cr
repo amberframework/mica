@@ -56,7 +56,9 @@ describe "Mica::Regex accelerated search complexity" do
 
     it_satisfies "REGEX-R3-accelerators", "turns a prefilter off once its candidates come too densely" do
       program = SearchComplexity.program("ab[0-9]{3}x")
-      _, searcher = AcceleratedComplexity.work(program, "abz" * 10_000)
+      # The x every match needs comes last, so the search runs and the
+      # prefilter meets its dense candidates.
+      _, searcher = AcceleratedComplexity.work(program, "abz" * 10_000 + "x")
       searcher.prefilter_off?.should be_true
       _, sparse = AcceleratedComplexity.work(program, "ab" + "z" * 10_000 + "ab123x")
       sparse.prefilter_off?.should be_false
@@ -69,7 +71,12 @@ describe "Mica::Regex accelerated search complexity" do
       pool = Mica::Regex::CachePool.new(max_bytes: 64_i64 * 1024 * 1024, max_cache_bytes: 96_i64 * 1024)
       random = Random::PCG32.new(20261118_u64)
       measurements = SearchComplexity::SIZES.map do |scale|
-        haystack = String.build { |io| (8_000 * scale).times { io << (random.rand(2) == 0 ? 'a' : 'b') } }
+        # The c every match needs comes last, so the DFA reads the whole
+        # haystack.
+        haystack = String.build do |io|
+          (8_000 * scale).times { io << (random.rand(2) == 0 ? 'a' : 'b') }
+          io << 'c'
+        end
         operations, searcher = AcceleratedComplexity.work(program, haystack, pool)
         searcher.dfa_gave_up?.should be_true
         SearchComplexity::Measurement.new(scale, operations, program.state_count.to_i64 * (haystack.bytesize + 1))

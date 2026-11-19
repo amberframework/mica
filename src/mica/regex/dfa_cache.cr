@@ -190,10 +190,8 @@ module Mica::Regex
       id = @list_of_keys.size
       @list_of_keys << key
       @state_ids[key] = id
-      stride = @dfa.stride
       # The dead states lead only to the dead state (entry 0 | SPECIAL).
-      fill = id <= LazyDFA::DEAD_MATCH ? LazyDFA::SPECIAL : -1
-      stride.times { @transition_table << fill }
+      @transition_table.concat(id <= LazyDFA::DEAD_MATCH ? @dfa.dead_row : @dfa.unbuilt_row)
       mark = 0_u8
       mark |= LazyDFA::MARK_MATCH if key.unsafe_fetch(0) & LazyDFA::MATCH_BEHIND != 0
       mark |= LazyDFA::MARK_DEAD if id <= LazyDFA::DEAD_MATCH

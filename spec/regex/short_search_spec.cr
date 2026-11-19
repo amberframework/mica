@@ -6,8 +6,12 @@ require "../spec_helper"
 private TRUSTED = Mica::Regex::CompileLimits::TRUSTED_PATTERN
 private LIMITS  = Mica::Regex::SearchLimits::TRUSTED_INPUT
 
-private def expression(source : String, pool = Mica::Regex::CachePool.default) : Mica::Regex::Expression
-  Mica::Regex::Expression.new(source, compile_limits: TRUSTED, cache_pool: pool)
+# An expression past its first searches (see first_search_spec.cr), so
+# every search here takes the plan's engines.
+private def planned_expression(source : String, pool = Mica::Regex::CachePool.default) : Mica::Regex::Expression
+  pattern = Mica::Regex::Expression.new(source, compile_limits: TRUSTED, cache_pool: pool)
+  pattern.program.end_first_searches
+  pattern
 end
 
 # The bytes the GC handed out while the block ran.
@@ -20,7 +24,7 @@ end
 describe "Mica::Regex short searches" do
   describe "groups read on first use" do
     it_satisfies "REGEX-R3-short-search", "finds the match without its groups when only the backtracker or the Pike VM can read them" do
-      email = expression("\\A[\\w+\\-.]+@[a-z\\d\\-]+(\\.[a-z\\d\\-]+)*\\.[a-z]+\\z")
+      email = planned_expression("\\A[\\w+\\-.]+@[a-z\\d\\-]+(\\.[a-z\\d\\-]+)*\\.[a-z]+\\z")
       # The first match builds the one-pass DFA and finds it cannot be had.
       email.program.plan.defers_groups?.should be_false
       email.match("ann@example.org", limits: LIMITS).try(&.[1]?).should be_nil
@@ -33,7 +37,7 @@ describe "Mica::Regex short searches" do
     end
 
     it_satisfies "REGEX-R3-short-search", "reads the groups with the match when the one-pass DFA can" do
-      placeholder = expression("\\{\\{([^}]+)\\}\\}")
+      placeholder = planned_expression("\\{\\{([^}]+)\\}\\}")
       placeholder.program.plan.defers_groups?.should be_false
       placeholder.match("x {{name}} y", limits: LIMITS).try(&.[1]).should eq("name")
     end
@@ -41,7 +45,7 @@ describe "Mica::Regex short searches" do
     it_satisfies "REGEX-R3-short-search", "reads the groups of a match from where its search started" do
       # \b depends on the byte before the search's offset, and the group
       # that took part depends on the alternation's priority.
-      pattern = expression("\\b(a|ab)(b)?\\b|(ab)")
+      pattern = planned_expression("\\b(a|ab)(b)?\\b|(ab)")
       pattern.match("ab", limits: LIMITS)
       pattern.program.plan.defers_groups?.should be_true
       match = pattern.match_at_byte_index("zab ab", 1, limits: LIMITS).should_not be_nil
@@ -53,7 +57,7 @@ describe "Mica::Regex short searches" do
     end
 
     it_satisfies "REGEX-R3-short-search", "shares the groups between copies and compares them" do
-      pattern = expression("(a|ab)(c|bcd)(d*)")
+      pattern = planned_expression("(a|ab)(c|bcd)(d*)")
       first = pattern.match("abcd", limits: LIMITS).should_not be_nil
       copy = first
       first[2].should eq("bcd")
@@ -73,7 +77,7 @@ describe "Mica::Regex short searches" do
         {"(?m)^(\\d+)(?:,(\\d+))*$", "1,2,3\n45"},
       }
       list_of_cases.each do |source, haystack|
-        pattern = expression(source)
+        pattern = planned_expression(source)
         lazy = pattern.match(haystack, limits: LIMITS).should_not be_nil
         eager = nil
         pattern.each_match(haystack, limits: LIMITS) { |match| eager ||= match }
@@ -83,7 +87,7 @@ describe "Mica::Regex short searches" do
     end
 
     it_satisfies "REGEX-R3-short-search", "reads deferred groups under the limits of the call that found the match" do
-      pattern = expression("(a|ab)(c|bcd)(d*)")
+      pattern = planned_expression("(a|ab)(c|bcd)(d*)")
       tight = Mica::Regex::SearchLimits.custom(work_ceiling: 10_000_i64)
       match = pattern.match("abcd", limits: tight).should_not be_nil
       match.to_a.should eq(["abcd", "a", "bcd", ""])
@@ -92,18 +96,18 @@ describe "Mica::Regex short searches" do
 
   describe "one-pass search" do
     it_satisfies "REGEX-R3-short-search", "finds span and groups in one pass at each prefix-literal candidate" do
-      placeholder = expression("\\{\\{([^}]+)\\}\\}")
+      placeholder = planned_expression("\\{\\{([^}]+)\\}\\}")
       found = Mica::Regex::Searcher.open(placeholder.program, "{x {{a} {{name}} y", LIMITS, nil, Mica::Regex::CachePool.default)
       found.find(0, Mica::Regex::MatchOptions::None, true).try(&.to_a).should eq([8, 16, 10, 14])
       found.last_path.should eq(Mica::Regex::Searcher::Path::OnePass)
       found.finish
-      separator = expression(",\\s*")
+      separator = planned_expression(",\\s*")
       separator.scan("a,b ,  c,", limits: LIMITS).map { |match| {match.byte_begin, match.byte_end} }
         .should eq([{1, 2}, {4, 7}, {8, 9}])
     end
 
     it_satisfies "REGEX-R3-short-search", "tries the forward lazy DFA anchored at each candidate when the pattern is not one-pass" do
-      separator = expression(",|,\\s")
+      separator = planned_expression(",|,\\s")
       separator.program.plan.one_pass.should be_nil
       found = Mica::Regex::Searcher.open(separator.program, "a,b, c", LIMITS, nil, Mica::Regex::CachePool.default)
       found.find(2, Mica::Regex::MatchOptions::None, false).try(&.to_a).should eq([3, 4])
@@ -111,13 +115,13 @@ describe "Mica::Regex short searches" do
       found.finish
       separator.scan("a,b, c,", limits: LIMITS).map { |match| {match.byte_begin, match.byte_end} }
         .should eq([{1, 2}, {3, 4}, {6, 7}])
-      word = expression("\\b(?:ab|a)\\w*c")
+      word = planned_expression("\\b(?:ab|a)\\w*c")
       word.program.plan.one_pass.should be_nil
       word.match("xab ab abc", limits: LIMITS).try(&.to_s).should eq("abc")
     end
 
     it_satisfies "REGEX-R3-short-search", "reads an anchored match and its groups in one pass" do
-      route = expression("\\A([a-z]+)-(\\d+)\\z")
+      route = planned_expression("\\A([a-z]+)-(\\d+)\\z")
       # The first capture pass builds the one-pass DFA; later anchored
       # searches run on it alone.
       route.match("get-1", limits: LIMITS).try(&.[2]).should eq("1")
@@ -131,7 +135,7 @@ describe "Mica::Regex short searches" do
       # After "aa" the lazy (bb)?? ranks the match below the loop, and the
       # match needs $: at offset 2 it does not hold, and the path through
       # "bb" (left out of the one-pass DFA) is the one that matches.
-      pattern = expression("^(aa(bb)??)+$")
+      pattern = planned_expression("^(aa(bb)??)+$")
       pattern.match("aabbaa", limits: LIMITS).try(&.to_a).should eq(["aabbaa", "aa", "bb"])
       pattern.match("aaaa", limits: LIMITS).try(&.to_a).should eq(["aaaa", "aa", nil])
     end
@@ -143,7 +147,7 @@ describe "Mica::Regex short searches" do
       # so it adds at most about n to what the lazy DFAs do alone. The first
       # pattern is one-pass, the second is not (it tries on the lazy DFA).
       {"x(?:[a-z]*b)?", "x(?:[a-z]*b|[a-z]*c)?"}.each do |source|
-        pattern = expression(source)
+        pattern = planned_expression(source)
         {500, 1_000, 2_000}.each do |size|
           haystack = "x" * size
           list_of_operations = {Mica::Regex::Engine::Auto, Mica::Regex::Engine::NoAccelerators}.map do |engine|
@@ -166,23 +170,23 @@ describe "Mica::Regex short searches" do
 
   describe "start filter" do
     it_satisfies "REGEX-R3-short-search", "reads the fewest bytes and the first bytes of a match from the program" do
-      filter = expression("\\d+px").program.plan.start_filter
+      filter = planned_expression("\\d+px").program.plan.start_filter
       filter.minimum_bytes.should eq(3)
       filter.rejects?("12px".to_slice, 0, false).should be_false
       filter.rejects?("12p".to_slice, 0, false).should be_true
       filter.rejects?("ab px".to_slice, 0, false).should be_true
       filter.rejects?("1px".to_slice, 1, false).should be_true
-      expression("é|ab").program.plan.start_filter.minimum_bytes.should eq(2)
-      expression("a?").program.plan.start_filter.rejects?("".to_slice, 0, false).should be_false
-      expression("[^\\x00-\\x{10FFFF}]").program.plan.start_filter.rejects?("abc".to_slice, 0, false).should be_true
+      planned_expression("é|ab").program.plan.start_filter.minimum_bytes.should eq(2)
+      planned_expression("a?").program.plan.start_filter.rejects?("".to_slice, 0, false).should be_false
+      planned_expression("[^\\x00-\\x{10FFFF}]").program.plan.start_filter.rejects?("abc".to_slice, 0, false).should be_true
     end
 
     it_satisfies "REGEX-R3-short-search", "answers a short search that cannot match as the searcher would" do
-      digits = expression("\\A\\d+\\z")
+      digits = planned_expression("\\A\\d+\\z")
       digits.match("abc", limits: LIMITS).should be_nil
       digits.matches?("12a", limits: LIMITS).should be_false
       digits.match("123", limits: LIMITS).try(&.to_s).should eq("123")
-      dot = expression(".")
+      dot = planned_expression(".")
       dot.match("\n", limits: LIMITS).should be_nil
       dot.match_at_byte_index("ab", 2, limits: LIMITS).should be_nil
       # What the searcher raises, the shortcut leaves to it.
@@ -206,8 +210,8 @@ describe "Mica::Regex short searches" do
         {"\\Ga", "aab", 1},
       }
       list_of_cases.each do |source, haystack, offset|
-        pattern = expression(source)
-        reference = expression(source)
+        pattern = planned_expression(source)
+        reference = planned_expression(source)
         expected = nil
         reference.each_match(haystack, limits: LIMITS) { |match| expected ||= match.to_a if match.byte_begin >= offset }
         12.times do
@@ -217,14 +221,14 @@ describe "Mica::Regex short searches" do
     end
 
     it_satisfies "REGEX-R3-short-search", "rejects a short haystack without a byte every match contains" do
-      host = expression(".*:(\\d+)")
+      host = planned_expression(".*:(\\d+)")
       host.program.plan.start_filter.list_of_required_bytes.should eq([':'.ord.to_u8])
       host.match("amber-grant-345", limits: LIMITS).should be_nil
       host.match("example.com:4567", limits: LIMITS).try(&.[1]).should eq("4567")
-      expression("a(?:b|c:)d").program.plan.start_filter.list_of_required_bytes.should eq(['d'.ord.to_u8, 'a'.ord.to_u8])
-      expression("x|y").program.plan.start_filter.list_of_required_bytes.should be_empty
+      planned_expression("a(?:b|c:)d").program.plan.start_filter.list_of_required_bytes.should eq(['d'.ord.to_u8, 'a'.ord.to_u8])
+      planned_expression("x|y").program.plan.start_filter.list_of_required_bytes.should be_empty
       # Both are required; `x` alone would not reject a run of x's.
-      runs = expression("(x+x+)+y")
+      runs = planned_expression("(x+x+)+y")
       runs.program.plan.start_filter.list_of_required_bytes.should eq(['x'.ord.to_u8, 'y'.ord.to_u8])
       runs.match("x" * 200, limits: LIMITS).should be_nil
     end
@@ -232,7 +236,7 @@ describe "Mica::Regex short searches" do
     it_satisfies "REGEX-R3-short-search", "stops a try at a start after MAX_TRY_BYTES and searches the other way" do
       # Every try at an "a" runs on to the end looking for the "b"; the
       # first try stops after MAX_TRY_BYTES, so the work stays linear.
-      pattern = expression("(?:a+)+b")
+      pattern = planned_expression("(?:a+)+b")
       haystack = "a" * 20_000
       searcher = Mica::Regex::Searcher.new(pattern.program, haystack, LIMITS, nil, Mica::Regex::Engine::Auto)
       searcher.find(0, Mica::Regex::MatchOptions::None, false).should be_nil
@@ -244,7 +248,7 @@ describe "Mica::Regex short searches" do
     end
 
     it_satisfies "REGEX-R3-short-search", "reads groups with the match again once a caller reads deferred groups" do
-      pattern = expression("(a|ab)(c|bcd)(d*)")
+      pattern = planned_expression("(a|ab)(c|bcd)(d*)")
       pattern.match("abcd", limits: LIMITS)
       plan = pattern.program.plan
       plan.defers_groups?.should be_true
@@ -256,20 +260,20 @@ describe "Mica::Regex short searches" do
 
   describe "one-pass decisions" do
     it_satisfies "REGEX-R3-short-search", "decides alone where no byte path ranks below a failed match path" do
-      dfa = expression("\\A[a-z0-9]+\\z").program.plan.one_pass || raise "expected a one-pass DFA"
+      dfa = planned_expression("\\A[a-z0-9]+\\z").program.plan.one_pass || raise "expected a one-pass DFA"
       slots = Slice(Int64).new(2, -1_i64)
       scratch = Slice(Int64).new(2, -1_i64)
       dfa.search("abc-".to_slice, 0, 0, slots, scratch, nil)[0].should eq(Mica::Regex::LazyDFA::NO_MATCH)
       dfa.search("abc".to_slice, 0, 0, slots, scratch, nil)[0].should eq(3)
       # A lazy repeat ranks the match above the bytes: a failed `$` there
       # leaves the answer to another engine.
-      lazy = expression("^(?:aa(?:bb)??)+$").program.plan.one_pass || raise "expected a one-pass DFA"
+      lazy = planned_expression("^(?:aa(?:bb)??)+$").program.plan.one_pass || raise "expected a one-pass DFA"
       lazy.search("aabbx".to_slice, 0, 0, Slice(Int64).new(2, -1_i64), Slice(Int64).new(2, -1_i64), nil)[0]
         .should eq(Mica::Regex::LazyDFA::GAVE_UP)
     end
 
     it_satisfies "REGEX-R3-short-search", "leaves unanchored searches with no match nearby to the searcher" do
-      pattern = expression(".y")
+      pattern = planned_expression(".y")
       haystack = "x" * 60 + "y"
       (Mica::Regex::ShortSearch::MAX_DECLINES + 12).times do
         pattern.match(haystack, limits: LIMITS).try(&.to_s).should eq("xy")
@@ -281,7 +285,7 @@ describe "Mica::Regex short searches" do
 
   describe "allocation" do
     it_satisfies "REGEX-R3-short-search", "allocates nothing per call for a pattern without groups" do
-      pattern = expression(",\\s*")
+      pattern = planned_expression(",\\s*")
       haystack = "ab, cd,ef"
       10.times { pattern.match_at_byte_index(haystack, 0, limits: LIMITS) }
       allocated = bytes_allocated do
@@ -295,7 +299,7 @@ describe "Mica::Regex short searches" do
     it_satisfies "REGEX-R3-short-search", "evicts an idle lease from the hot slot and from the idle list" do
       step = Mica::Regex::CachePool::RESERVATION_BYTES
       pool = Mica::Regex::CachePool.new(max_bytes: step * 4 + 8192, max_cache_bytes: step)
-      first = expression("[a-c]*[a-c]d", pool)
+      first = planned_expression("[a-c]*[a-c]d", pool)
       # Two calls of one program at once: when both finish, one lease goes
       # to the hot slot and the other to the idle list, each with a forward
       # and a reverse cache.
@@ -308,7 +312,7 @@ describe "Mica::Regex short searches" do
       pool.reserved_bytes.should be >= step * 4
       # Another program needs both leases' room: each is evicted where it
       # waits, so its DFAs still get caches.
-      second = expression("[d-f]*[d-f]g", pool)
+      second = planned_expression("[d-f]*[d-f]g", pool)
       busy = Mica::Regex::Searcher.open(second.program, "xxdefdeg", LIMITS, nil, pool)
       busy.find(0, Mica::Regex::MatchOptions::None, false).try(&.to_a).should eq([2, 8])
       busy.dfa_gave_up?.should be_false

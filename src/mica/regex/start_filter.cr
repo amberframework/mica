@@ -40,7 +40,7 @@ module Mica::Regex
       @minimum_bytes = StartFilter.shortest_match(program)
       return unless @minimum_bytes > 0
       collect_start_bytes(program)
-      @list_of_required_bytes = StartFilter.required_bytes(program)
+      @list_of_required_bytes = program.list_of_required_bytes
       list_of_start_bytes = (0..255).select { |byte| starts?(byte.to_u8) }
       @single_start = list_of_start_bytes.first if list_of_start_bytes.size == 1
     end
@@ -85,47 +85,85 @@ module Mica::Regex
 
     # The rarest ASCII bytes (by `Prefilter.rank`, at most
     # `MAX_REQUIRED_BYTES`) that every path from the start state to the
-    # match state reads in a state that reads only that byte. Each of the
-    # `MAX_REQUIRED_CANDIDATES` rarest such bytes is tried by searching for
-    # a path that avoids its states: O(m) each.
+    # match state reads in a state (or a sparse transition) that reads
+    # only that byte. The `MAX_REQUIRED_CANDIDATES` rarest such bytes are
+    # tried together: one pass marks, for each state, the candidates some
+    # path from the start avoids on the way there, and a candidate the
+    # match state cannot be reached without is required. A state is queued
+    # again only when it gains a mark, so the pass is O(m) (each state and
+    # transition read at most once per candidate, and in practice about
+    # once).
     def self.required_bytes(program : Program) : Array(UInt8)
       states = program.list_of_states
-      list_of_candidates = states.compact_map do |state|
-        state.low if state.kind.byte_range? && state.low == state.high && state.low < 0x80
+      seen = StaticArray(Bool, 128).new(false)
+      list_of_candidates = [] of UInt8
+      states.each do |state|
+        next unless state.kind.byte_range? && state.low == state.high && state.low < 0x80
+        next if seen[state.low]
+        seen[state.low] = true
+        list_of_candidates << state.low
       end
-      list_of_candidates.uniq!.sort_by! { |byte| Prefilter.rank(byte) }
-      list_of_candidates.first(MAX_REQUIRED_CANDIDATES)
-        .reject { |byte| match_reachable_without?(program, byte) }
-        .first(MAX_REQUIRED_BYTES)
+      list_of_required = [] of UInt8
+      return list_of_required if list_of_candidates.empty?
+      list_of_candidates.sort_by! { |byte| Prefilter.rank(byte) }
+      list_of_candidates = list_of_candidates.first(MAX_REQUIRED_CANDIDATES)
+      avoided = avoided_on_the_way_to_a_match(program, list_of_candidates)
+      list_of_candidates.each_with_index do |byte, index|
+        next if avoided.bit(index) == 1
+        list_of_required << byte
+        break if list_of_required.size == MAX_REQUIRED_BYTES
+      end
+      list_of_required
     end
 
-    # True when a path from the start state reaches the match state without
-    # a state that reads only *byte*.
-    private def self.match_reachable_without?(program : Program, byte : UInt8) : Bool
+    # The candidates (bit i for `list_of_candidates[i]`) that some path from
+    # the start state to a match state avoids: no state on it reads only
+    # that byte.
+    private def self.avoided_on_the_way_to_a_match(program : Program, list_of_candidates : Array(UInt8)) : UInt8
       states = program.list_of_states
-      visited = Array(Bool).new(states.size, false)
+      blocking = StaticArray(UInt8, 128).new(0_u8)
+      list_of_candidates.each_with_index { |byte, index| blocking[byte] = 1_u8 << index }
+      marks = Array(UInt8).new(states.size, 0_u8)
       list_of_pending = [program.start_state]
+      marks[program.start_state] = ((1 << list_of_candidates.size) - 1).to_u8
+      at_match = 0_u8
       while index = list_of_pending.pop?
-        next if visited[index]
-        visited[index] = true
+        here = marks[index]
         state = states[index]
         case state.kind
         when .match?
-          return true
+          at_match |= here
         when .split?
-          list_of_pending << state.next_state << state.alternate
+          mark(marks, list_of_pending, state.next_state, here)
+          mark(marks, list_of_pending, state.alternate, here)
         when .save?, .look?
-          list_of_pending << state.next_state
+          mark(marks, list_of_pending, state.next_state, here)
         when .byte_range?
-          list_of_pending << state.next_state unless state.low == byte && state.high == byte
+          mark(marks, list_of_pending, state.next_state, here & ~blocked_by(blocking, state.low, state.high))
         when .sparse?
           state.alternate.times do |offset|
             transition = program.transition_at(index, state, offset)
-            list_of_pending << transition.target unless transition.low == byte && transition.high == byte
+            mark(marks, list_of_pending, transition.target, here & ~blocked_by(blocking, transition.low, transition.high))
           end
         end
       end
-      false
+      at_match
+    end
+
+    # The candidate bits a step reading *low*..*high* blocks: the
+    # candidate's own bit when it reads that one byte only.
+    @[AlwaysInline]
+    private def self.blocked_by(blocking : StaticArray(UInt8, 128), low : UInt8, high : UInt8) : UInt8
+      low == high && low < 0x80 ? blocking[low] : 0_u8
+    end
+
+    # Adds *bits* to *target*'s marks, queuing it when it gained one.
+    @[AlwaysInline]
+    private def self.mark(marks : Array(UInt8), list_of_pending : Array(Int32), target : Int32, bits : UInt8) : Nil
+      merged = marks.unsafe_fetch(target) | bits
+      return if merged == marks.unsafe_fetch(target)
+      marks.unsafe_put(target, merged)
+      list_of_pending << target
     end
 
     private def starts?(byte : UInt8) : Bool

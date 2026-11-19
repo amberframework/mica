@@ -11,6 +11,11 @@
 # - the same with every unanchored search of a program whose matches are
 #   short made from each start (`Engine::EachStart`), the path the default
 #   one takes once its forward cache thrashes;
+# - the same with every match start the forward DFA leads to found by the
+#   backtracker over the span up to the match end
+#   (`Engine::BacktrackedStarts`), as the default path finds a plan's
+#   first starts, and a program's first search on the backtracker
+#   (`Searcher.first_search`);
 # - the same with every match start found by the reverse DFA reading each
 #   class backward (`Engine::ReversedClasses`), the reverse DFA the default
 #   path widens to;
@@ -142,6 +147,12 @@ module EngineDifferential
     return "reversed classes #{reversed} vs two-phase #{two_phase}" unless reversed == two_phase
     reversed_scan = scan(program, haystack, Mica::Regex::Engine::ReversedClasses)
     return "reversed classes scan #{reversed_scan} vs #{iterated_two_phase}" unless reversed_scan == iterated_two_phase
+    backtracked = find(program, haystack, Mica::Regex::Engine::BacktrackedStarts, true)
+    return "backtracked starts #{backtracked} vs two-phase #{two_phase}" unless backtracked == two_phase
+    backtracked_scan = scan(program, haystack, Mica::Regex::Engine::BacktrackedStarts)
+    return "backtracked starts scan #{backtracked_scan} vs #{iterated_two_phase}" unless backtracked_scan == iterated_two_phase
+    first = first_search(program, haystack)
+    return "first search #{first} vs two-phase #{two_phase}" unless first == two_phase
     check_each_start(program, haystack, two_phase, iterated_two_phase)
   end
 
@@ -196,6 +207,16 @@ module EngineDifferential
   private def self.matches?(program : Mica::Regex::Program, haystack : String, engine : Mica::Regex::Engine) : Bool
     searcher = Mica::Regex::Searcher.new(program, haystack, SEARCH_LIMITS, nil, engine)
     searcher.matches?(0, Mica::Regex::MatchOptions::None)
+  ensure
+    searcher.try(&.finish)
+  end
+
+  # The slots of a program's first search (`Searcher.first_search`: the
+  # backtracker with the required-byte check, handing a search it has not
+  # decided within its visits to the plan).
+  private def self.first_search(program : Mica::Regex::Program, haystack : String) : Array(Int64)?
+    searcher = Mica::Regex::Searcher.first_search(program, haystack, SEARCH_LIMITS, nil, Mica::Regex::CachePool.default)
+    searcher.find(0, Mica::Regex::MatchOptions::None, true).try(&.to_a)
   ensure
     searcher.try(&.finish)
   end

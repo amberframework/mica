@@ -78,10 +78,28 @@ module Mica::Regex
     # Reserves *bytes* for a member. Evicts idle members (least recently
     # used first) when the cap would be passed; returns false when that is
     # not enough.
+    #
+    # Members the collector has freed give their bytes back from a
+    # finalizer, which runs only after a collection. A process that makes
+    # and drops many expressions between collections can fill the pool
+    # with bytes no live member holds, so when the pool finds freed members
+    # and still has no room, it collects garbage once and tries again.
     def reserve(bytes : Int64) : Bool
       return true if try_reserve(bytes)
-      @mutex.synchronize do
+      freed = @mutex.synchronize do
+        count = @list_of_members.size
         @list_of_members.reject! { |reference| reference.value.nil? }
+        count - @list_of_members.size
+      end
+      return true if reserve_by_evicting(bytes)
+      return false unless freed > 0
+      GC.collect
+      try_reserve(bytes)
+    end
+
+    # Evicts idle members, least recently used first, until *bytes* fit.
+    private def reserve_by_evicting(bytes : Int64) : Bool
+      @mutex.synchronize do
         list_of_candidates = [] of PoolMember
         @list_of_members.each do |reference|
           member = reference.value

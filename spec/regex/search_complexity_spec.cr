@@ -112,8 +112,11 @@ describe "Mica::Regex search complexity" do
 
   describe "m (program states)" do
     haystack = String.build { |io| 65_536.times { |index| io << ('a' + index % 26) } }
+    literal_haystack = String.build { |io| 65_536.times { |index| io << "abcdefghijklmnopqrstuvwxyz0123456789"[index % 36] } }
     families = [
-      {"alternation of k 8-byte literals", ->(k : Int32) { (0...k).join('|') { |index| "lit%05dx" % index } }, haystack},
+      # Digits too, so the haystack holds the bytes every literal needs and
+      # the search runs past the required-byte check.
+      {"alternation of k 8-byte literals", ->(k : Int32) { (0...k).join('|') { |index| "lit%05dx" % index } }, literal_haystack},
       {"a{k}", ->(k : Int32) { "a{#{k}}" }, "a" * 65_536},
       {"[\\p{L}\\p{N}]{1,k}", ->(k : Int32) { "[\\p{L}\\p{N}]{1,#{k}}" }, haystack},
     ]
