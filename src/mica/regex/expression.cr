@@ -130,6 +130,8 @@ module Mica::Regex
       # Slots and scratch on the stack for the short and candidate searches:
       # `ShortSearch::MAX_SLOTS` each (both decline a program with more).
       buffer = uninitialized StaticArray(Int64, 32)
+      # The work a candidate search did before it declined.
+      spent = 0_i64
       short = ShortSearch.new(@program, string, byte_index, options, limits, timeout)
       if short.applies?
         return nil if short.rejects?
@@ -139,19 +141,21 @@ module Mica::Regex
         finish = short.run(slots, scratch)
         return nil if finish == LazyDFA::NO_MATCH
         return MatchData.new(self, string, byte_index, slots) unless finish == LazyDFA::GAVE_UP
-      end
-      candidates = CandidateSearch.new(@program, string, byte_index, options, limits, timeout)
-      if !short.applies? && (one_pass = candidates.one_pass)
-        slots = Slice.new(buffer.to_unsafe, @program.slot_count)
-        scratch = Slice.new(buffer.to_unsafe + ShortSearch::MAX_SLOTS, @program.slot_count)
-        finish = candidates.run(one_pass, slots, scratch)
-        return nil if finish == LazyDFA::NO_MATCH
-        return MatchData.new(self, string, byte_index, slots) unless finish == LazyDFA::GAVE_UP
+      else
+        candidates = CandidateSearch.new(@program, string, byte_index, options, limits, timeout)
+        if one_pass = candidates.one_pass
+          slots = Slice.new(buffer.to_unsafe, @program.slot_count)
+          scratch = Slice.new(buffer.to_unsafe + ShortSearch::MAX_SLOTS, @program.slot_count)
+          finish = candidates.run(one_pass, slots, scratch)
+          return nil if finish == LazyDFA::NO_MATCH
+          return MatchData.new(self, string, byte_index, slots) unless finish == LazyDFA::GAVE_UP
+          spent = candidates.spent
+        end
       end
       searcher = Searcher.open(@program, string, limits, timeout, @cache_pool)
       # The work a candidate search did before it declined counts against
       # the call's allowance.
-      searcher.meter.charge(candidates.spent, byte_index) if candidates.spent > 0
+      searcher.meter.charge(spent, byte_index) if spent > 0
       find_match(searcher, string, byte_index, options, limits, timeout)
     ensure
       searcher.try(&.finish)
