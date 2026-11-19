@@ -368,6 +368,15 @@ describe Mica::Regex::Syntax do
         .limit_name.should eq("max_class_ranges")
     end
 
+    it_satisfies "REGEX-R1-preflight", "shares the Hir of ASCII literals and the set of dot between translations" do
+      translate = ->(source : String) { Mica::Regex::Syntax.translate(source, dialect: :crystal, compile_limits: TRUSTED).root }
+      translate.call("a").should be(translate.call("a"))
+      translate.call("é").should_not be(translate.call("é"))
+      translate.call(".").as(Mica::Regex::Hir::Class).code_point_set
+        .should be(translate.call("x.").as(Mica::Regex::Hir::Concatenation).list_of_children[1].as(Mica::Regex::Hir::Class).code_point_set)
+      translate.call("(?s).").to_s.should eq(Mica::Regex::ClassLowering.any_character(true).to_s)
+    end
+
     it_satisfies "REGEX-R1-preflight", "compiles an ASCII class to one byte state, as its trie would" do
       one = Mica::Regex::Syntax.compile("[a-c]", dialect: :crystal, compile_limits: TRUSTED)
       one.list_of_states.count(&.kind.byte_range?).should eq(1)

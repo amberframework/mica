@@ -244,10 +244,15 @@ module Mica::Regex
     end
 
     # Returns `.` (*matches_newline* false: everything but LF) or `\N`.
+    # The two sets are shared by the process (sets are never changed after
+    # they are made), so every `.` is the same set and finds its automaton
+    # in `ClassMemo` by identity.
     def self.any_character(matches_newline : Bool) : CodePointSet
-      return CodePointSet.from_bounds([0, CodePointSet::MAX_CODE_POINT]) if matches_newline
-      CodePointSet.from_bounds([0, 0x09, 0x0B, CodePointSet::MAX_CODE_POINT])
+      matches_newline ? ANY_CHARACTER : ANY_CHARACTER_BUT_NEWLINE
     end
+
+    private ANY_CHARACTER             = CodePointSet.from_bounds([0, CodePointSet::MAX_CODE_POINT])
+    private ANY_CHARACTER_BUT_NEWLINE = CodePointSet.from_bounds([0, 0x09, 0x0B, CodePointSet::MAX_CODE_POINT])
 
     # Sorts *list_of_ranges* in place and merges overlapping and adjacent
     # ranges into bounds.
