@@ -40,46 +40,50 @@ module Mica::Regex
       states = program.list_of_states
       @accept_node = program.start_state
       @start_node = states.index(&.kind.match?) || raise Mica::Error.new("internal error: the program has no match state")
-      # Byte edges as {node, transition}, epsilon edges as {node, target, look}.
-      list_of_byte_edges = [] of {Int32, Program::Transition}
-      list_of_epsilon_edges = [] of {Int32, Int32, Int32}
+      # The reversed classes' edges as {node, transition}; the forward
+      # program's edges are counted, then placed, in two passes.
+      list_of_class_edges = [] of {Int32, Program::Transition}
       reversed = Array(Bool).new(states.size, false)
       node_count = states.size
       if reverse_classes
-        closed = closed_blocks(program)
+        closed = ReverseNFA.closed_blocks(program)
         program.list_of_class_blocks.each_with_index do |block, index|
           next unless closed[index]
-          node_count = ReverseNFA.reverse_class(program, block, node_count, list_of_byte_edges, reversed)
+          node_count = ReverseNFA.reverse_class(program, block, node_count, list_of_class_edges, reversed)
         end
       end
-      each_forward_edge(program) do |source, target, look, low, high|
-        if look == BYTE_EDGE
-          list_of_byte_edges << {target, Program::Transition.new(low, high, source)} unless reversed[source]
-        else
-          list_of_epsilon_edges << {target, source, look}
+      epsilon_counts = Array(Int32).new(node_count + 1, 0)
+      byte_counts = Array(Int32).new(node_count + 1, 0)
+      ReverseNFA.each_forward_edge(program) do |source, target, look, _, _|
+        if look != BYTE_EDGE
+          epsilon_counts[target + 1] += 1
+        elsif !reversed[source]
+          byte_counts[target + 1] += 1
         end
       end
-      @epsilon_offsets = Array(Int32).new(node_count + 1, 0)
-      @byte_offsets = Array(Int32).new(node_count + 1, 0)
-      list_of_epsilon_edges.each { |node, _, _| @epsilon_offsets[node + 1] += 1 }
-      list_of_byte_edges.each { |node, _| @byte_offsets[node + 1] += 1 }
+      list_of_class_edges.each { |node, _| byte_counts[node + 1] += 1 }
       node_count.times do |index|
-        @epsilon_offsets[index + 1] += @epsilon_offsets[index]
-        @byte_offsets[index + 1] += @byte_offsets[index]
+        epsilon_counts[index + 1] += epsilon_counts[index]
+        byte_counts[index + 1] += byte_counts[index]
       end
-      epsilon_fill = @epsilon_offsets.dup
-      byte_fill = @byte_offsets.dup
-      @epsilon_targets = Array(Int32).new(list_of_epsilon_edges.size, 0)
-      @epsilon_looks = Array(Int32).new(list_of_epsilon_edges.size, 0)
-      list_of_epsilon_edges.each do |node, target, look|
-        @epsilon_targets[epsilon_fill[node]] = target
-        @epsilon_looks[epsilon_fill[node]] = look
-        epsilon_fill[node] += 1
+      @epsilon_offsets = epsilon_counts.dup
+      @byte_offsets = byte_counts.dup
+      @epsilon_targets = Array(Int32).new(epsilon_counts[node_count], 0)
+      @epsilon_looks = Array(Int32).new(epsilon_counts[node_count], 0)
+      @list_of_byte_edges = Array(Program::Transition).new(byte_counts[node_count], Program::Transition.new(0_u8, 0_u8, 0))
+      ReverseNFA.each_forward_edge(program) do |source, target, look, low, high|
+        if look != BYTE_EDGE
+          @epsilon_targets[epsilon_counts[target]] = source
+          @epsilon_looks[epsilon_counts[target]] = look
+          epsilon_counts[target] += 1
+        elsif !reversed[source]
+          @list_of_byte_edges[byte_counts[target]] = Program::Transition.new(low, high, source)
+          byte_counts[target] += 1
+        end
       end
-      @list_of_byte_edges = Array(Program::Transition).new(list_of_byte_edges.size, Program::Transition.new(0_u8, 0_u8, 0))
-      list_of_byte_edges.each do |node, transition|
-        @list_of_byte_edges[byte_fill[node]] = transition
-        byte_fill[node] += 1
+      list_of_class_edges.each do |node, transition|
+        @list_of_byte_edges[byte_counts[node]] = transition
+        byte_counts[node] += 1
       end
     end
 
@@ -104,11 +108,29 @@ module Mica::Regex
       node_count + reversed_class.node_count - 1
     end
 
+    # The node count a `ReverseNFA` of *program* with *reverse_classes*
+    # would have, found without building it (the reversed classes come
+    # from the process-wide memo after the first program that uses them);
+    # counting stops once it passes *limit*.
+    def self.widened_node_count(program : Program, limit : Int64) : Int64
+      closed = closed_blocks(program)
+      count = program.state_count.to_i64
+      program.list_of_class_blocks.each_with_index do |block, index|
+        next unless closed[index]
+        budget = REVERSED_NODES_PER_STATE * (block.end_state - block.first_state)
+        if reversed_class = ReversedClass.for(program, block, budget)
+          count += reversed_class.node_count - 1
+          break if count > limit
+        end
+      end
+      count
+    end
+
     # For each recorded class, whether nothing outside it leads into it
     # but to its entry (a repetition may copy a class's states rather than
     # compile it again; a copy that led into the original's inner states
     # would lose its paths once those states have no reverse edges).
-    private def closed_blocks(program : Program) : Array(Bool)
+    protected def self.closed_blocks(program : Program) : Array(Bool)
       blocks = program.list_of_class_blocks
       closed = Array(Bool).new(blocks.size, true)
       block_of = Array(Int32).new(program.state_count, -1)
@@ -153,7 +175,7 @@ module Mica::Regex
 
     private BYTE_EDGE = -2
 
-    private def each_forward_edge(program : Program, & : Int32, Int32, Int32, UInt8, UInt8 ->) : Nil
+    protected def self.each_forward_edge(program : Program, & : Int32, Int32, Int32, UInt8, UInt8 ->) : Nil
       program.list_of_states.each_with_index do |state, source|
         case state.kind
         when .byte_range?

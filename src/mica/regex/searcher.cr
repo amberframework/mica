@@ -357,12 +357,14 @@ module Mica::Regex
     # reverse DFA finds it.
     private def match_start(lease : SearchLease, dfa : LazyDFA, cache : DFACache?, bytes : Bytes, finish : Int32,
                             lower_bound : Int32) : Int32
-      short_match = cache && !@engine.reversed_classes? ? @program.plan.short_match : nil
-      if cache && short_match && (@engine.each_start? || reverse_thrashing?(lease))
-        return start_from_each_start(dfa, cache, short_match, bytes, finish, lower_bound)
+      # The match bound is analyzed only when a start may come from it.
+      if cache && !@engine.reversed_classes? && (@engine.each_start? || reverse_thrashing?(lease))
+        if (short_match = @program.plan.short_match) && (@engine.each_start? || !reverse_retry?(lease))
+          return start_from_each_start(dfa, cache, short_match, bytes, finish, lower_bound)
+        end
       end
       start = reverse_start(lease, bytes, finish, lower_bound)
-      if start == LazyDFA::GAVE_UP && cache && short_match
+      if start == LazyDFA::GAVE_UP && cache && !@engine.reversed_classes? && (short_match = @program.plan.short_match)
         return start_from_each_start(dfa, cache, short_match, bytes, finish, lower_bound)
       end
       start
@@ -379,16 +381,22 @@ module Mica::Regex
       raise Mica::Error.new("internal error: no start found for the match ending at #{finish}")
     end
 
-    # True when the reverse cache thrashes (`DFACache#thrashing?`) and this
-    # is not one of its periodic retries, whose outcome `reverse_start`
-    # reports.
+    # True when the reverse cache thrashes (`DFACache#thrashing?`).
     private def reverse_thrashing?(lease : SearchLease) : Bool
       reverse = @program.plan.reverse || return false
       cache = lease.reverse_cache(reverse) || return false
-      return false unless cache.thrashing?
-      return true unless cache.retry?
+      cache.thrashing?
+    end
+
+    # True when this search is one of the thrashing reverse cache's
+    # periodic retries (see `DFACache#retry?`), whose outcome
+    # `reverse_start` reports.
+    private def reverse_retry?(lease : SearchLease) : Bool
+      reverse = @program.plan.reverse || return false
+      cache = lease.reverse_cache(reverse) || return false
+      return false unless cache.retry?
       @reverse_retry_from = {cache.states_built, cache.bytes_read}
-      false
+      true
     end
 
     private def reverse_start(lease : SearchLease, bytes : Bytes, finish : Int32, lower_bound : Int32) : Int32
@@ -400,7 +408,7 @@ module Mica::Regex
         @reverse_retry_from = nil
         cache.judge_retry(*retry_from)
       end
-      if cache.widest_key > SearchPlan::WIDE_REVERSE_KEY && !reverse.with_reversed_classes?
+      if cache.wide_states >= SearchPlan::WIDE_STATES_TO_WIDEN && !reverse.with_reversed_classes?
         plan.widen_reverse(@cache_pool.max_cache_bytes)
       end
       if start == LazyDFA::NO_MATCH
@@ -415,10 +423,10 @@ module Mica::Regex
     # (`SearchPlan#short_match`), and this is not a periodic retry.
     private def from_each_start?(cache : DFACache, anchored : Bool) : Bool
       return false if anchored
+      return false unless @engine.each_start? || cache.thrashing?
       plan = @plan
       return false unless plan && plan.short_match
       return true if @engine.each_start?
-      return false unless cache.thrashing?
       return true unless cache.retry?
       @retry_from = {cache.states_built, cache.bytes_read}
       false

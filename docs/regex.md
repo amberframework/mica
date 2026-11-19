@@ -440,13 +440,16 @@ do, into a `DFACache` leased for the search:
   byte read backward fits the last byte of every sequence that allows it,
   so a reverse state for `\w` or `\p{L}` next to Cyrillic text held about
   1,100 to 1,800 NFA states. The compiler records each class of more than
-  one state (`Program::ClassBlock`), and once a reverse search builds a
-  state wider than 128 NFA states, the plan widens its reverse DFA (once):
-  each class nothing else leads into is read through its `ReversedClass`,
-  the trie of its reversed sequences made deterministic by the subset
-  construction (as Rust regex compiles its reverse NFA), so a byte read
-  backward reaches one node. Reverse states then hold a few NFA states
-  (`\b\w{12,}\b` over Russian subtitles: about 7), and that search goes
+  one state (`Program::ClassBlock`), and once a reverse cache has built 16
+  states wider than 256 NFA states, the plan widens its reverse DFA
+  (once): each class nothing else leads into is read through its
+  `ReversedClass`, the trie of its reversed sequences made deterministic
+  by the subset construction and then minimized (as Rust regex compiles
+  its reverse NFA), so a byte read backward reaches one node. The plan
+  does not widen when the widened DFA's builder scratch would take more
+  than half of the per-cache ceiling (`\p{L}{256}`). Reverse states then
+  hold a few NFA states (`\b\w{12,}\b` over Russian subtitles: about 7),
+  and that search goes
   from 56 ms to 0.5 ms. Reversing a class costs a few milliseconds the
   first time; the result is memoized process-wide by the class's shape
   (at most 256 classes), so only programs that meet wide reverse states

@@ -28,8 +28,10 @@ module Mica::Regex
     getter states_built = 0_i64
     getter bytes_read = 0_i64
     @searches_since_thrash = 0
-    # The most NFA states one state built so far held.
+    # The most NFA states one state built so far held, and how many states
+    # built held more than `SearchPlan::WIDE_REVERSE_KEY`.
     getter widest_key = 0
+    getter wide_states = 0
     @retry_interval = FIRST_RETRY_INTERVAL
     getter dfa : LazyDFA
 
@@ -182,6 +184,7 @@ module Mica::Regex
       end
       return LazyDFA::GAVE_UP unless reserve(@bytes_used + cost)
       @widest_key = key.size if key.size > @widest_key
+      @wide_states += 1 if key.size > SearchPlan::WIDE_REVERSE_KEY
       add_state(key.dup, cost)
     end
 

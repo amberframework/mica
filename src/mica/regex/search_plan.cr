@@ -108,18 +108,22 @@ module Mica::Regex
       end
     end
 
-    # A reverse DFA state holding more NFA states than this makes
-    # `widen_reverse` worth its one-time cost.
-    WIDE_REVERSE_KEY = 128
+    # A reverse DFA state holding more NFA states than this is wide; a
+    # reverse cache that has built `WIDE_STATES_TO_WIDEN` wide states makes
+    # `widen_reverse` worth its one-time cost (a single short search does
+    # not).
+    WIDE_REVERSE_KEY     = 256
+    WIDE_STATES_TO_WIDEN =  16
 
     # Replaces the reverse DFA with one that reads each class backward
-    # through its `ReversedClass`, once: a search whose reverse states grow
-    # wider than `WIDE_REVERSE_KEY` NFA states calls it (large Unicode
-    # classes next to non-ASCII text). Reversing a class costs milliseconds
-    # the first time in a process, so only programs that need it pay.
+    # through its `ReversedClass`, once: a search whose reverse cache has
+    # built `WIDE_STATES_TO_WIDEN` states wider than `WIDE_REVERSE_KEY` NFA
+    # states calls it (large Unicode classes next to non-ASCII text).
+    # Reversing a class costs milliseconds the first time in a process, so
+    # only programs that need it pay.
     #
     # The widened DFA reads more NFA nodes, so its cache's fixed part is
-    # larger; when that part would take more than a quarter of
+    # larger; when that part would take more than half of
     # *max_cache_bytes* (`\p{L}{256}` repeats one class 256 times), the
     # plan keeps its reverse DFA and does not try again.
     def widen_reverse(max_cache_bytes : Int64) : Nil
@@ -127,11 +131,15 @@ module Mica::Regex
       current = @reverse.get
       return if current && current.with_reversed_classes?
       return if @program.list_of_class_blocks.empty?
-      widened = reverse_with_reversed_classes || return
-      if DFACache.initial_bytes(widened) * 4 > max_cache_bytes
+      # The widened DFA has at least the program's nodes; only when those fit
+      # are the reversed classes counted.
+      scratch_per_node = DFABuilder::BYTES_PER_STATE.to_i64 * 2
+      node_limit = max_cache_bytes // scratch_per_node
+      if @program.state_count > node_limit || ReverseNFA.widened_node_count(@program, node_limit) > node_limit
         @widen_refused.set(1)
         return
       end
+      widened = reverse_with_reversed_classes || return
       @mutex.synchronize { @reverse.set(widened) }
     end
 

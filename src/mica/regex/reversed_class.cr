@@ -6,10 +6,10 @@ module Mica::Regex
   # sequence that allows it, so a reverse DFA state for `\w` or `\p{L}`
   # would hold hundreds of NFA states. A `ReversedClass` holds the class's
   # reversed sequences made deterministic instead (a trie of the reversed
-  # sequences, then the subset construction over it), as Rust regex
-  # compiles its reverse NFA: each node's edges have disjoint byte ranges,
-  # so reading a byte backward reaches one node, and the class's entry
-  # where a sequence may begin.
+  # sequences, then the subset construction over it, then minimized), as
+  # Rust regex compiles its reverse NFA: each node's edges have disjoint
+  # byte ranges, so reading a byte backward reaches one node, and the
+  # class's entry where a sequence may begin.
   #
   # Node 0 is the class's exit; `ENTRY` stands for its entry. Built from a
   # block's shape (its states with targets relative to the block), so every
@@ -191,7 +191,53 @@ module Mica::Regex
           list_of_edges << {node, low.to_u8, high.to_u8, target}
         end
       end
-      new(list_of_edges, node_ids.size)
+      minimize(list_of_edges, node_ids.size)
+    end
+
+    # Merges the nodes of the (acyclic) reversed class that have the same
+    # edges to the same nodes, children before parents, as a minimal
+    # acyclic automaton does: the subset construction leaves many nodes
+    # that differ only in how they were reached.
+    private def self.minimize(list_of_edges : Array({Int32, UInt8, UInt8, Int32}), node_count : Int32) : ReversedClass
+      list_of_out = Array(Array({UInt8, UInt8, Int32})).new(node_count) { [] of {UInt8, UInt8, Int32} }
+      list_of_edges.each { |node, low, high, target| list_of_out[node] << {low, high, target} }
+      canonical = Array(Int32).new(node_count, -1)
+      signatures = {} of Array({UInt8, UInt8, Int32}) => Int32
+      list_of_merged = [] of Array({UInt8, UInt8, Int32})
+      # Depth first from the root; a node is placed once its children are.
+      list_of_pending = [{0, false}]
+      while pending = list_of_pending.pop?
+        node, children_done = pending
+        next if canonical[node] >= 0
+        unless children_done
+          list_of_pending << {node, true}
+          list_of_out[node].each do |_, _, target|
+            list_of_pending << {target, false} if target != ENTRY && canonical[target] < 0
+          end
+          next
+        end
+        signature = list_of_out[node].map do |low, high, target|
+          {low, high, target == ENTRY ? ENTRY : canonical[target]}
+        end.sort!
+        # The root keeps its own node (0), as the class's exit.
+        if node != 0 && (existing = signatures[signature]?)
+          canonical[node] = existing
+          next
+        end
+        canonical[node] = list_of_merged.size
+        list_of_merged << signature
+        signatures[signature] = canonical[node] if node != 0
+      end
+      # Number the root 0 and the other merged nodes from 1.
+      root = canonical[0]
+      renumber = ->(merged : Int32) { merged == root ? 0 : (merged < root ? merged + 1 : merged) }
+      list_of_minimal = [] of {Int32, UInt8, UInt8, Int32}
+      list_of_merged.each_with_index do |signature, merged|
+        signature.each do |low, high, target|
+          list_of_minimal << {renumber.call(merged), low, high, target == ENTRY ? ENTRY : renumber.call(target)}
+        end
+      end
+      new(list_of_minimal, list_of_merged.size)
     end
 
     # Yields each maximal byte interval over which the edges out of
