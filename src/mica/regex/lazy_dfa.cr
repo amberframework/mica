@@ -278,6 +278,14 @@ module Mica::Regex
             chunk_end = at + meter.readable(wanted_end - at, at)
           end
           at &+= 1
+          if entry == current && entry & (SPECIAL | START_ENTRY) == 0 && !words
+            # A state that loops to itself (`.*`, `[^"]*`): its row stays,
+            # so the loads of the run no longer wait on each other.
+            row = entry & ROW_MASK
+            while at < chunk_end && table[row &+ class_table[bytes[at]]] == entry
+              at &+= 1
+            end
+          end
           current = entry
           if entry & (SPECIAL | START_ENTRY) != 0
             break if scan && entry & START_ENTRY != 0

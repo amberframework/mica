@@ -54,9 +54,19 @@ module Mica::Regex
     private STEP_TAKES_EDGE    = 1
     private STEP_REACHES_MATCH = 2
 
+    # The assertions that hold only at the end of the haystack or just
+    # before a line feed that ends it (`\z`, and `$` and `\Z`).
+    private END_ONLY_LOOKS = (1_u32 << Program::LookKind::EndOfText.value) |
+                             (1_u32 << Program::LookKind::EndOfTextOrFinalNewline.value)
+
+    # True when no state left a byte path out below its match path, so
+    # `search` never returns `LazyDFA::GAVE_UP` once it reads to the end.
+    getter? decisive : Bool
+
     def initialize(@byte_classes : ByteClasses, @table : Array(Int32), @match_edges : Array(Int32),
                    @list_of_edges : Array(Edge), @list_of_shadows : Array(Bool))
       @class_count = @byte_classes.class_count
+      @decisive = @list_of_shadows.none?
       @steps = @table.map do |index|
         next -1 if index < 0
         edge = @list_of_edges[index]
@@ -70,19 +80,24 @@ module Mica::Regex
     # Fills *slots* with the captures of the match `[start, finish)` of
     # *haystack*, which the span search found. Returns false when no path
     # reads the span (the caller then uses another engine).
-    # True when *state* has a match path that can hold before the end of
-    # the haystack, or one that left a byte path out (see `search`): only
-    # these states stop the search's tight loop. A match path that asserts
-    # `\z` holds only at the end, where `search` checks it anyway.
+    # True when *state* has a match path that can hold before the last
+    # byte of the haystack, or one that left a byte path out (see
+    # `search`): only these states stop the search's tight loop. A match
+    # path that asserts `\z`, `$` or `\Z` holds only at the end or just
+    # before a final line feed, and `search` checks every state's match
+    # path at those two positions.
     private def matches_before_end?(state : Int32) : Bool
       index = @match_edges[state]
       return false if index < 0
-      @list_of_shadows[state] || @list_of_edges[index].looks & (1_u32 << Program::LookKind::EndOfText.value) == 0
+      @list_of_shadows[state] || @list_of_edges[index].looks & END_ONLY_LOOKS == 0
     end
 
     def captures(haystack : Bytes, start : Int32, finish : Int32, search_start : Int32, slots : Slice(Int64),
                  meter : SearchMeter) : Bool
       slots.fill(PikeVM::UNSET)
+      steps = @steps.to_unsafe
+      class_of = @byte_classes.table
+      bytes = haystack.to_unsafe
       state = 0
       at = start
       charged = start
@@ -95,7 +110,26 @@ module Mica::Regex
           charged = at
           allowed_end = at + meter.readable(Math.min(finish - at, PrefilterScan::CHARGE_CHUNK), at)
         end
-        index = @table.unsafe_fetch(state * @class_count + @byte_classes.class_of(haystack.unsafe_fetch(at)))
+        # Steps with no slots or assertions in a tight loop, one table
+        # load per byte: match paths matter only at *finish*.
+        row = state * @class_count
+        bound = Math.min(finish, allowed_end)
+        while at < bound
+          step = steps[row &+ class_of[bytes[at]]]
+          break unless step >= 0 && step & STEP_TAKES_EDGE == 0
+          at &+= 1
+          # A state that loops to itself: its row stays, so the loads no
+          # longer wait on each other.
+          if step >> 2 == row
+            while at < bound && steps[row &+ class_of[bytes[at]]] == step
+              at &+= 1
+            end
+          end
+          row = step >> 2
+        end
+        state = row // @class_count
+        next if at >= bound
+        index = @table.unsafe_fetch(row + class_of[bytes[at]])
         return false if index < 0
         edge = @list_of_edges.unsafe_fetch(index)
         return false unless take(edge, haystack, at, search_start, slots)
@@ -153,7 +187,7 @@ module Mica::Regex
       row = 0
       reaches_match = @match_edges.unsafe_fetch(0) >= 0
       while true
-        if reaches_match || (at >= size && @match_edges.unsafe_fetch(row // @class_count) >= 0)
+        if reaches_match || (at >= size - 1 && @match_edges.unsafe_fetch(row // @class_count) >= 0)
           edge = edges[@match_edges.unsafe_fetch(row // @class_count)]
           if holds?(edge, haystack, at, search_start)
             slots.copy_from(scratch.to_unsafe, slots.size)
@@ -175,18 +209,29 @@ module Mica::Regex
           allowed_end = at + meter.readable(Math.min(Math.min(size, stop) - at, PrefilterScan::CHARGE_CHUNK), at)
         end
         # The common step (no edge work, no match path ahead) in a tight
-        # loop up to the next bound: one table load per byte.
+        # loop up to the next bound, and short of the last byte, whose
+        # position the check above must see: one table load per byte.
         bound = Math.min(Math.min(size, stop), allowed_end)
-        step = 0
-        while at < bound
+        tight_bound = Math.min(bound, size - 1)
+        entered = at
+        while at < tight_bound
           step = steps[row &+ class_of[bytes[at]]]
           break unless step >= 0 && step & (STEP_TAKES_EDGE | STEP_REACHES_MATCH) == 0
-          row = step >> 2
           reaches_match = false
           at &+= 1
+          # A state that loops to itself (`.*`, `[^"]*`): its row stays,
+          # so the loads no longer wait on each other.
+          if step >> 2 == row
+            while at < tight_bound && steps[row &+ class_of[bytes[at]]] == step
+              at &+= 1
+            end
+          end
+          row = step >> 2
         end
-        next if at >= bound
+        # The last byte's position, reached in the run, is checked above.
+        next if at >= bound || (at > entered && at >= size - 1)
         cell = row &+ class_of[bytes[at]]
+        step = steps[cell]
         break if step < 0
         if step & STEP_TAKES_EDGE != 0
           edge = edges[table[cell]]

@@ -380,7 +380,7 @@ module Mica::Regex
                                    captures : Bool) : Slice(Int64)?
       span = @span_slots
       want_captures = captures && @program.slot_count > 2
-      if start_search?(anchored, end_anchored, want_captures)
+      if start_search?(anchored, end_anchored, want_captures, bytes.size - byte_index)
         found = find_at_starts(bytes, byte_index, anchored)
         unless found.nil?
           return nil unless found
@@ -401,15 +401,21 @@ module Mica::Regex
     # anchored, the pattern is one-pass and groups are wanted (without
     # groups the forward lazy DFA alone is cheaper per byte than the
     # one-pass DFA). An anchored search uses the one-pass DFA once an
-    # earlier capture pass has built it, so a search that never matches
-    # never builds it.
-    private def start_search?(anchored : Bool, end_anchored : Bool, want_captures : Bool) : Bool
+    # earlier capture pass has built it, or builds it when its *remaining*
+    # bytes are at least `ONE_PASS_BYTES_PER_STATE` per program state (the
+    # build, O(m) per DFA state, then costs less than the two passes it
+    # replaces), so a short search that never matches never builds it.
+    private def start_search?(anchored : Bool, end_anchored : Bool, want_captures : Bool, remaining : Int32) : Bool
       return false unless @engine.auto? && !@start_search_off && !end_anchored && !@dfa_gave_up
       plan = @plan || return false
       return false if @program.options.first_line? || plan.literal_search? || !plan.forward
       return !!plan.prefilter unless anchored
-      want_captures && !plan.built_one_pass.nil?
+      return false unless want_captures
+      !plan.built_one_pass.nil? || remaining.to_i64 >= ONE_PASS_BYTES_PER_STATE * @program.state_count
     end
+
+    # See `start_search?`.
+    ONE_PASS_BYTES_PER_STATE = 64_i64
 
     # Searches anchored at each position where a match must start (see
     # `start_search?`): on the one-pass DFA, which gives the span and the
@@ -436,7 +442,10 @@ module Mica::Regex
       one_pass = plan.one_pass
       if anchored
         return nil unless one_pass
-        return try_start(one_pass, nil, nil, bytes, byte_index, byte_index)
+        # A decisive one-pass DFA never gives up once it has read to the
+        # end, so the only try reads as far as the match needs: one pass
+        # in place of the span search and then the capture pass.
+        return try_start(one_pass, nil, nil, bytes, byte_index, byte_index, !one_pass.decisive?)
       end
       forward = nil
       cache = nil
@@ -464,10 +473,11 @@ module Mica::Regex
     MAX_TRY_BYTES = 64
 
     # One anchored try at *start* (see `find_at_starts`), on *one_pass*
-    # when there is one, else on *forward* with *cache*.
+    # when there is one, else on *forward* with *cache*; it reads at most
+    # `MAX_TRY_BYTES` while *bounded*.
     private def try_start(one_pass : OnePassDFA?, forward : LazyDFA?, cache : DFACache?, bytes : Bytes, start : Int32,
-                          byte_index : Int32) : Bool?
-      stop = start.to_i64 + MAX_TRY_BYTES > bytes.size ? Int32::MAX : start + MAX_TRY_BYTES
+                          byte_index : Int32, bounded : Bool = true) : Bool?
+      stop = !bounded || start.to_i64 + MAX_TRY_BYTES > bytes.size ? Int32::MAX : start + MAX_TRY_BYTES
       if one_pass
         scratch = @one_pass_scratch ||= Slice(Int64).new(@program.slot_count, PikeVM::UNSET)
         finish, scanned = one_pass.search(bytes, start, byte_index, @capture_slots, scratch, @meter, stop)
