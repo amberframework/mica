@@ -479,6 +479,102 @@ module Mica::Regex
     # `StartFilter.required_bytes`), found on first use.
     @required_bytes = Atomic(Array(UInt8)?).new(nil)
 
+    # The fewest bytes a match can read from each state (`UNREACHABLE` when
+    # no match is reachable), found once, on first use, for a program of at
+    # most `MIN_BYTES_MAX_STATES` states; nil for a larger one.
+    @list_of_min_bytes = Atomic(Array(Int32)?).new(nil)
+
+    # The most states a program may have for `list_of_min_bytes`: finding
+    # them reads every state and transition once, which a short capture
+    # pass of a larger program would not repay.
+    MIN_BYTES_MAX_STATES = 1024
+    # How many requests for `list_of_min_bytes` answer nil before it is
+    # found, so a program read once (a cold search) never finds it.
+    MIN_BYTES_AFTER = 16
+    @min_bytes_requests = Atomic(Int32).new(0)
+    # `list_of_min_bytes` for a state from which no match is reachable.
+    UNREACHABLE = Int32::MAX // 2
+
+    # :nodoc:
+    # The fewest bytes any match reads from each state on, or nil for a
+    # program of more than `MIN_BYTES_MAX_STATES` states. A search that
+    # must end by a bound (a capture pass over a known span) drops a
+    # thread at a state whose fewest bytes do not fit before the bound:
+    # an alternative such as `\w{14}` over a 7-byte span fails at once
+    # instead of after reading seven bytes. One breadth-first pass over the
+    # reversed edges from the match states, byte edges weighing one and
+    # the others none: O(states + transitions).
+    def list_of_min_bytes : Array(Int32)?
+      return nil if state_count > MIN_BYTES_MAX_STATES
+      if found = @list_of_min_bytes.get(:acquire)
+        return found
+      end
+      # A pattern whose groups are read a few times does not pay for the
+      # pass: it is made on the `MIN_BYTES_AFTER`th request.
+      return nil if @min_bytes_requests.add(1, :relaxed) < MIN_BYTES_AFTER
+      found = find_min_bytes
+      # Threads racing here find the same lengths; the first to publish wins.
+      @list_of_min_bytes.compare_and_set(nil, found)
+      @list_of_min_bytes.get(:acquire) || found
+    end
+
+    private def find_min_bytes : Array(Int32)
+      count = state_count
+      # The reversed edges, grouped by target (counted, then placed).
+      list_of_edge_counts = Array(Int32).new(count + 1, 0)
+      each_edge { |_, target, _| list_of_edge_counts[target + 1] += 1 }
+      count.times { |index| list_of_edge_counts[index + 1] += list_of_edge_counts[index] }
+      list_of_edge_starts = list_of_edge_counts.dup
+      list_of_sources = Array(Int32).new(list_of_edge_counts[count], 0)
+      list_of_weights = Array(Int32).new(list_of_edge_counts[count], 0)
+      each_edge do |source, target, weight|
+        place = list_of_edge_starts[target]
+        list_of_sources[place] = source
+        list_of_weights[place] = weight
+        list_of_edge_starts[target] = place + 1
+      end
+      min_bytes = Array(Int32).new(count, UNREACHABLE)
+      queue = Deque(Int32).new
+      each_state do |state, index|
+        if state.kind.match?
+          min_bytes[index] = 0
+          queue.push(index)
+        end
+      end
+      # 0-1 breadth-first search: a state reached over an edge of weight
+      # zero goes to the front, so states leave the queue in order of
+      # their distance.
+      while target = queue.shift?
+        distance = min_bytes[target]
+        (list_of_edge_counts[target]...list_of_edge_counts[target + 1]).each do |place|
+          source = list_of_sources[place]
+          weight = list_of_weights[place]
+          next unless distance + weight < min_bytes[source]
+          min_bytes[source] = distance + weight
+          weight == 0 ? queue.unshift(source) : queue.push(source)
+        end
+      end
+      min_bytes
+    end
+
+    # Yields each edge of the program as source, target and weight (1 for
+    # an edge that reads a byte, 0 otherwise).
+    private def each_edge(& : Int32, Int32, Int32 ->) : Nil
+      each_state do |state, index|
+        case state.kind
+        when .byte_range?
+          yield index, state.next_state, 1
+        when .sparse?
+          state.alternate.times { |offset| yield index, transition_at(index, state, offset).target, 1 }
+        when .split?
+          yield index, state.next_state, 0
+          yield index, state.alternate, 0
+        when .save?, .look?
+          yield index, state.next_state, 0
+        end
+      end
+    end
+
     # :nodoc:
     # The ASCII bytes every match contains, rarest first (see
     # `StartFilter.required_bytes`; found once, on first use).

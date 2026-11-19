@@ -150,21 +150,29 @@ module Mica::Core
     # Returns the offset of the first invalid sequence in *bytes* (its lead
     # byte, as `decode` reports it), or nil when all of it is valid UTF-8.
     #
-    # Runs in one pass over valid text: the ASCII prefix eight bytes at a
-    # time, then runs of ASCII sixteen bytes at a time and everything else
-    # through the shift DFA below, 64 bytes per step with one table
-    # read and one shift per byte (the row read does not wait on the
-    # state, so text in any script validates at about a byte per cycle).
-    # Only when that pass finds the text invalid does a second pass from
-    # the same place (`first_invalid_from`) track where each sequence
-    # begins, to report the offset.
+    # Runs in one pass over valid text: the ASCII prefix 32 bytes at a time
+    # (four words tested together), then runs of ASCII sixteen bytes at a
+    # time and everything else through the shift DFA below, 64 bytes per
+    # step with one table read and one shift per byte. Text past
+    # `TWO_STREAM_BYTES` is read as two halves at once, split where a
+    # sequence begins: each half's next state waits on its last one (a
+    # shift, then a mask), so two independent chains keep the core busy
+    # where one leaves it waiting, and text in any script validates at
+    # about two bytes per cycle. Only when that pass finds the text invalid
+    # does a second pass from the same place (`first_invalid_from`) track
+    # where each sequence begins, to report the offset.
     def self.first_invalid_offset(bytes : Bytes) : Int32?
       size = bytes.size
       pointer = bytes.to_unsafe
-      # The ASCII prefix, eight bytes then one at a time: a haystack that
-      # is all ASCII (the common case) never reaches the DFA.
+      # The ASCII prefix, 32 bytes, then eight, then one at a time: a
+      # haystack that is all ASCII (the common case) never reaches the DFA.
       index = 0
-      while index + 8 <= size && (pointer + index).as(UInt64*).value & 0x8080808080808080_u64 == 0
+      while index + 32 <= size &&
+            ((pointer + index).as(UInt64*).value | (pointer + index + 8).as(UInt64*).value |
+              (pointer + index + 16).as(UInt64*).value | (pointer + index + 24).as(UInt64*).value) & ASCII_MASK == 0
+        index += 32
+      end
+      while index + 8 <= size && (pointer + index).as(UInt64*).value & ASCII_MASK == 0
         index += 8
       end
       while index < size && pointer[index] < 0x80
@@ -172,30 +180,124 @@ module Mica::Core
       end
       return nil if index == size
       start = index
+      if size - start >= TWO_STREAM_BYTES && (middle = sequence_start_near(bytes, start + (size - start) // 2))
+        valid = valid_in_two_streams?(pointer, start, middle, size)
+      else
+        valid = valid_from?(pointer, start, size)
+      end
+      valid ? nil : first_invalid_from(bytes, start)
+    end
+
+    # Text at least this long past its ASCII prefix is validated as two
+    # streams (see `first_invalid_offset`).
+    private TWO_STREAM_BYTES = 512
+
+    # The high bit of each byte of a word: a word is ASCII when none is set.
+    private ASCII_MASK = 0x8080808080808080_u64
+
+    # The first index at or after *index* (within three bytes) where a
+    # sequence may begin (a byte that is not a continuation byte), or nil.
+    # Two halves split there are valid exactly when the whole is: a
+    # sequence the first half leaves unfinished meets that byte, which
+    # cannot continue it, so the first half ends outside the accept state.
+    private def self.sequence_start_near(bytes : Bytes, index : Int32) : Int32?
+      stop = Math.min(index + 4, bytes.size)
+      while index < stop
+        return index if bytes.unsafe_fetch(index) & 0xC0 != 0x80
+        index += 1
+      end
+      nil
+    end
+
+    # True when *pointer*[index...stop] is valid UTF-8, read from the
+    # accept state through the shift DFA.
+    private def self.valid_from?(pointer : UInt8*, index : Int32, stop : Int32) : Bool
       table = VALIDATION_TABLE.to_unsafe
       # The state's shift sits in the low six bits; the bits above are what
       # is left of the row it came from, which the next shift drops.
       state = ACCEPT_SHIFT
-      while index + 64 <= size
+      while index + 64 <= stop
         if state & 63 == ACCEPT_SHIFT &&
-           ((pointer + index).as(UInt64*).value | (pointer + index + 8).as(UInt64*).value) & 0x8080808080808080_u64 == 0
+           ((pointer + index).as(UInt64*).value | (pointer + index + 8).as(UInt64*).value) & ASCII_MASK == 0
           index += 16
           next
         end
         # Text that is not ASCII here likely goes on that way: 64 bytes
         # through the DFA before the next ASCII check.
-        {% for offset in 0...64 %}
-          state = table[pointer[index + {{ offset }}]].unsafe_shr(state & 63)
+        # One word load per eight bytes, each byte taken from it by a
+        # shift (the word is little-endian, as on every target Mica builds
+        # for; see `Prefilter.word_at`): a load per byte for the table row
+        # alone, where a load per byte for the byte too leaves the loads
+        # the limit.
+        {% for word in 0...8 %}
+          word = (pointer + index + {{ word * 8 }}).as(UInt64*).value
+          {% for byte in 0...8 %}
+            state = table[(word >> {{ byte * 8 }}) & 0xFF].unsafe_shr(state & 63)
+          {% end %}
         {% end %}
-        return first_invalid_from(bytes, start) if state & 63 == ERROR_SHIFT
+        return false if state & 63 == ERROR_SHIFT
         index += 64
       end
-      while index < size
+      while index < stop
         state = table[pointer[index]].unsafe_shr(state & 63)
         index += 1
       end
-      return nil if state & 63 == ACCEPT_SHIFT
-      first_invalid_from(bytes, start)
+      state & 63 == ACCEPT_SHIFT
+    end
+
+    # True when *pointer*[start...stop] is valid UTF-8, read as the two
+    # streams start...middle and middle...stop (*middle* begins a sequence,
+    # see `sequence_start_near`), 64 bytes of each per step, interleaved.
+    # A stream in its accept state skips ASCII sixteen bytes at a time on
+    # its own; the streams step together while each has 64 bytes left, and
+    # each finishes alone.
+    private def self.valid_in_two_streams?(pointer : UInt8*, start : Int32, middle : Int32, stop : Int32) : Bool
+      table = VALIDATION_TABLE.to_unsafe
+      first = start
+      second = middle
+      first_state = ACCEPT_SHIFT
+      second_state = ACCEPT_SHIFT
+      while true
+        while first + 64 <= middle && first_state & 63 == ACCEPT_SHIFT &&
+              ((pointer + first).as(UInt64*).value | (pointer + first + 8).as(UInt64*).value) & ASCII_MASK == 0
+          first += 16
+        end
+        while second + 64 <= stop && second_state & 63 == ACCEPT_SHIFT &&
+              ((pointer + second).as(UInt64*).value | (pointer + second + 8).as(UInt64*).value) & ASCII_MASK == 0
+          second += 16
+        end
+        break unless first + 64 <= middle && second + 64 <= stop
+        {% for word in 0...8 %}
+          first_word = (pointer + first + {{ word * 8 }}).as(UInt64*).value
+          second_word = (pointer + second + {{ word * 8 }}).as(UInt64*).value
+          {% for byte in 0...8 %}
+            first_state = table[(first_word >> {{ byte * 8 }}) & 0xFF].unsafe_shr(first_state & 63)
+            second_state = table[(second_word >> {{ byte * 8 }}) & 0xFF].unsafe_shr(second_state & 63)
+          {% end %}
+        {% end %}
+        return false if first_state & 63 == ERROR_SHIFT || second_state & 63 == ERROR_SHIFT
+        first += 64
+        second += 64
+      end
+      # Each stream's rest, alone, from the state it reached.
+      finish_stream?(pointer, table, first, middle, first_state) && finish_stream?(pointer, table, second, stop, second_state)
+    end
+
+    # True when the rest of a stream, *pointer*[index...stop] read on from
+    # *state*, ends in the accept state.
+    private def self.finish_stream?(pointer : UInt8*, table : UInt64*, index : Int32, stop : Int32, state : UInt64) : Bool
+      if state & 63 == ACCEPT_SHIFT
+        return valid_from?(pointer, index, stop)
+      end
+      # Finish the sequence in progress byte by byte (at most three bytes),
+      # then the rest from the accept state.
+      while index < stop && state & 63 != ACCEPT_SHIFT
+        state = table[pointer[index]].unsafe_shr(state & 63)
+        return false if state & 63 == ERROR_SHIFT
+        index += 1
+      end
+      return false unless state & 63 == ACCEPT_SHIFT
+      valid_from?(pointer, index, stop)
     end
 
     # The offset of the first invalid sequence in *bytes* at or after

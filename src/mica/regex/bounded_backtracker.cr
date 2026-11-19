@@ -54,6 +54,13 @@ module Mica::Regex
     # Slots in the hash set at its largest: twice `SPARSE_VISITS`, a power
     # of two, so the set is at most half full.
     SPARSE_SLOTS = 2_i64 * SPARSE_VISITS
+    # A pair key (and one) in the hash set takes the low `SPARSE_KEY_BITS`
+    # bits of its entry; the search's generation takes the bits above
+    # (see `clear_sparse`).
+    SPARSE_KEY_BITS  = 40
+    SPARSE_KEY_LIMIT = 1_i64 << SPARSE_KEY_BITS
+    # Generations wrap before they reach the entry's top bit.
+    SPARSE_GENERATIONS = 1_u64 << (64 - SPARSE_KEY_BITS - 1)
     # Slots in the hash set when a search first needs it.
     FIRST_SPARSE_SLOTS = 1024
 
@@ -69,7 +76,9 @@ module Mica::Regex
     # start) fits: within the bitset gate, or else with a hash set of
     # visited pairs within the program's backtracker allowance.
     def self.fits_capped?(program : Program, span_bytes : Int32) : Bool
-      fits?(program, span_bytes) || sparse_allocation_charge(program) <= program.backtracker_allowance
+      return true if fits?(program, span_bytes)
+      visited_bits(program, span_bytes) < SPARSE_KEY_LIMIT &&
+        sparse_allocation_charge(program) <= program.backtracker_allowance
     end
 
     # The most visits a capped search of *program* over *span_bytes* bytes
@@ -115,9 +124,12 @@ module Mica::Regex
     @slots : Slice(Int64)
     @visited : Slice(UInt64)
     # The visited pairs of a capped search whose bitset would not fit: an
-    # open-addressing set of `pair key + 1` (0 is empty), at most half full.
+    # open-addressing set, at most half full, of entries that hold
+    # `pair key + 1` below the search's generation (see `clear_sparse`);
+    # an entry of an earlier generation is empty.
     @sparse_visited = Slice(UInt64).new(0)
     @sparse_count = 0
+    @sparse_generation = 0_u64
     @sparse = false
     # The job stack: @chunk_count chunks allocated, holding @job_capacity
     # entries in all; the jobs in use fill the chunks before @chunk_index
@@ -138,6 +150,11 @@ module Mica::Regex
     # `gave_up?`); unlimited unless set.
     setter visit_limit : Int64 = Int64::MAX
     @visits_left = Int64::MAX
+    # The fewest bytes a match reads from each state (see
+    # `Program#list_of_min_bytes`), for a search that must end by its
+    # bound: a pair whose state cannot reach a match before the bound is
+    # dropped unvisited. Nil (the default) checks nothing.
+    setter list_of_min_bytes : Array(Int32)? = nil
     # True when the last search reached `visit_limit` before it decided.
     getter? gave_up = false
 
@@ -165,6 +182,8 @@ module Mica::Regex
       @slot_count = slot_count
       @slots = Slice(Int64).new(slot_count, PikeVM::UNSET) if @slots.size < slot_count
       @visit_limit = Int64::MAX
+      # Another program numbers its states differently.
+      @list_of_min_bytes = nil
     end
 
     # Lets go of the program and frees what a spare does not keep (the job
@@ -173,6 +192,7 @@ module Mica::Regex
     # `spare_retained_bytes`, and no program.
     def detach : Nil
       @program = nil
+      @list_of_min_bytes = nil
       while @chunk_count > SPARE_JOB_CHUNKS
         last = @chunk_count - 1
         GC.free(@list_of_chunks[last].as(Void*))
@@ -259,6 +279,7 @@ module Mica::Regex
       sparse = @sparse
       visited_words = @visited.to_unsafe
       visits_left = @visits_left
+      min_bytes = @list_of_min_bytes
       while @job_count > 0
         job = pop_job
         if job.state < 0
@@ -276,6 +297,9 @@ module Mica::Regex
           at = job.at.to_i32
         end
         while true
+          # A state whose fewest bytes to a match pass the bound fails
+          # whatever it reads (the search reads nothing at or past it).
+          break if min_bytes && end_bound - at < min_bytes.unsafe_fetch(current)
           bit = current.to_i64 * columns + (at - start)
           if sparse
             break unless mark_sparse?(bit)
@@ -640,13 +664,20 @@ module Mica::Regex
     end
 
     # Empties the hash set of visited pairs, allocating its first table the
-    # first time.
+    # first time. A search starts a new generation, which leaves every
+    # entry of the earlier ones empty without writing the table (a capped
+    # search over a short span marks a few hundred pairs, where clearing
+    # a table the set grew to for a longer one writes up to 256 KiB); the
+    # table is cleared only when the generations wrap.
     private def clear_sparse : Nil
       @sparse_count = 0
+      @sparse_generation += 1
       if @sparse_visited.empty?
         @sparse_visited = Slice(UInt64).new(FIRST_SPARSE_SLOTS, 0_u64)
-      else
+        @sparse_generation = 1_u64
+      elsif @sparse_generation >= SPARSE_GENERATIONS
         @sparse_visited.fill(0_u64)
+        @sparse_generation = 1_u64
       end
     end
 
@@ -654,10 +685,11 @@ module Mica::Regex
     # already was. The set doubles when it would pass half full; it never
     # holds more than `SPARSE_VISITS` pairs, as each pair is one visit.
     private def mark_sparse?(bit : Int64) : Bool
-      key = bit.to_u64! &+ 1
+      generation = @sparse_generation
+      key = (generation << SPARSE_KEY_BITS) | (bit.to_u64! &+ 1)
       mask = @sparse_visited.size - 1
       index = sparse_hash(key) & mask
-      while (found = @sparse_visited.unsafe_fetch(index)) != 0
+      while (found = @sparse_visited.unsafe_fetch(index)) >> SPARSE_KEY_BITS == generation
         return false if found == key
         index = (index + 1) & mask
       end
@@ -676,8 +708,9 @@ module Mica::Regex
       old = @sparse_visited
       grown = Slice(UInt64).new(old.size * 2, 0_u64)
       mask = grown.size - 1
+      generation = @sparse_generation
       old.each do |key|
-        next if key == 0
+        next unless key >> SPARSE_KEY_BITS == generation
         index = sparse_hash(key) & mask
         while grown.unsafe_fetch(index) != 0
           index = (index + 1) & mask
