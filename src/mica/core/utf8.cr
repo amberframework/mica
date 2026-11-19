@@ -150,11 +150,14 @@ module Mica::Core
     # Returns the offset of the first invalid sequence in *bytes* (its lead
     # byte, as `decode` reports it), or nil when all of it is valid UTF-8.
     #
-    # Runs in one pass: the ASCII prefix eight bytes at a time, then runs
-    # of ASCII sixteen bytes at a time and everything else through the
-    # shift DFA below, one table read per byte and a check
-    # for the error state every sixteen bytes, so text in any script
-    # validates at the same speed.
+    # Runs in one pass over valid text: the ASCII prefix eight bytes at a
+    # time, then runs of ASCII sixteen bytes at a time and everything else
+    # through the shift DFA below, 64 bytes per step with one table
+    # read and one shift per byte (the row read does not wait on the
+    # state, so text in any script validates at about a byte per cycle).
+    # Only when that pass finds the text invalid does a second pass from
+    # the same place (`first_invalid_from`) track where each sequence
+    # begins, to report the offset.
     def self.first_invalid_offset(bytes : Bytes) : Int32?
       size = bytes.size
       pointer = bytes.to_unsafe
@@ -168,22 +171,47 @@ module Mica::Core
         index += 1
       end
       return nil if index == size
-      table = VALIDATION_TABLE
+      start = index
+      table = VALIDATION_TABLE.to_unsafe
+      # The state's shift sits in the low six bits; the bits above are what
+      # is left of the row it came from, which the next shift drops.
       state = ACCEPT_SHIFT
-      lead = index
-      while index < size
-        if state == ACCEPT_SHIFT && index + 16 <= size &&
+      while index + 64 <= size
+        if state & 63 == ACCEPT_SHIFT &&
            ((pointer + index).as(UInt64*).value | (pointer + index + 8).as(UInt64*).value) & 0x8080808080808080_u64 == 0
           index += 16
           next
         end
-        stop = Math.min(index + 16, size)
-        while index < stop
-          lead = index if state == ACCEPT_SHIFT
-          state = (table.unsafe_fetch(pointer[index]) >> state) & 63
-          index += 1
-        end
+        # Text that is not ASCII here likely goes on that way: 64 bytes
+        # through the DFA before the next ASCII check.
+        {% for offset in 0...64 %}
+          state = table[pointer[index + {{ offset }}]].unsafe_shr(state & 63)
+        {% end %}
+        return first_invalid_from(bytes, start) if state & 63 == ERROR_SHIFT
+        index += 64
+      end
+      while index < size
+        state = table[pointer[index]].unsafe_shr(state & 63)
+        index += 1
+      end
+      return nil if state & 63 == ACCEPT_SHIFT
+      first_invalid_from(bytes, start)
+    end
+
+    # The offset of the first invalid sequence in *bytes* at or after
+    # *index* (where a sequence begins), or nil: the shift DFA one byte at
+    # a time, remembering where each sequence begins.
+    private def self.first_invalid_from(bytes : Bytes, index : Int32) : Int32?
+      size = bytes.size
+      pointer = bytes.to_unsafe
+      table = VALIDATION_TABLE.to_unsafe
+      state = ACCEPT_SHIFT
+      lead = index
+      while index < size
+        lead = index if state == ACCEPT_SHIFT
+        state = table[pointer[index]].unsafe_shr(state) & 63
         return lead if state == ERROR_SHIFT
+        index += 1
       end
       state == ACCEPT_SHIFT ? nil : lead
     end

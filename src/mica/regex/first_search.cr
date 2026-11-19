@@ -37,11 +37,12 @@ module Mica::Regex
     MAX_LITERAL_BYTES = 64
 
     # Visits a first search may make, as a fixed part and a part per state:
-    # building a plan costs about as much as this many visits, so a
+    # building a plan costs about as much as this many visits (a small
+    # program's plan, about 4 us, over a thousand), so a
     # backtracker that has not decided by then hands the search to the
     # plan (see `Searcher.first_search`) having spent at most about what
     # the plan costs.
-    VISITS_BASE      = 256_i64
+    VISITS_BASE      = 512_i64
     VISITS_PER_STATE =   8_i64
 
     # The fewest states of a *large* program, whose first searches may read

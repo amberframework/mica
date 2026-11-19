@@ -463,7 +463,12 @@ the same way. A pattern whose every match starts at `\A` is searched anchored,
 with no reverse DFA. A lazy DFA gives up, and the search runs on the Pike
 VM, when its cache thrashes or when the `CachePool` has no room. Once a DFA gives up in a call, the
 call's later searches go straight to the Pike VM, so the work a thrashing
-cache wastes is spent once per call. Every path charges its work to the
+cache wastes is spent once per call. An unanchored forward DFA whose
+program has a match bound gives up at the first cache clear that finds it
+thrashing and goes on from each start in the same call, rather than
+after `LazyDFA::MAX_CLEARS` clears: a program's first search over a long
+haystack builds one cache's worth of states, not four
+(`[a-q][^u-z]{80}x` over 16 MB went from about 15 to 4.7 ms cold). Every path charges its work to the
 call's `SearchMeter` and reads the deadline at the same checkpoints, so
 the work budget and the deadline hold on every path.
 
@@ -520,7 +525,8 @@ every path. The search is O(m·(L + 1) + c) and finds the span and the
 groups in one pass. A pattern that backtracks hard over the haystack
 (`(a|a)*$` over a run of a's) could make the backtracker cost more than
 the plan, so a first search makes at most `FirstSearch.visit_limit`
-visits (256 plus 8 per state, about what building the plan costs); one
+visits (512 plus 8 per state, about what building the plan costs: a
+small program's plan takes about 4 us, over a thousand visits); one
 still undecided then goes on in the same call, under the same meter and
 deadline, on the plan's engines, having spent at most about what the plan
 costs. Later searches, iteration calls (`scan`, `gsub`, `split`) and
@@ -542,6 +548,30 @@ of up to `FirstSearch::MAX_LARGE_BYTES` (64 KiB); past it, the validation
 and scans every path makes cost more than the plan would save. A
 backtracked start reads at most `FirstSearch::MAX_BYTES` (256) bytes, so
 a long match end goes to the reverse DFA.
+
+While a program's runs are pending, the backtracker reads a `ClassRun`'s
+states from the run's block rather than through `Program#state_at`: once
+it has found the run (the binary search, charged as before), it follows
+the copies one byte at a time, reading each copy's lead byte from the
+block's `ClassMemo::Block#entry_targets` (one load for a large class) and
+the other bytes from its shared table. A copy is a deterministic
+automaton over one UTF-8 sequence, entered only at its entry, so a pair
+inside a copy can be reached from one entry pair alone: the search marks
+only the entry pairs, which keeps every pair visited at most once, and
+charges one operation and one visit per state it steps through, with no
+run lookup per state. Outside runs, `Program#sparse_target` reads the
+entry state of a large class's block (`.`, `\w`, `[^A-Z]`) the same way,
+with one load per byte. `\p{L}{256}` over 256 letters went from about 13
+to 4 us cold, and `[0-9A-Za-z_]{256}` from about 6.6 to 2.5 us.
+
+A first search has no lease, so its backtracker would allocate a bitset
+and a job stack every time. The `CachePool` keeps one spare backtracker
+instead (`CachePool#take_spare_backtracker`, one atomic exchange): a
+first search takes it, points it at its program, and gives it back when
+the call finishes, detached from the program and trimmed to
+`BoundedBacktracker.spare_retained_bytes` (60 KiB: the largest bitset,
+the first job chunks and a small hash set). Like the backtracker a lease
+keeps, it is outside the pool's cap.
 
 The plan itself builds what a search reads when it first reads it: the
 start filter (read only by short searches) on first use, and the reverse
