@@ -1,0 +1,530 @@
+# Cases outside the Crystal dialect's search semantics (roadmap 6.5). id<TAB>reason
+anchored.toml/greedy-earliest	search kind earliest: Mica::Regex reports leftmost matches only
+anchored.toml/nongreedy-all	match kind all: Mica::Regex implements leftmost-first only
+anchored.toml/word-boundary-nounicode-01	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+bytes.toml/word-boundary-ascii	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+bytes.toml/word-boundary-unicode	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+bytes.toml/word-boundary-ascii-not	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+bytes.toml/word-boundary-unicode-not	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+bytes.toml/perl-word-ascii	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+bytes.toml/perl-word-unicode	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+bytes.toml/perl-decimal-ascii	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+bytes.toml/perl-decimal-unicode	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+bytes.toml/perl-whitespace-ascii	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+bytes.toml/perl-whitespace-unicode	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+bytes.toml/mixed-dot	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+bytes.toml/case-one-ascii	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+bytes.toml/case-one-unicode	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+bytes.toml/case-class-simple-ascii	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+bytes.toml/case-class-ascii	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+bytes.toml/case-class-unicode	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+bytes.toml/negate-ascii	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+bytes.toml/negate-unicode	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+bytes.toml/dotstar-prefix-ascii	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+bytes.toml/dotstar-prefix-unicode	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+bytes.toml/null-bytes	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+bytes.toml/invalid-utf8-anchor-100	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+bytes.toml/invalid-utf8-anchor-200	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+bytes.toml/invalid-utf8-anchor-300	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+bytes.toml/word-boundary-ascii-100	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+bytes.toml/word-boundary-ascii-200	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+crazy.toml/nothing-empty	regex set (several patterns searched at once): outside the Expression API
+crazy.toml/nothing-something	regex set (several patterns searched at once): outside the Expression API
+crazy.toml/ranges	outside the Crystal dialect: PCRE2 rejects it too (unrecognized character after (? or (?-)
+crazy.toml/ranges-not	outside the Crystal dialect: PCRE2 rejects it too (unrecognized character after (? or (?-)
+crazy.toml/email	outside the Crystal dialect: PCRE2 rejects it too (unrecognized character after (? or (?-)
+crazy.toml/email-not	outside the Crystal dialect: PCRE2 rejects it too (unrecognized character after (? or (?-)
+crazy.toml/date1	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+crazy.toml/date2	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+crazy.toml/date3	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+crlf.toml/basic	outside the Crystal dialect: PCRE2 rejects it too (unrecognized character after (? or (?-)
+crlf.toml/start-end-non-empty	outside the Crystal dialect: PCRE2 rejects it too (unrecognized character after (? or (?-)
+crlf.toml/start-end-empty	outside the Crystal dialect: PCRE2 rejects it too (unrecognized character after (? or (?-)
+crlf.toml/start-end-before-after	outside the Crystal dialect: PCRE2 rejects it too (unrecognized character after (? or (?-)
+crlf.toml/start-no-split	outside the Crystal dialect: PCRE2 rejects it too (unrecognized character after (? or (?-)
+crlf.toml/start-no-split-adjacent	outside the Crystal dialect: PCRE2 rejects it too (unrecognized character after (? or (?-)
+crlf.toml/start-no-split-adjacent-cr	outside the Crystal dialect: PCRE2 rejects it too (unrecognized character after (? or (?-)
+crlf.toml/start-no-split-adjacent-lf	outside the Crystal dialect: PCRE2 rejects it too (unrecognized character after (? or (?-)
+crlf.toml/end-no-split	outside the Crystal dialect: PCRE2 rejects it too (unrecognized character after (? or (?-)
+crlf.toml/end-no-split-adjacent	outside the Crystal dialect: PCRE2 rejects it too (unrecognized character after (? or (?-)
+crlf.toml/end-no-split-adjacent-cr	outside the Crystal dialect: PCRE2 rejects it too (unrecognized character after (? or (?-)
+crlf.toml/end-no-split-adjacent-lf	outside the Crystal dialect: PCRE2 rejects it too (unrecognized character after (? or (?-)
+crlf.toml/dot-no-crlf	excluded construct: recursion or a subroutine call
+crlf.toml/onepass-wrong-crlf-with-capture	excluded construct: recursion or a subroutine call
+crlf.toml/onepass-wrong-crlf-anchored	excluded construct: recursion or a subroutine call
+earliest.toml/no-greedy-100	search kind earliest: Mica::Regex reports leftmost matches only
+earliest.toml/no-greedy-200	search kind earliest: Mica::Regex reports leftmost matches only
+earliest.toml/is-ungreedy	search kind earliest: Mica::Regex reports leftmost matches only
+earliest.toml/look-start-test	search kind earliest: Mica::Regex reports leftmost matches only
+earliest.toml/look-end-test	search kind earliest: Mica::Regex reports leftmost matches only
+earliest.toml/no-leftmost-first-100	search kind earliest: Mica::Regex reports leftmost matches only
+earliest.toml/no-leftmost-first-200	search kind earliest: Mica::Regex reports leftmost matches only
+flags.toml/11	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+leftmost-all.toml/alt	match kind all: Mica::Regex implements leftmost-first only
+leftmost-all.toml/multi	regex set (several patterns searched at once): outside the Expression API
+leftmost-all.toml/dotall	match kind all: Mica::Regex implements leftmost-first only
+line-terminator.toml/nul	line terminator "\\x00": the Crystal dialect's newline is LF
+line-terminator.toml/dot-changes-with-line-terminator	line terminator "\\x00": the Crystal dialect's newline is LF
+line-terminator.toml/not-line-feed	line terminator "\\x00": the Crystal dialect's newline is LF
+line-terminator.toml/non-ascii	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+line-terminator.toml/carriage	line terminator "\\r": the Crystal dialect's newline is LF
+line-terminator.toml/word-byte	line terminator "Z": the Crystal dialect's newline is LF
+line-terminator.toml/non-word-byte	line terminator "%": the Crystal dialect's newline is LF
+line-terminator.toml/word-boundary	line terminator "Z": the Crystal dialect's newline is LF
+line-terminator.toml/word-boundary-at	line terminator "Z": the Crystal dialect's newline is LF
+line-terminator.toml/not-word-boundary-at	line terminator "Z": the Crystal dialect's newline is LF
+misc.toml/prefix-literal-match-ascii	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+multiline.toml/basic1-crlf	excluded construct: recursion or a subroutine call
+multiline.toml/basic1-crlf-cr	excluded construct: recursion or a subroutine call
+multiline.toml/basic2-crlf	excluded construct: recursion or a subroutine call
+multiline.toml/basic2-crlf-cr	excluded construct: recursion or a subroutine call
+multiline.toml/basic3-crlf	excluded construct: recursion or a subroutine call
+multiline.toml/basic3-crlf-cr	excluded construct: recursion or a subroutine call
+multiline.toml/basic4-crlf	excluded construct: recursion or a subroutine call
+multiline.toml/basic4-crlf-cr	excluded construct: recursion or a subroutine call
+multiline.toml/basic5-crlf	excluded construct: recursion or a subroutine call
+multiline.toml/basic5-crlf-cr	excluded construct: recursion or a subroutine call
+multiline.toml/basic6-crlf	excluded construct: recursion or a subroutine call
+multiline.toml/basic6-crlf-cr	excluded construct: recursion or a subroutine call
+multiline.toml/basic7-crlf	excluded construct: recursion or a subroutine call
+multiline.toml/basic7-crlf-cr	excluded construct: recursion or a subroutine call
+multiline.toml/basic8-crlf	excluded construct: recursion or a subroutine call
+multiline.toml/basic8-crlf-cr	excluded construct: recursion or a subroutine call
+multiline.toml/basic9-crlf	excluded construct: recursion or a subroutine call
+multiline.toml/repeat1-crlf	excluded construct: recursion or a subroutine call
+multiline.toml/repeat1-crlf-cr	excluded construct: recursion or a subroutine call
+multiline.toml/repeat1-no-multi-crlf	excluded construct: recursion or a subroutine call
+multiline.toml/repeat1-no-multi-crlf-cr	excluded construct: recursion or a subroutine call
+multiline.toml/repeat2-crlf	excluded construct: recursion or a subroutine call
+multiline.toml/repeat2-crlf-cr	excluded construct: recursion or a subroutine call
+multiline.toml/repeat2-no-multi-crlf	excluded construct: recursion or a subroutine call
+multiline.toml/repeat2-no-multi-crlf-cr	excluded construct: recursion or a subroutine call
+multiline.toml/repeat3-crlf	excluded construct: recursion or a subroutine call
+multiline.toml/repeat3-crlf-cr	excluded construct: recursion or a subroutine call
+multiline.toml/repeat3-no-multi-crlf	excluded construct: recursion or a subroutine call
+multiline.toml/repeat3-no-multi-crlf-cr	excluded construct: recursion or a subroutine call
+multiline.toml/repeat4-crlf	excluded construct: recursion or a subroutine call
+multiline.toml/repeat4-crlf-cr	excluded construct: recursion or a subroutine call
+multiline.toml/repeat4-no-multi-crlf	excluded construct: recursion or a subroutine call
+multiline.toml/repeat4-no-multi-crlf-cr	excluded construct: recursion or a subroutine call
+multiline.toml/repeat5-crlf	excluded construct: recursion or a subroutine call
+multiline.toml/repeat5-crlf-cr	excluded construct: recursion or a subroutine call
+multiline.toml/repeat5-no-multi-crlf	excluded construct: recursion or a subroutine call
+multiline.toml/repeat5-no-multi-crlf-cr	excluded construct: recursion or a subroutine call
+multiline.toml/repeat6-crlf	excluded construct: recursion or a subroutine call
+multiline.toml/repeat6-crlf-cr	excluded construct: recursion or a subroutine call
+multiline.toml/repeat6-no-multi-crlf	excluded construct: recursion or a subroutine call
+multiline.toml/repeat6-no-multi-crlf-cr	excluded construct: recursion or a subroutine call
+multiline.toml/repeat7-crlf	excluded construct: recursion or a subroutine call
+multiline.toml/repeat7-crlf-cr	excluded construct: recursion or a subroutine call
+multiline.toml/repeat7-no-multi-crlf	excluded construct: recursion or a subroutine call
+multiline.toml/repeat7-no-multi-crlf-cr	excluded construct: recursion or a subroutine call
+multiline.toml/repeat8-crlf	excluded construct: recursion or a subroutine call
+multiline.toml/repeat8-crlf-cr	excluded construct: recursion or a subroutine call
+multiline.toml/repeat8-no-multi-crlf	excluded construct: recursion or a subroutine call
+multiline.toml/repeat8-no-multi-crlf-cr	excluded construct: recursion or a subroutine call
+multiline.toml/repeat9-crlf	excluded construct: recursion or a subroutine call
+multiline.toml/repeat9-crlf-cr	excluded construct: recursion or a subroutine call
+multiline.toml/repeat9-no-multi-crlf	excluded construct: recursion or a subroutine call
+multiline.toml/repeat9-no-multi-crlf-cr	excluded construct: recursion or a subroutine call
+multiline.toml/repeat10-crlf	excluded construct: recursion or a subroutine call
+multiline.toml/repeat10-crlf-cr	excluded construct: recursion or a subroutine call
+multiline.toml/repeat10-no-multi-crlf	excluded construct: recursion or a subroutine call
+multiline.toml/repeat10-no-multi-crlf-cr	excluded construct: recursion or a subroutine call
+multiline.toml/repeat11	outside the Crystal dialect: PCRE2 rejects it too (quantifier does not follow a repeatable item)
+multiline.toml/repeat11-crlf	excluded construct: recursion or a subroutine call
+multiline.toml/repeat11-crlf-cr	excluded construct: recursion or a subroutine call
+multiline.toml/repeat11-no-multi	outside the Crystal dialect: PCRE2 rejects it too (quantifier does not follow a repeatable item)
+multiline.toml/repeat11-no-multi-crlf	excluded construct: recursion or a subroutine call
+multiline.toml/repeat11-no-multi-crlf-cr	excluded construct: recursion or a subroutine call
+multiline.toml/repeat12	outside the Crystal dialect: PCRE2 rejects it too (quantifier does not follow a repeatable item)
+multiline.toml/repeat12-crlf	excluded construct: recursion or a subroutine call
+multiline.toml/repeat12-crlf-cr	excluded construct: recursion or a subroutine call
+multiline.toml/repeat12-no-multi	outside the Crystal dialect: PCRE2 rejects it too (quantifier does not follow a repeatable item)
+multiline.toml/repeat12-no-multi-crlf	excluded construct: recursion or a subroutine call
+multiline.toml/repeat12-no-multi-crlf-cr	excluded construct: recursion or a subroutine call
+multiline.toml/repeat13	outside the Crystal dialect: PCRE2 rejects it too (quantifier does not follow a repeatable item)
+multiline.toml/repeat13-crlf	excluded construct: recursion or a subroutine call
+multiline.toml/repeat13-crlf-cr	excluded construct: recursion or a subroutine call
+multiline.toml/repeat13-no-multi	outside the Crystal dialect: PCRE2 rejects it too (quantifier does not follow a repeatable item)
+multiline.toml/repeat13-no-multi-crlf	excluded construct: recursion or a subroutine call
+multiline.toml/repeat13-no-multi-crlf-cr	excluded construct: recursion or a subroutine call
+multiline.toml/repeat14	outside the Crystal dialect: PCRE2 rejects it too (quantifier does not follow a repeatable item)
+multiline.toml/repeat14-crlf	excluded construct: recursion or a subroutine call
+multiline.toml/repeat14-crlf-cr	excluded construct: recursion or a subroutine call
+multiline.toml/repeat14-no-multi	outside the Crystal dialect: PCRE2 rejects it too (quantifier does not follow a repeatable item)
+multiline.toml/repeat14-no-multi-crlf	excluded construct: recursion or a subroutine call
+multiline.toml/repeat14-no-multi-crlf-cr	excluded construct: recursion or a subroutine call
+multiline.toml/repeat15-crlf	excluded construct: recursion or a subroutine call
+multiline.toml/repeat15-crlf-cr	excluded construct: recursion or a subroutine call
+multiline.toml/repeat15-no-multi-crlf	excluded construct: recursion or a subroutine call
+multiline.toml/repeat15-no-multi-crlf-cr	excluded construct: recursion or a subroutine call
+multiline.toml/repeat16-crlf	excluded construct: recursion or a subroutine call
+multiline.toml/repeat16-crlf-cr	excluded construct: recursion or a subroutine call
+multiline.toml/repeat16-no-multi-crlf	excluded construct: recursion or a subroutine call
+multiline.toml/repeat16-no-multi-crlf-cr	excluded construct: recursion or a subroutine call
+multiline.toml/repeat17-crlf	excluded construct: recursion or a subroutine call
+multiline.toml/repeat17-crlf-cr	excluded construct: recursion or a subroutine call
+multiline.toml/repeat17-no-multi-crlf	excluded construct: recursion or a subroutine call
+multiline.toml/repeat17-no-multi-crlf-cr	excluded construct: recursion or a subroutine call
+multiline.toml/repeat18-crlf	excluded construct: recursion or a subroutine call
+multiline.toml/repeat18-crlf-cr	excluded construct: recursion or a subroutine call
+multiline.toml/repeat18-no-multi-crlf	excluded construct: recursion or a subroutine call
+multiline.toml/repeat18-no-multi-crlf-cr	excluded construct: recursion or a subroutine call
+multiline.toml/match-line-100-crlf	excluded construct: recursion or a subroutine call
+multiline.toml/match-line-100-crlf-cr	excluded construct: recursion or a subroutine call
+multiline.toml/match-line-200	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+multiline.toml/match-line-200-crlf	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+multiline.toml/match-line-200-crlf-cr	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+no-unicode.toml/invalid-utf8-literal1	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+no-unicode.toml/mixed	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+no-unicode.toml/case1	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+no-unicode.toml/case2	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+no-unicode.toml/case4	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+no-unicode.toml/negate2	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+no-unicode.toml/dotstar-prefix1	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+no-unicode.toml/dotstar-prefix2	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+no-unicode.toml/null-bytes1	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+no-unicode.toml/word-ascii	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+no-unicode.toml/decimal-ascii	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+no-unicode.toml/space-ascii	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+no-unicode.toml/iter1-bytes	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+no-unicode.toml/iter2-bytes	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+no-unicode.toml/unanchored-invalid-utf8-match-100	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+no-unicode.toml/unanchored-invalid-utf8-nomatch	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+overlapping.toml/ungreedy-dotstar-matches-everything-100	regex set (several patterns searched at once): outside the Expression API
+overlapping.toml/greedy-dotstar-matches-everything-100	regex set (several patterns searched at once): outside the Expression API
+overlapping.toml/repetition-plus-leftmost-first-100	search kind overlapping: Mica::Regex reports leftmost matches only
+overlapping.toml/repetition-plus-leftmost-first-110	search kind overlapping: Mica::Regex reports leftmost matches only
+overlapping.toml/repetition-plus-all-100	match kind all: Mica::Regex implements leftmost-first only
+overlapping.toml/repetition-plus-all-110	match kind all: Mica::Regex implements leftmost-first only
+overlapping.toml/repetition-plus-leftmost-first-200	search kind overlapping: Mica::Regex reports leftmost matches only
+overlapping.toml/repetition-plus-all-200	match kind all: Mica::Regex implements leftmost-first only
+overlapping.toml/repetition-star-leftmost-first-100	search kind overlapping: Mica::Regex reports leftmost matches only
+overlapping.toml/repetition-star-all-100	match kind all: Mica::Regex implements leftmost-first only
+overlapping.toml/repetition-star-leftmost-first-200	search kind overlapping: Mica::Regex reports leftmost matches only
+overlapping.toml/repetition-star-all-200	match kind all: Mica::Regex implements leftmost-first only
+overlapping.toml/start-end-rep-leftmost-first	search kind overlapping: Mica::Regex reports leftmost matches only
+overlapping.toml/start-end-rep-all	match kind all: Mica::Regex implements leftmost-first only
+overlapping.toml/alt-leftmost-first-100	search kind overlapping: Mica::Regex reports leftmost matches only
+overlapping.toml/alt-all-100	match kind all: Mica::Regex implements leftmost-first only
+overlapping.toml/empty-000	match kind all: Mica::Regex implements leftmost-first only
+overlapping.toml/empty-alt-000	match kind all: Mica::Regex implements leftmost-first only
+overlapping.toml/empty-alt-010	match kind all: Mica::Regex implements leftmost-first only
+overlapping.toml/iter1-bytes	match kind all: Mica::Regex implements leftmost-first only
+overlapping.toml/iter1-utf8	match kind all: Mica::Regex implements leftmost-first only
+overlapping.toml/iter1-incomplete-utf8	match kind all: Mica::Regex implements leftmost-first only
+overlapping.toml/scratch	regex set (several patterns searched at once): outside the Expression API
+regex-lite.toml/dot-always-matches-codepoint	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+regex-lite.toml/negated-class-always-matches-codepoint	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+regression.toml/unsorted-binary-search-100	outside the Crystal dialect: PCRE2 rejects it too (unrecognized character after (? or (?-)
+regression.toml/unsorted-binary-search-200	outside the Crystal dialect: PCRE2 rejects it too (unrecognized character after (? or (?-)
+regression.toml/word-boundary-ascii-no-capture	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+regression.toml/word-boundary-ascii-capture	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+regression.toml/endl-or-word-boundary	outside the Crystal dialect: PCRE2 rejects it too (unrecognized character after (? or (?-)
+regression.toml/zero-or-end	outside the Crystal dialect: PCRE2 rejects it too (unrecognized character after (? or (?-)
+regression.toml/y-or-endl	outside the Crystal dialect: PCRE2 rejects it too (unrecognized character after (? or (?-)
+regression.toml/word-boundary-start-x	outside the Crystal dialect: PCRE2 rejects it too (unrecognized character after (? or (?-)
+regression.toml/word-boundary-ascii-start-x	outside the Crystal dialect: PCRE2 rejects it too (unrecognized character after (? or (?-)
+regression.toml/end-not-word-boundary	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+regression.toml/negated-full-byte-range	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+regression.toml/strange-anchor-non-complete-prefix	outside the Crystal dialect: PCRE2 rejects it too (quantifier does not follow a repeatable item)
+regression.toml/strange-anchor-non-complete-suffix	outside the Crystal dialect: PCRE2 rejects it too (quantifier does not follow a repeatable item)
+regression.toml/word-boundary-weird-ascii	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+regression.toml/word-boundary-weird-minimal-ascii	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+regression.toml/reverse-suffix-300	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+regression.toml/reverse-suffix-all-no-early-matches-010	match kind all: Mica::Regex implements leftmost-first only
+regression.toml/stops	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+regression.toml/stops-ascii	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+regression.toml/ruff-whitespace-around-keywords	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+regression.toml/i429-0	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+regression.toml/i429-1	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+regression.toml/i429-2	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+regression.toml/i429-3	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+regression.toml/i429-3-utf8	outside the Crystal dialect: PCRE2 rejects it too (unrecognized character after (? or (?-)
+regression.toml/i429-4	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+regression.toml/i429-5	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+regression.toml/i429-6	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+regression.toml/i429-7	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+regression.toml/i429-8	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+regression.toml/i429-9	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+regression.toml/i429-10	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+regression.toml/i429-11	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+regression.toml/i429-12	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+regression.toml/i969	search kind earliest: Mica::Regex reports leftmost matches only
+regression.toml/regex-to-glob	regex set (several patterns searched at once): outside the Expression API
+regression.toml/prefilter-with-aho-corasick-standard-semantics	match kind all: Mica::Regex implements leftmost-first only
+set.toml/basic10	regex set (several patterns searched at once): outside the Expression API
+set.toml/basic10-leftmost-first	regex set (several patterns searched at once): outside the Expression API
+set.toml/basic20	regex set (several patterns searched at once): outside the Expression API
+set.toml/basic30	regex set (several patterns searched at once): outside the Expression API
+set.toml/basic40	regex set (several patterns searched at once): outside the Expression API
+set.toml/basic50	regex set (several patterns searched at once): outside the Expression API
+set.toml/basic60	regex set (several patterns searched at once): outside the Expression API
+set.toml/basic60-leftmost-first	regex set (several patterns searched at once): outside the Expression API
+set.toml/basic61	regex set (several patterns searched at once): outside the Expression API
+set.toml/basic61-leftmost-first	regex set (several patterns searched at once): outside the Expression API
+set.toml/basic70	regex set (several patterns searched at once): outside the Expression API
+set.toml/basic71	regex set (several patterns searched at once): outside the Expression API
+set.toml/basic80	regex set (several patterns searched at once): outside the Expression API
+set.toml/basic81	regex set (several patterns searched at once): outside the Expression API
+set.toml/basic82	regex set (several patterns searched at once): outside the Expression API
+set.toml/basic90	regex set (several patterns searched at once): outside the Expression API
+set.toml/basic91	regex set (several patterns searched at once): outside the Expression API
+set.toml/basic100	regex set (several patterns searched at once): outside the Expression API
+set.toml/basic101	regex set (several patterns searched at once): outside the Expression API
+set.toml/basic102	regex set (several patterns searched at once): outside the Expression API
+set.toml/basic110	regex set (several patterns searched at once): outside the Expression API
+set.toml/basic111	regex set (several patterns searched at once): outside the Expression API
+set.toml/basic120	regex set (several patterns searched at once): outside the Expression API
+set.toml/basic121	regex set (several patterns searched at once): outside the Expression API
+set.toml/basic122	regex set (several patterns searched at once): outside the Expression API
+set.toml/basic130	regex set (several patterns searched at once): outside the Expression API
+set.toml/empty10	regex set (several patterns searched at once): outside the Expression API
+set.toml/empty10-leftmost-first	regex set (several patterns searched at once): outside the Expression API
+set.toml/empty11	regex set (several patterns searched at once): outside the Expression API
+set.toml/empty11-leftmost-first	regex set (several patterns searched at once): outside the Expression API
+set.toml/empty20	regex set (several patterns searched at once): outside the Expression API
+set.toml/empty20-leftmost-first	regex set (several patterns searched at once): outside the Expression API
+set.toml/empty21	regex set (several patterns searched at once): outside the Expression API
+set.toml/empty21-leftmost-first	regex set (several patterns searched at once): outside the Expression API
+set.toml/empty22	regex set (several patterns searched at once): outside the Expression API
+set.toml/empty23	regex set (several patterns searched at once): outside the Expression API
+set.toml/empty30	regex set (several patterns searched at once): outside the Expression API
+set.toml/empty30-leftmost-first	regex set (several patterns searched at once): outside the Expression API
+set.toml/empty31	regex set (several patterns searched at once): outside the Expression API
+set.toml/empty31-leftmost-first	regex set (several patterns searched at once): outside the Expression API
+set.toml/empty40	regex set (several patterns searched at once): outside the Expression API
+set.toml/empty40-leftmost-first	regex set (several patterns searched at once): outside the Expression API
+set.toml/nomatch10	regex set (several patterns searched at once): outside the Expression API
+set.toml/nomatch20	regex set (several patterns searched at once): outside the Expression API
+set.toml/nomatch30	regex set (several patterns searched at once): outside the Expression API
+set.toml/nomatch40	regex set (several patterns searched at once): outside the Expression API
+set.toml/caps-010	regex set (several patterns searched at once): outside the Expression API
+set.toml/caps-020	regex set (several patterns searched at once): outside the Expression API
+set.toml/caps-030	regex set (several patterns searched at once): outside the Expression API
+set.toml/caps-110	regex set (several patterns searched at once): outside the Expression API
+set.toml/caps-120	regex set (several patterns searched at once): outside the Expression API
+set.toml/caps-121	regex set (several patterns searched at once): outside the Expression API
+substring.toml/unicode-word-end	search end bound 3: Crystal's Regex API has no end bound
+substring.toml/ascii-word-start	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+substring.toml/ascii-word-end	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+unicode.toml/class-gencat1	outside the Crystal dialect: PCRE2 rejects it too (unknown property after \P or \p)
+unicode.toml/class-gencat2	outside the Crystal dialect: PCRE2 rejects it too (unknown property after \P or \p)
+unicode.toml/class-gencat3	outside the Crystal dialect: PCRE2 rejects it too (unknown property after \P or \p)
+unicode.toml/class-gencat4	outside the Crystal dialect: PCRE2 rejects it too (unknown property after \P or \p)
+unicode.toml/class-gencat5	outside the Crystal dialect: PCRE2 rejects it too (unknown property after \P or \p)
+unicode.toml/class-gencat6	outside the Crystal dialect: PCRE2 rejects it too (unknown property after \P or \p)
+unicode.toml/class-gencat7	outside the Crystal dialect: PCRE2 rejects it too (unknown property after \P or \p)
+unicode.toml/class-gencat8	outside the Crystal dialect: PCRE2 rejects it too (unknown property after \P or \p)
+unicode.toml/class-gencat9	outside the Crystal dialect: PCRE2 rejects it too (unknown property after \P or \p)
+unicode.toml/class-gencat10	outside the Crystal dialect: PCRE2 rejects it too (unknown property after \P or \p)
+unicode.toml/class-gencat11	outside the Crystal dialect: PCRE2 rejects it too (unknown property after \P or \p)
+unicode.toml/class-gencat12	outside the Crystal dialect: PCRE2 rejects it too (unknown property after \P or \p)
+unicode.toml/class-gencat13	outside the Crystal dialect: PCRE2 rejects it too (unknown property after \P or \p)
+unicode.toml/class-gencat14	outside the Crystal dialect: PCRE2 rejects it too (unknown property after \P or \p)
+unicode.toml/class-gencat15	outside the Crystal dialect: PCRE2 rejects it too (unknown property after \P or \p)
+unicode.toml/class-gencat16	outside the Crystal dialect: PCRE2 rejects it too (unknown property after \P or \p)
+unicode.toml/class-gencat18	outside the Crystal dialect: PCRE2 rejects it too (unknown property after \P or \p)
+unicode.toml/class-gencat19	outside the Crystal dialect: PCRE2 rejects it too (unknown property after \P or \p)
+unicode.toml/class-gencat20	outside the Crystal dialect: PCRE2 rejects it too (unknown property after \P or \p)
+unicode.toml/class-gencat21	outside the Crystal dialect: PCRE2 rejects it too (unknown property after \P or \p)
+unicode.toml/class-gencat22	outside the Crystal dialect: PCRE2 rejects it too (unknown property after \P or \p)
+unicode.toml/class-gencat23	outside the Crystal dialect: PCRE2 rejects it too (unknown property after \P or \p)
+unicode.toml/class-gencat24	outside the Crystal dialect: PCRE2 rejects it too (unknown property after \P or \p)
+unicode.toml/class-gencat25	outside the Crystal dialect: PCRE2 rejects it too (unknown property after \P or \p)
+unicode.toml/class-gencat26	outside the Crystal dialect: PCRE2 rejects it too (unknown property after \P or \p)
+unicode.toml/class-gencat27	outside the Crystal dialect: PCRE2 rejects it too (unknown property after \P or \p)
+unicode.toml/class-gencat28	outside the Crystal dialect: PCRE2 rejects it too (unknown property after \P or \p)
+unicode.toml/class-gencat29	outside the Crystal dialect: PCRE2 rejects it too (unknown property after \P or \p)
+unicode.toml/class-gencat30	outside the Crystal dialect: PCRE2 rejects it too (unknown property after \P or \p)
+unicode.toml/class-gencat31	outside the Crystal dialect: PCRE2 rejects it too (unknown property after \P or \p)
+unicode.toml/class-gencat32	outside the Crystal dialect: PCRE2 rejects it too (unknown property after \P or \p)
+unicode.toml/class-gencat33	outside the Crystal dialect: PCRE2 rejects it too (unknown property after \P or \p)
+unicode.toml/class-gencat34	outside the Crystal dialect: PCRE2 rejects it too (unknown property after \P or \p)
+unicode.toml/class-gencat35	outside the Crystal dialect: PCRE2 rejects it too (unknown property after \P or \p)
+unicode.toml/class-gencat36	outside the Crystal dialect: PCRE2 rejects it too (unknown property after \P or \p)
+unicode.toml/class-gencat37	outside the Crystal dialect: PCRE2 rejects it too (unknown property after \P or \p)
+unicode.toml/class-gcb1	outside the Crystal dialect: PCRE2 rejects it too (unknown property after \P or \p)
+unicode.toml/class-gcb2	outside the Crystal dialect: PCRE2 rejects it too (unknown property after \P or \p)
+unicode.toml/class-gcb3	outside the Crystal dialect: PCRE2 rejects it too (unknown property after \P or \p)
+unicode.toml/class-gcb5	outside the Crystal dialect: PCRE2 rejects it too (unknown property after \P or \p)
+unicode.toml/class-gcb6	outside the Crystal dialect: PCRE2 rejects it too (unknown property after \P or \p)
+unicode.toml/class-word-break1	outside the Crystal dialect: PCRE2 rejects it too (unknown property after \P or \p)
+unicode.toml/class-word-break2	outside the Crystal dialect: PCRE2 rejects it too (unknown property after \P or \p)
+unicode.toml/class-word-break3	outside the Crystal dialect: PCRE2 rejects it too (unknown property after \P or \p)
+unicode.toml/class-word-break4	outside the Crystal dialect: PCRE2 rejects it too (unknown property after \P or \p)
+unicode.toml/class-word-break5	outside the Crystal dialect: PCRE2 rejects it too (unknown property after \P or \p)
+unicode.toml/class-sentence-break1	outside the Crystal dialect: PCRE2 rejects it too (unknown property after \P or \p)
+unicode.toml/class-sentence-break2	outside the Crystal dialect: PCRE2 rejects it too (unknown property after \P or \p)
+unicode.toml/class-sentence-break3	outside the Crystal dialect: PCRE2 rejects it too (unknown property after \P or \p)
+unicode.toml/class-sentence-break4	outside the Crystal dialect: PCRE2 rejects it too (unknown property after \P or \p)
+unicode.toml/class-sentence-break5	outside the Crystal dialect: PCRE2 rejects it too (unknown property after \P or \p)
+utf8.toml/empty-utf8yes-overlapping	match kind all: Mica::Regex implements leftmost-first only
+utf8.toml/empty-utf8no	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+utf8.toml/empty-utf8no-overlapping	match kind all: Mica::Regex implements leftmost-first only
+utf8.toml/empty-utf8yes-bounds	search end bound 3: Crystal's Regex API has no end bound
+utf8.toml/empty-utf8yes-bounds-overlapping	match kind all: Mica::Regex implements leftmost-first only
+utf8.toml/empty-utf8no-bounds	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+utf8.toml/empty-utf8no-bounds-overlapping	match kind all: Mica::Regex implements leftmost-first only
+utf8.toml/empty-utf8yes-anchored-overlapping	match kind all: Mica::Regex implements leftmost-first only
+utf8.toml/empty-utf8no-anchored	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+utf8.toml/empty-utf8no-anchored-overlapping	match kind all: Mica::Regex implements leftmost-first only
+utf8.toml/empty-utf8yes-anchored-bounds	search end bound 3: Crystal's Regex API has no end bound
+utf8.toml/empty-utf8yes-anchored-bounds-overlapping	match kind all: Mica::Regex implements leftmost-first only
+utf8.toml/empty-utf8no-anchored-bounds	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+utf8.toml/empty-utf8no-anchored-bounds-overlapping	match kind all: Mica::Regex implements leftmost-first only
+utf8.toml/empty-utf8yes-startbound	search start 1 inside a UTF-8 character: the Crystal dialect raises ArgumentError (roadmap 6.2.5)
+utf8.toml/empty-utf8yes-startbound-overlapping	match kind all: Mica::Regex implements leftmost-first only
+utf8.toml/empty-utf8no-startbound	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+utf8.toml/empty-utf8no-startbound-overlapping	match kind all: Mica::Regex implements leftmost-first only
+utf8.toml/empty-utf8yes-anchored-startbound	search start 1 inside a UTF-8 character: the Crystal dialect raises ArgumentError (roadmap 6.2.5)
+utf8.toml/empty-utf8yes-anchored-startbound-overlapping	match kind all: Mica::Regex implements leftmost-first only
+utf8.toml/empty-utf8no-anchored-startbound	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+utf8.toml/empty-utf8no-anchored-startbound-overlapping	match kind all: Mica::Regex implements leftmost-first only
+utf8.toml/empty-utf8yes-anchored-endbound-overlapping	match kind all: Mica::Regex implements leftmost-first only
+utf8.toml/empty-utf8no-anchored-endbound	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+utf8.toml/empty-utf8no-anchored-endbound-overlapping	match kind all: Mica::Regex implements leftmost-first only
+word-boundary-special.toml/word-start-ascii-010	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary-special.toml/word-start-ascii-020	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary-special.toml/word-start-ascii-030	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary-special.toml/word-start-ascii-040	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary-special.toml/word-start-ascii-050	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary-special.toml/word-start-ascii-060	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary-special.toml/word-start-ascii-060-bounds	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary-special.toml/word-start-ascii-070	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary-special.toml/word-start-ascii-080	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary-special.toml/word-start-ascii-090	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary-special.toml/word-start-ascii-110	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary-special.toml/word-end-ascii-010	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary-special.toml/word-end-ascii-020	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary-special.toml/word-end-ascii-030	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary-special.toml/word-end-ascii-040	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary-special.toml/word-end-ascii-050	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary-special.toml/word-end-ascii-060	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary-special.toml/word-end-ascii-060-bounds	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary-special.toml/word-end-ascii-070	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary-special.toml/word-end-ascii-080	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary-special.toml/word-end-ascii-090	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary-special.toml/word-end-ascii-110	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary-special.toml/word-start-unicode-060-bounds	search end bound 3: Crystal's Regex API has no end bound
+word-boundary-special.toml/word-end-unicode-060-bounds	search end bound 3: Crystal's Regex API has no end bound
+word-boundary-special.toml/word-start-half-ascii-010	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary-special.toml/word-start-half-ascii-020	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary-special.toml/word-start-half-ascii-030	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary-special.toml/word-start-half-ascii-040	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary-special.toml/word-start-half-ascii-050	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary-special.toml/word-start-half-ascii-060	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary-special.toml/word-start-half-ascii-060-noutf8	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+word-boundary-special.toml/word-start-half-ascii-060-bounds	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary-special.toml/word-start-half-ascii-070	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary-special.toml/word-start-half-ascii-080	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary-special.toml/word-start-half-ascii-090	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary-special.toml/word-start-half-ascii-110	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary-special.toml/word-end-half-ascii-010	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary-special.toml/word-end-half-ascii-020	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary-special.toml/word-end-half-ascii-030	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary-special.toml/word-end-half-ascii-040	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary-special.toml/word-end-half-ascii-050	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary-special.toml/word-end-half-ascii-060	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary-special.toml/word-end-half-ascii-060-bounds	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary-special.toml/word-end-half-ascii-070	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary-special.toml/word-end-half-ascii-080	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary-special.toml/word-end-half-ascii-090	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary-special.toml/word-end-half-ascii-110	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary-special.toml/word-start-half-unicode-060-bounds	search end bound 3: Crystal's Regex API has no end bound
+word-boundary-special.toml/word-end-half-unicode-060-bounds	search end bound 3: Crystal's Regex API has no end bound
+word-boundary-special.toml/word-start-half-ascii-customlineterm	line terminator "!": the Crystal dialect's newline is LF
+word-boundary.toml/wb1	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary.toml/wb2	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary.toml/wb3	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary.toml/wb4	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary.toml/wb5	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary.toml/wb6	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary.toml/wb7	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary.toml/wb8	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary.toml/wb9	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary.toml/wb10	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary.toml/wb11	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary.toml/wb12	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary.toml/wb13	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary.toml/wb14	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary.toml/wb15	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary.toml/wb16	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary.toml/wb17	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary.toml/wb18	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary.toml/wb19	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary.toml/wb20	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary.toml/wb21	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary.toml/wb22	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary.toml/wb23	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary.toml/wb24	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary.toml/wb25	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary.toml/wb26	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary.toml/wb27	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary.toml/wb28	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary.toml/wb29	outside the Crystal dialect: PCRE2 rejects it too (unrecognized character after (? or (?-)
+word-boundary.toml/wb30	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary.toml/wb31	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary.toml/wb32	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary.toml/wb33	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary.toml/wb34	outside the Crystal dialect: PCRE2 rejects it too (unrecognized character after (? or (?-)
+word-boundary.toml/wb35	outside the Crystal dialect: PCRE2 rejects it too (unrecognized character after (? or (?-)
+word-boundary.toml/wb36	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary.toml/wb37	outside the Crystal dialect: PCRE2 rejects it too (unrecognized character after (? or (?-)
+word-boundary.toml/wb38	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary.toml/wb39	outside the Crystal dialect: PCRE2 rejects it too (unrecognized character after (? or (?-)
+word-boundary.toml/wb40	outside the Crystal dialect: PCRE2 rejects it too (unrecognized character after (? or (?-)
+word-boundary.toml/wb41	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary.toml/wb42	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary.toml/wb43	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary.toml/wb44	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary.toml/nb1	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+word-boundary.toml/nb2	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+word-boundary.toml/nb3	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+word-boundary.toml/nb4	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+word-boundary.toml/nb5	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+word-boundary.toml/nb6	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+word-boundary.toml/nb7	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+word-boundary.toml/nb8	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+word-boundary.toml/nb9	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+word-boundary.toml/nb10	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+word-boundary.toml/nb11	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+word-boundary.toml/nb12	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+word-boundary.toml/nb13	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+word-boundary.toml/nb14	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+word-boundary.toml/nb15	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+word-boundary.toml/nb16	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+word-boundary.toml/nb17	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+word-boundary.toml/nb18	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+word-boundary.toml/nb19	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+word-boundary.toml/nb20	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+word-boundary.toml/nb21	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+word-boundary.toml/nb22	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+word-boundary.toml/nb23	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+word-boundary.toml/nb24	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+word-boundary.toml/nb25	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+word-boundary.toml/nb26	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+word-boundary.toml/nb27	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+word-boundary.toml/nb28	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+word-boundary.toml/nb29	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+word-boundary.toml/nb30	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+word-boundary.toml/nb31	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+word-boundary.toml/nb32	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+word-boundary.toml/nb33	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+word-boundary.toml/nb34	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+word-boundary.toml/nb35	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+word-boundary.toml/nb36	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+word-boundary.toml/nb37	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+word-boundary.toml/nb38	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+word-boundary.toml/nb39	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+word-boundary.toml/unicode1-only-ascii	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary.toml/unicode2-only-ascii	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary.toml/unicode3-only-ascii	unicode = false: Rust's ASCII-only mode is outside the Crystal dialect
+word-boundary.toml/unicode4-only-ascii	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+word-boundary.toml/unicode5-only-ascii	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+word-boundary.toml/unicode5-noutf8	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+word-boundary.toml/unicode5-noutf8-only-ascii	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+word-boundary.toml/unicode5-not-only-ascii	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+word-boundary.toml/unicode5-not-noutf8	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)
+word-boundary.toml/unicode5-not-noutf8-only-ascii	utf8 = false: byte-oriented matching (invalid-UTF paths arrive in R4)

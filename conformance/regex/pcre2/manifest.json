@@ -1,0 +1,10 @@
+{
+  "name": "PCRE2 testdata",
+  "version": "10.49",
+  "tag": "pcre2-10.49",
+  "commit": "6f9d7c1373262c541324a16a358785b33ef116cf",
+  "archive": "pcre2-10.49.tar.gz",
+  "url": "https://github.com/PCRE2Project/pcre2/releases/download/pcre2-10.49/pcre2-10.49.tar.gz",
+  "sha256": "929f0b20e62879252a15886b06c89f1edef61a363cbd5826fb041080a5e557ae",
+  "license": "BSD-3-Clause with PCRE2 exception (LICENCE.md in the archive)"
+}
