@@ -70,8 +70,9 @@ module Mica::Regex
     # orbits, which reads the fold table member by member, and a pattern
     # often writes the same class many times (`[0-9a-f]{8}-[0-9a-f]{4}`),
     # so the sets of classes up to `WRITTEN_CLASS_ITEMS` items are kept
-    # for the process (up to `WRITTEN_CLASSES` of them, after which new
-    # classes are lowered each time). The same set object comes back for
+    # for the process (up to `WRITTEN_CLASSES` of them; a full table is
+    # emptied and filled again, so the classes a process keeps compiling
+    # stay in it). The same set object comes back for
     # the same class, so `ClassMemo` finds its automaton by identity. A
     # kept set larger than the caller's `max_class_ranges` is lowered
     # again, so the refusal is the same.
@@ -89,7 +90,8 @@ module Mica::Regex
       @@shared_mutex.synchronize do
         kept = @@written_sets[key]?
         return kept if kept && kept.range_count <= limits.max_class_ranges
-        @@written_sets[{items.dup, key[1], key[2], key[3], key[4]}] = set if @@written_sets.size < WRITTEN_CLASSES
+        @@written_sets.clear if @@written_sets.size >= WRITTEN_CLASSES
+        @@written_sets[{items.dup, key[1], key[2], key[3], key[4]}] = set
       end
       set
     end
