@@ -443,7 +443,18 @@ much as the cost per byte:
   the haystack (`4n + 64` steps), and otherwise declines to the searcher.
   The one-pass DFA keeps, per table cell, the next state's row offset
   with flags for an edge that has assertions or slots and for a target
-  with a match path, so one load per byte finds the next state. A call takes its program's hot lease with one
+  with a match path, so one load per byte finds the next state. A match
+  path that asserts `\z` is checked only at the end. A failed match path
+  hands the search to another engine only in a state that left a
+  lower-ranked byte path out (a lazy repeat); in `\A[a-z0-9]+\z` the bytes
+  rank above the match, so the one-pass DFA decides alone.
+  An unanchored short search finds each start with `memchr` when every
+  match starts with one byte, and declines after `ShortSearch::MAX_TRIES`
+  (8) failed tries; once a program has had `MAX_DECLINES` (16) such
+  declines, its unanchored searches go straight to the searcher, whose DFA
+  reads a haystack with no match nearby faster. The plan remembers the
+  last haystack a short search validated, so iterating over one haystack
+  validates it once. A call takes its program's hot lease with one
   atomic exchange and puts it back with one compare-and-set. Who holds a
   lease is decided by where it sits: in the hot slot or the idle list it is
   idle, and whoever takes it out (a search, or the pool evicting it) holds

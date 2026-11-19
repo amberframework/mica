@@ -24,6 +24,12 @@ module Mica::Regex
     # builds the program's one-pass DFA, so a pattern searched once does
     # not pay for building it.
     BUILD_AFTER = 8
+    # The most failed tries at a start `run` makes before it declines an
+    # unanchored search; after `MAX_DECLINES` such declines it leaves the
+    # program's unanchored searches to the searcher, whose DFA reads a
+    # haystack with no match nearby faster than one try per position.
+    MAX_TRIES    =  8
+    MAX_DECLINES = 16
 
     def initialize(@program : Program, @haystack : String, @byte_index : Int32, @options : MatchOptions,
                    @limits : SearchLimits, @timeout : Time::Span?)
@@ -60,18 +66,25 @@ module Mica::Regex
       bound = work_bound(bytes.size)
       return LazyDFA::GAVE_UP unless fits?(bound) && valid?
       filter = plan.start_filter
+      return LazyDFA::NO_MATCH if filter.rejects?(bytes, @byte_index, anchored?(plan))
       if anchored?(plan)
         finish, _ = one_pass.search(bytes, @byte_index, @byte_index, slots, scratch, nil)
         return finish
       end
+      return LazyDFA::GAVE_UP unless plan.short_tries_pay?
       spent = 0
+      tries = 0
       start = @byte_index
-      last = bytes.size - filter.minimum_bytes
-      while start <= last
-        if start == bytes.size || (bytes.unsafe_fetch(start) & 0xC0 != 0x80 && !filter.rejects?(bytes, start, true))
+      while (start = filter.next_start(bytes, start)) >= 0
+        if start == bytes.size || bytes.unsafe_fetch(start) & 0xC0 != 0x80
+          if tries == MAX_TRIES
+            plan.note_short_decline
+            return LazyDFA::GAVE_UP
+          end
           finish, scanned = one_pass.search(bytes, start, @byte_index, slots, scratch, nil)
           return finish unless finish == LazyDFA::NO_MATCH
           spent += scanned + 1
+          tries += 1
           return LazyDFA::GAVE_UP if spent > bound
         end
         start += 1
@@ -103,8 +116,15 @@ module Mica::Regex
       @limits.base_work >= needed || (@haystack.bytesize > 0 && @limits.work_per_byte >= needed)
     end
 
+    # True when the haystack is valid UTF-8. The plan remembers the last
+    # `String` a short search validated (strings are immutable), so an
+    # iteration of calls over one haystack validates it once.
     private def valid? : Bool
-      Core::UTF8.first_invalid_offset(@haystack.to_slice).nil?
+      plan = @program.plan
+      return true if plan.short_validated?(@haystack)
+      return false if Core::UTF8.first_invalid_offset(@haystack.to_slice)
+      plan.remember_short_validated(@haystack)
+      true
     end
   end
 end

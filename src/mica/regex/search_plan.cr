@@ -47,6 +47,10 @@ module Mica::Regex
     # Short searches seen before the one-pass DFA was built (see
     # `short_search_one_pass`).
     @short_searches = Atomic(Int32).new(0)
+    # Unanchored short searches that ran out of tries (see `ShortSearch`).
+    @short_declines = Atomic(Int32).new(0)
+    # The last haystack a short search found to be valid UTF-8.
+    @short_validated = Atomic(String?).new(nil)
     # 1 once a caller read groups that a search had left to read later.
     @groups_read = Atomic(Int32).new(0)
     @mutex = Mutex.new
@@ -134,6 +138,26 @@ module Mica::Regex
     def defers_groups? : Bool
       @program.slot_count > 2 && @one_pass_built.get == 1 && @one_pass.get.nil? &&
         @groups_read.get(:relaxed) == 0
+    end
+
+    # True while unanchored short searches of this program usually find
+    # their match within `ShortSearch::MAX_TRIES` tries.
+    def short_tries_pay? : Bool
+      @short_declines.get(:relaxed) < ShortSearch::MAX_DECLINES
+    end
+
+    def note_short_decline : Nil
+      @short_declines.add(1, :relaxed)
+    end
+
+    # True when *haystack* is the very `String` a short search validated
+    # last (see `ShortSearch`).
+    def short_validated?(haystack : String) : Bool
+      @short_validated.get(:relaxed).same?(haystack)
+    end
+
+    def remember_short_validated(haystack : String) : Nil
+      @short_validated.set(haystack, :relaxed)
     end
 
     # Records that a caller read the groups of a match found without them

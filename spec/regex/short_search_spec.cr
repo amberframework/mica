@@ -250,6 +250,31 @@ describe "Mica::Regex short searches" do
     end
   end
 
+  describe "one-pass decisions" do
+    it_satisfies "REGEX-R3-short-search", "decides alone where no byte path ranks below a failed match path" do
+      dfa = expression("\\A[a-z0-9]+\\z").program.plan.one_pass || raise "expected a one-pass DFA"
+      slots = Slice(Int64).new(2, -1_i64)
+      scratch = Slice(Int64).new(2, -1_i64)
+      dfa.search("abc-".to_slice, 0, 0, slots, scratch, nil)[0].should eq(Mica::Regex::LazyDFA::NO_MATCH)
+      dfa.search("abc".to_slice, 0, 0, slots, scratch, nil)[0].should eq(3)
+      # A lazy repeat ranks the match above the bytes: a failed `$` there
+      # leaves the answer to another engine.
+      lazy = expression("^(?:aa(?:bb)??)+$").program.plan.one_pass || raise "expected a one-pass DFA"
+      lazy.search("aabbx".to_slice, 0, 0, Slice(Int64).new(2, -1_i64), Slice(Int64).new(2, -1_i64), nil)[0]
+        .should eq(Mica::Regex::LazyDFA::GAVE_UP)
+    end
+
+    it_satisfies "REGEX-R3-short-search", "leaves unanchored searches with no match nearby to the searcher" do
+      pattern = expression(".y")
+      haystack = "x" * 60 + "y"
+      (Mica::Regex::ShortSearch::MAX_DECLINES + 12).times do
+        pattern.match(haystack, limits: LIMITS).try(&.to_s).should eq("xy")
+      end
+      pattern.program.plan.short_tries_pay?.should be_false
+      pattern.match("ay", limits: LIMITS).try(&.to_s).should eq("ay")
+    end
+  end
+
   describe "allocation" do
     it_satisfies "REGEX-R3-short-search", "allocates nothing per call for a pattern without groups" do
       pattern = expression(",\\s*")

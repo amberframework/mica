@@ -30,10 +30,16 @@ module Mica::Regex
     # The most single-byte states `required_byte` considers.
     private MAX_REQUIRED_CANDIDATES = 8
 
+    # The one byte every match starts with, or -1.
+    @single_start = -1
+
     def initialize(program : Program)
       @minimum_bytes = StartFilter.shortest_match(program)
-      collect_start_bytes(program) if @minimum_bytes > 0
-      @required_byte = StartFilter.required_byte(program) if @minimum_bytes > 0
+      return unless @minimum_bytes > 0
+      collect_start_bytes(program)
+      @required_byte = StartFilter.required_byte(program)
+      list_of_start_bytes = (0..255).select { |byte| starts?(byte.to_u8) }
+      @single_start = list_of_start_bytes.first if list_of_start_bytes.size == 1
     end
 
     # True when no match can start in *haystack* at *from* (or, unless
@@ -45,9 +51,25 @@ module Mica::Regex
       return true if from > last
       return false if @minimum_bytes == 0
       last = from if anchored
-      return true if (from..last).none? { |index| starts?(haystack.unsafe_fetch(index)) }
+      return true if next_start(haystack, from, last) < 0
       required = @required_byte
-      !!required && !haystack[from..].includes?(required)
+      !!required && !haystack[from..].index(required)
+    end
+
+    # The first position from *from* through *last* where a match may
+    # start (the byte there is one a match starts with, and at least
+    # `minimum_bytes` bytes remain), or -1. Uses `memchr` when matches
+    # start with one byte.
+    def next_start(haystack : Bytes, from : Int32, last : Int32 = Int32::MAX) : Int32
+      last = Math.min(last, haystack.size - @minimum_bytes)
+      return -1 if from > last
+      return from if @minimum_bytes == 0
+      if @single_start >= 0
+        found = haystack[from, last + 1 - from].index(@single_start.to_u8)
+        return found ? from + found : -1
+      end
+      (from..last).each { |index| return index if starts?(haystack.unsafe_fetch(index)) }
+      -1
     end
 
     # The rarest ASCII byte (by `Prefilter.rank`) that every path from the

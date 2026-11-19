@@ -55,14 +55,14 @@ module Mica::Regex
     private STEP_REACHES_MATCH = 2
 
     def initialize(@byte_classes : ByteClasses, @table : Array(Int32), @match_edges : Array(Int32),
-                   @list_of_edges : Array(Edge))
+                   @list_of_edges : Array(Edge), @list_of_shadows : Array(Bool))
       @class_count = @byte_classes.class_count
       @steps = @table.map do |index|
         next -1 if index < 0
         edge = @list_of_edges[index]
         step = (edge.target * @class_count) << 2
         step |= STEP_TAKES_EDGE if edge.looks != 0 || edge.slots != 0
-        step |= STEP_REACHES_MATCH if @match_edges[edge.target] >= 0
+        step |= STEP_REACHES_MATCH if matches_before_end?(edge.target)
         step
       end
     end
@@ -70,6 +70,16 @@ module Mica::Regex
     # Fills *slots* with the captures of the match `[start, finish)` of
     # *haystack*, which the span search found. Returns false when no path
     # reads the span (the caller then uses another engine).
+    # True when *state* has a match path that can hold before the end of
+    # the haystack, or one that left a byte path out (see `search`): only
+    # these states stop the search's tight loop. A match path that asserts
+    # `\z` holds only at the end, where `search` checks it anyway.
+    private def matches_before_end?(state : Int32) : Bool
+      index = @match_edges[state]
+      return false if index < 0
+      @list_of_shadows[state] || @list_of_edges[index].looks & (1_u32 << Program::LookKind::EndOfText.value) == 0
+    end
+
     def captures(haystack : Bytes, start : Int32, finish : Int32, search_start : Int32, slots : Slice(Int64),
                  meter : SearchMeter) : Bool
       slots.fill(PikeVM::UNSET)
@@ -106,8 +116,10 @@ module Mica::Regex
     # The paths the builder left out rank below a match path that the
     # search may find does not hold here (its assertion fails, as `$` does
     # before the end). Then a left-out path could still match, so when the
-    # search ends with no match recorded after such a position it returns
-    # `LazyDFA::GAVE_UP`, and the caller searches another way.
+    # search ends with no match recorded after such a position, at a state
+    # that left a byte path out, it returns `LazyDFA::GAVE_UP`, and the
+    # caller searches another way. A state that left nothing out (as in
+    # `\A[a-z]+\z`, whose bytes rank above the match) decides alone.
     #
     # Returns the match end, `LazyDFA::NO_MATCH` or `LazyDFA::GAVE_UP`, and
     # the bytes read. O(L + c·k) for L bytes read and k positions with a
@@ -133,14 +145,14 @@ module Mica::Regex
       row = 0
       reaches_match = @match_edges.unsafe_fetch(0) >= 0
       while true
-        if reaches_match
+        if reaches_match || (at >= size && @match_edges.unsafe_fetch(row // @class_count) >= 0)
           edge = edges[@match_edges.unsafe_fetch(row // @class_count)]
           if holds?(edge, haystack, at, search_start)
             slots.copy_from(scratch.to_unsafe, slots.size)
             write(edge, at, slots)
             found = at
             undecided = false
-          else
+          elsif @list_of_shadows.unsafe_fetch(row // @class_count)
             undecided = true
           end
         end
@@ -226,6 +238,9 @@ module Mica::Regex
     @table = [] of Int32
     @match_edges = [] of Int32
     @list_of_edges = [] of OnePassDFA::Edge
+    # Per DFA state: true when it left out a byte path ranked below its
+    # match path.
+    @list_of_shadows = [] of Bool
     @seen : Array(Int32)
 
     def initialize(@program : Program, @byte_classes : ByteClasses)
@@ -240,7 +255,7 @@ module Mica::Regex
         return nil unless explore(index)
         index += 1
       end
-      OnePassDFA.new(@byte_classes, @table, @match_edges, @list_of_edges)
+      OnePassDFA.new(@byte_classes, @table, @match_edges, @list_of_edges, @list_of_shadows)
     end
 
     private def root_of(nfa_state : Int32) : Int32
@@ -251,6 +266,7 @@ module Mica::Regex
       @dfa_state_of[nfa_state] = id
       @byte_classes.class_count.times { @table << -1 }
       @match_edges << -1
+      @list_of_shadows << false
       id
     end
 
@@ -269,11 +285,13 @@ module Mica::Regex
           state = states[current]
           case state.kind
           when .byte_range?
+            @list_of_shadows[dfa_state] = true if matched
             if !matched && !add_edges(dfa_state, state.low, state.high, state.next_state, slots, looks, class_count)
               return false
             end
             break
           when .sparse?
+            @list_of_shadows[dfa_state] = true if matched
             unless matched
               state.alternate.times do |offset|
                 transition = @program.list_of_transitions[state.argument + offset]
