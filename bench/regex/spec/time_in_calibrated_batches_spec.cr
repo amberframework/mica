@@ -64,6 +64,19 @@ describe RegexBench::TimeInCalibratedBatches do
       end
     end
 
+    it "batches a short operation whose first call alone took 10 us or more" do
+      # A first call that builds something lazily, then 167 ns calls: as a
+      # Mica search's first calls build its plan.
+      clock = SimulatedClock.new(TICK)
+      first = true
+      statistics = RegexBench::TimeInCalibratedBatches.new(settings, ->clock.read).measure do
+        clock.run(first ? 50e-6 : 167e-9)
+        first = false
+      end
+      statistics.iterations_per_sample.should eq(64)
+      statistics.median.should be_close(167e-9, 167e-9 / 100)
+    end
+
     it "samples an operation slower than slow_iteration_seconds once, as before batching" do
       clock = SimulatedClock.new
       statistics = measure(3.0, clock)
