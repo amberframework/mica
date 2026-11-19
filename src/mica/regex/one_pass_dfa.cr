@@ -360,9 +360,16 @@ module Mica::Regex
     @list_of_shadows = [] of Bool
     @seen : Array(Int32)
 
+    # A table of at most this many cells (one row per NFA state, the most
+    # the DFA can have) is allocated once at that size instead of grown
+    # row by row, which would allocate about twice the final table.
+    PRESIZED_TABLE_CELLS = 4096
+
     def initialize(@program : Program, @byte_classes : ByteClasses)
       @dfa_state_of = Array(Int32).new(@program.state_count, -1)
       @seen = Array(Int32).new(@program.state_count, -1)
+      most_cells = @program.state_count.to_i64 * @byte_classes.class_count
+      @table = Array(Int32).new(most_cells.to_i32) if most_cells <= PRESIZED_TABLE_CELLS
     end
 
     def build : OnePassDFA?
