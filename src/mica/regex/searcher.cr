@@ -259,11 +259,15 @@ module Mica::Regex
       if lease && lease.validated?(@haystack)
         plan.remember_short_validated(@haystack) if plan && !plan.short_validated?(@haystack)
       else
-        # Validation reads every byte once: one operation per byte.
+        # Validation reads every byte once: one operation per byte. A
+        # haystack a short search of this plan found valid (the very same
+        # `String`) is charged the same but not read again.
         bytes = @haystack.to_slice
         @meter.charge(bytes.size, 0)
-        if offset = Core::UTF8.first_invalid_offset(bytes)
-          raise Mica::EncodingError.new("The haystack is not valid UTF-8", Core::Position.new(offset.to_i64))
+        unless plan && plan.short_validated?(@haystack)
+          if offset = Core::UTF8.first_invalid_offset(bytes)
+            raise Mica::EncodingError.new("The haystack is not valid UTF-8", Core::Position.new(offset.to_i64))
+          end
         end
         lease.try(&.remember_validated(@haystack))
         @plan.try(&.remember_short_validated(@haystack))

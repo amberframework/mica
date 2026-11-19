@@ -67,8 +67,14 @@ module Mica::Regex
       return false if @minimum_bytes == 0
       last = from if anchored
       return true if next_start(haystack, from, last) < 0
-      tail = haystack[from..]
-      @list_of_required_bytes.any? { |byte| !tail.index(byte) }
+      @list_of_required_bytes.any? { |byte| !StartFilter.holds_byte?(haystack, from, byte) }
+    end
+
+    # True when *haystack* holds *byte* at *from* or after (`memchr`).
+    @[AlwaysInline]
+    protected def self.holds_byte?(haystack : Bytes, from : Int32, byte : UInt8) : Bool
+      return false if from >= haystack.size
+      !LibC.memchr(haystack.to_unsafe + from, byte.to_i32, haystack.size - from).null?
     end
 
     # The most bytes `rejects?` reads from *from* in a haystack of
@@ -87,9 +93,11 @@ module Mica::Regex
       last = Math.min(last, haystack.size - @minimum_bytes)
       return -1 if from > last
       return from if @minimum_bytes == 0
+      # One position (an anchored search): one load, no call.
+      return starts?(haystack[from]) ? from : -1 if from == last
       if @single_start >= 0
-        found = haystack[from, last + 1 - from].index(@single_start.to_u8)
-        return found ? from + found : -1
+        found = LibC.memchr(haystack.to_unsafe + from, @single_start, last + 1 - from)
+        return found.null? ? -1 : (found.as(UInt8*) - haystack.to_unsafe).to_i32
       end
       (from..last).each { |index| return index if starts?(haystack.unsafe_fetch(index)) }
       -1
