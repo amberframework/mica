@@ -107,7 +107,9 @@ describe "Mica::Regex short searches" do
     end
 
     it_satisfies "REGEX-R3-short-search", "tries the forward lazy DFA anchored at each candidate when the pattern is not one-pass" do
-      separator = planned_expression(",|,\\s")
+      # A class second, so the branches keep their own first items (see
+      # Translator.factor_first_literals) and the pattern stays ambiguous.
+      separator = planned_expression(",|[,;]\\s")
       separator.program.plan.one_pass.should be_nil
       found = Mica::Regex::Searcher.open(separator.program, "a,b, c", LIMITS, nil, Mica::Regex::CachePool.default)
       found.find(2, Mica::Regex::MatchOptions::None, false).try(&.to_a).should eq([3, 4])

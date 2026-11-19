@@ -255,6 +255,23 @@ describe Mica::Regex::Syntax do
       hir_of("[[:<:]]").should eq("(cat (look word_boundary) (look word_start))")
       hir_of("[[:>:]]*").should eq("(cat (look word_boundary) (look word_end){0,})")
     end
+
+    it_satisfies "REGEX-R1-hir", "factors the first literal out of adjacent top-level branches that share it, keeping their order" do
+      hir_of("ab|ac").should eq("(cat a (alt b c))")
+      hir_of(",|,x").should eq("(cat , (alt (empty) x))")
+      hir_of("a|ab|c|ca").should eq("(alt (cat a (alt (empty) b)) (cat c (alt (empty) a)))")
+      # Branches apart keep their order: only adjacent runs are joined.
+      hir_of("ab|c|ad").should eq("(alt (cat a b) c (cat a d))")
+      # Only the top-level alternation: one inside the pattern is kept.
+      hir_of("x(?:ab|ac)").should eq("(cat x (alt (cat a b) (cat a c)))")
+      # A group or a class first is left alone.
+      hir_of("(a)b|(a)c").should eq("(alt (cat (cap 1 a) b) (cat (cap 2 a) c))")
+      limits = Mica::Regex::SearchLimits::TRUSTED_INPUT
+      {"(?:a|ab)c" => {"abc", "abc"}, ",|,\\s" => {"a, b", ","}, "sam|samwise" => {"samwise", "sam"}}.each do |source, (haystack, expected)|
+        pattern = Mica::Regex::Expression.new(source, compile_limits: TRUSTED)
+        pattern.match(haystack, limits: limits).try(&.[0]).should eq(expected)
+      end
+    end
   end
 
   describe "limits" do

@@ -168,10 +168,12 @@ module Mica::Regex
     # :nodoc:
     # The engines and caches of this program's searches (built on the first
     # search, see `SearchPlan`).
+    @[AlwaysInline]
     def plan : SearchPlan
-      if built = @plan.get
-        return built
-      end
+      @plan.get(:acquire) || build_plan
+    end
+
+    private def build_plan : SearchPlan
       @plan_mutex.synchronize do
         built = @plan.get
         return built if built

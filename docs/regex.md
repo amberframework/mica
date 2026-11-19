@@ -219,7 +219,14 @@ it once; each merge step is charged with the heap's depth.
 `LineBreak` (`\R`, kept as its own node because PCRE2 matches it atomically:
 `\r\n` is never split by backtracking), `Repetition` with explicit counts,
 `Capture`, `Concatenation`, `Alternation` and `Empty`. Non-capturing groups
-and option settings are gone.
+and option settings are gone. Adjacent branches of the pattern's top-level
+alternation that start with the same literal share it: `,|,\s` becomes `,(?:|\s)` and `sam|samwise`
+`sam(?:|wise)`. Leftmost-first matching tries the same paths in the same
+order either way, so every match and group is unchanged, and the one-pass
+DFA can read the factored form, where the shared first byte made the
+branches ambiguous. An alternation inside a larger pattern is left as
+written: made one-pass there, its one-pass DFA can cost more to build
+than the first searches it would serve.
 
 ## Native API
 
@@ -567,8 +574,11 @@ much as the cost per byte:
   idle, and whoever takes it out (a search, or the pool evicting it) holds
   it alone. The pool's least-recently-used clock advances with a relaxed
   load and store, so two threads that hand back at once may tie.
-- **No allocation for group 0.** `MatchData` holds the match's span in the
-  value itself; a pattern without groups allocates nothing per call. The
+- **No allocation for up to four groups.** `MatchData` holds the match's
+  span, and the spans of up to four groups read with the match
+  (`MatchData::INLINE_GROUP_SLOTS`), in the value itself, so such a
+  pattern allocates nothing per call; more groups, or groups read on first
+  use, live in a buffer every copy of the match shares. The
   work budget of a repeated call reuses the one the searcher built last.
 - **One pass for a prefix-literal match.** Every match of a pattern with
   prefix literals starts with one of them, so the first prefilter
@@ -591,6 +601,42 @@ much as the cost per byte:
   (64) undecided bytes and turns the search at starts off for the call,
   so a long failure such as `(?:a+)+b` over a run of a's costs at most
   that much extra.
+- **Candidate searches over a long haystack.** A single search
+  (`match`, `match_at_byte_index`, `search`) over more than 256 bytes of a
+  haystack the plan remembers as valid UTF-8 (the searcher that validated
+  it, or a short search, records it) runs the one-pass DFA anchored at
+  each *candidate* start, with no lease, no searcher and no meter
+  (`CandidateSearch`): `memchr` finds the next byte of the prefilter's one
+  literal, or a scan finds the next byte a match can start with
+  (`StartFilter#starts?`) and whose next byte one can have second
+  (`StartFilter#second?`, when every match spans two bytes or more:
+  `([a-z\d])([A-Z])` is tried only where a capital follows), and the
+  first try that matches gives the span and the groups. Its work is bounded before it reads a byte: the scan
+  reads each byte from the offset once, the failed tries read at most the
+  remaining bytes plus room for `MAX_TRIES` (16) tries of
+  `TRY_REACH` (64), and the try that matches at most the remaining
+  bytes, so at most `3n + (MAX_TRIES + 1)(TRY_REACH + 1) + 2`
+  operations, which must fit the call's allowance (checked without a
+  multiplication, as for short searches). It applies only with no
+  timeout, at a character boundary, on a one-pass program with at most
+  16 slots and neither `FirstLine` nor `EndAnchored`. It declines after
+  `MAX_TRIES` failed tries, past its byte bound, or when the one-pass DFA
+  cannot decide; the searcher then takes over and is charged the work the
+  candidate search spent first, so the call stays within its allowance. A
+  program with `MAX_DECLINES` (16) declines and fewer than
+  `MATCHES_PER_DECLINE` (32) matches per decline leaves its searches to
+  the searcher, trying one in `RETRY_INTERVAL` (256) to see whether that
+  changed. `,\s*`, `[^a-z0-9]+` and `\s+` iterated by separate calls over
+  a 1 MiB haystack cost about as much per match as PCRE2-JIT does.
+- **Scan positions kept across calls over one haystack.** A call that
+  searches the very `String` the call before it searched (separate calls
+  iterating, as `String#scan` makes them) keeps where the prefilter found
+  each needle and where each required byte was found: a needle that is
+  rare, or absent, is not looked for again past where it was found
+  (`>[^\n]*\n|\n` over a FASTA file no longer scans to the next `>` once
+  per line). Those bytes were read and charged once, by the call that
+  found them; strings are immutable and the parked searcher holds the last
+  one, so identity proves it is the same text.
 - **Groups read on first use.** When only the bounded backtracker or the
   Pike VM can read a pattern's groups (the first capture pass found the
   pattern is not one-pass),

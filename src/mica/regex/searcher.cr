@@ -189,16 +189,26 @@ module Mica::Regex
     end
 
     # Starts this (finished) searcher over for a new call on *lease*.
-    protected def resume(lease : SearchLease, @haystack : String, limits : SearchLimits, timeout : Time::Span?) : Nil
+    #
+    # When the call searches the very `String` the last one did (an
+    # iteration of separate calls, as `String#scan` makes), the positions
+    # the last call found its prefilter needles and required bytes at stay
+    # valid (strings are immutable, and the parked searcher held it, so its
+    # address was not reused): they are kept, so a needle or byte that is
+    # rare, or absent, is not looked for again past where it was found.
+    # Those bytes were read and charged once, in the call that found them.
+    protected def resume(lease : SearchLease, haystack : String, limits : SearchLimits, timeout : Time::Span?) : Nil
+      same_haystack = @haystack.same?(haystack)
+      @haystack = haystack
       @meter.restart(limits, @program.state_count, @haystack.bytesize, timeout)
       @line_scan_start = -1
       @line_feed_at = -1
-      @scan.try(&.reset(@haystack.to_slice))
+      @scan.try(&.reset(@haystack.to_slice, keep_positions: same_haystack))
       @prefilter_off = false
       @start_search_waste = 0_i64
       @start_search_off = false
       @searches_started = 0
-      @required_at.fill(-1)
+      @required_at.fill(-1) unless same_haystack
       @dfa_gave_up = false
       @last_path = Path::None
       @cache_pool = lease.pool
@@ -242,16 +252,21 @@ module Mica::Regex
       # search too short to reach a clock checkpoint.
       @meter.enforce_deadline(0)
       lease = @lease
-      unless lease && lease.validated?(@haystack)
-        # Validation reads every byte once: one operation per byte. A lease
-        # remembers the last `String` it validated, so an iteration of
-        # separate calls over one haystack validates it once.
+      plan = @plan
+      # A lease remembers the last `String` it validated (strings are
+      # immutable), so an iteration of separate calls over one haystack
+      # validates it once; the plan is told too, for candidate searches.
+      if lease && lease.validated?(@haystack)
+        plan.remember_short_validated(@haystack) if plan && !plan.short_validated?(@haystack)
+      else
+        # Validation reads every byte once: one operation per byte.
         bytes = @haystack.to_slice
         @meter.charge(bytes.size, 0)
         if offset = Core::UTF8.first_invalid_offset(bytes)
           raise Mica::EncodingError.new("The haystack is not valid UTF-8", Core::Position.new(offset.to_i64))
         end
         lease.try(&.remember_validated(@haystack))
+        @plan.try(&.remember_short_validated(@haystack))
       end
     end
 

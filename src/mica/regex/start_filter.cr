@@ -27,6 +27,16 @@ module Mica::Regex
     getter list_of_required_bytes = [] of UInt8
     # One bit per byte value that can start a non-empty match.
     @start_bytes = StaticArray(UInt64, 4).new(0_u64)
+    # The same bits one byte per value, for scans that test every byte
+    # (`starts?`): one load and no shift.
+    # Cleared with one `memset` in `initialize` (`StaticArray.new(false)`
+    # writes it a byte at a time, on every program's first search).
+    @start_table : StaticArray(Bool, 256)
+    # One bit per byte value a match can have second, when every match
+    # spans at least two bytes; all set otherwise (see `second?`).
+    @second_bytes = StaticArray(UInt64, 4).new(UInt64::MAX)
+    # True once `prepare_second_bytes` filled `@second_bytes`.
+    @second_ready = Atomic(Bool).new(false)
 
     # The most single-byte states `required_byte` considers.
     private MAX_REQUIRED_CANDIDATES = 8
@@ -37,12 +47,14 @@ module Mica::Regex
     @single_start = -1
 
     def initialize(program : Program)
+      @start_table = uninitialized StaticArray(Bool, 256)
+      pointerof(@start_table).clear
       @minimum_bytes = StartFilter.shortest_match(program)
       return unless @minimum_bytes > 0
       collect_start_bytes(program)
       @list_of_required_bytes = program.list_of_required_bytes
-      list_of_start_bytes = (0..255).select { |byte| starts?(byte.to_u8) }
-      @single_start = list_of_start_bytes.first if list_of_start_bytes.size == 1
+      count = @start_bytes.sum(&.popcount)
+      @single_start = @start_table.index(true) || -1 if count == 1
     end
 
     # True when no match can start in *haystack* at *from* (or, unless
@@ -166,8 +178,30 @@ module Mica::Regex
       list_of_pending << target
     end
 
-    private def starts?(byte : UInt8) : Bool
-      @start_bytes.unsafe_fetch(byte >> 6) & (1_u64 << (byte & 63)) != 0
+    # True when *byte* can follow the first byte of a match (every byte
+    # when a match can be shorter than two bytes). A candidate scan checks
+    # it with `starts?`, so a position whose next byte no match can have
+    # second is not tried (`([a-z\d])([A-Z])` over lowercase text).
+    @[AlwaysInline]
+    def second?(byte : UInt8) : Bool
+      @second_bytes.unsafe_fetch(byte >> 6) & (1_u64 << (byte & 63)) != 0
+    end
+
+    # Fills the bits `second?` reads, once: only candidate searches read
+    # it, so a program that never takes one never pays for the walk. Two
+    # threads may both fill it; each writes the same bytes, and a byte a
+    # reader sees before the write is still true, which only tries one
+    # candidate more.
+    def prepare_second_bytes(program : Program) : Nil
+      return if @second_ready.get(:acquire)
+      collect_second_bytes(program) if @minimum_bytes >= 2
+      @second_ready.set(true, :release)
+    end
+
+    # True when a non-empty match can start with *byte*.
+    @[AlwaysInline]
+    def starts?(byte : UInt8) : Bool
+      @start_table.unsafe_fetch(byte)
     end
 
     # The fewest bytes on any path from the start state to the match state:
@@ -235,8 +269,56 @@ module Mica::Regex
       end
     end
 
+    # Fills `@second_bytes` with the bytes any transition reachable after
+    # exactly one byte from the start state (assertions taken as passing)
+    # can read: the second byte of every match of two bytes or more.
+    private def collect_second_bytes(program : Program) : Nil
+      list_of_after_first = [] of Int32
+      each_reading_state(program, [program.start_state]) do |index, state|
+        if state.kind.byte_range?
+          list_of_after_first << state.next_state
+        else
+          state.alternate.times { |offset| list_of_after_first << program.transition_at(index, state, offset).target }
+        end
+      end
+      second = StaticArray(UInt64, 4).new(0_u64)
+      each_reading_state(program, list_of_after_first) do |index, state|
+        if state.kind.byte_range?
+          (state.low..state.high).each { |byte| second[byte >> 6] |= 1_u64 << (byte & 63) }
+        else
+          state.alternate.times do |offset|
+            transition = program.transition_at(index, state, offset)
+            (transition.low..transition.high).each { |byte| second[byte >> 6] |= 1_u64 << (byte & 63) }
+          end
+        end
+      end
+      @second_bytes = second
+    end
+
+    # Yields each state that reads a byte (`ByteRange` or `Sparse`) reachable
+    # from *list_of_pending* without reading one.
+    private def each_reading_state(program : Program, list_of_pending : Array(Int32), & : Int32, Program::State ->) : Nil
+      states = program.list_of_states
+      visited = Set(Int32).new
+      while index = list_of_pending.pop?
+        next unless visited.add?(index)
+        state = states[index]
+        case state.kind
+        when .split?
+          list_of_pending << state.next_state << state.alternate
+        when .save?, .look?
+          list_of_pending << state.next_state
+        when .byte_range?, .sparse?
+          yield index, state
+        end
+      end
+    end
+
     private def mark(low : UInt8, high : UInt8) : Nil
-      (low..high).each { |byte| @start_bytes[byte >> 6] |= 1_u64 << (byte & 63) }
+      (low..high).each do |byte|
+        @start_bytes[byte >> 6] |= 1_u64 << (byte & 63)
+        @start_table[byte] = true
+      end
     end
   end
 end

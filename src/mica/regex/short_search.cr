@@ -32,6 +32,11 @@ module Mica::Regex
     MAX_TRIES    =  8
     MAX_DECLINES = 16
 
+    # True once `rejects?` found the haystack valid and the filter's scans
+    # inside the allowance without rejecting it, so `run` need not scan or
+    # validate again.
+    @screened = false
+
     def initialize(@program : Program, @haystack : String, @byte_index : Int32, @options : MatchOptions,
                    @limits : SearchLimits, @timeout : Time::Span?)
     end
@@ -51,7 +56,10 @@ module Mica::Regex
       plan = @program.plan
       filter = plan.start_filter
       return false unless fits?(filter.scan_work(bytes.size, @byte_index))
-      return false unless filter.rejects?(bytes, @byte_index, anchored?(plan))
+      unless filter.rejects?(bytes, @byte_index, anchored?(plan))
+        @screened = valid?
+        return false
+      end
       valid?
     end
 
@@ -71,8 +79,11 @@ module Mica::Regex
       # The filter's scans, the start scan between tries (at most one
       # pass), and the tries themselves.
       steps = filter.scan_work(bytes.size, @byte_index) + (bytes.size - @byte_index) + bound
-      return LazyDFA::GAVE_UP unless fits?(steps) && valid?
-      return LazyDFA::NO_MATCH if filter.rejects?(bytes, @byte_index, anchored?(plan))
+      return LazyDFA::GAVE_UP unless fits?(steps)
+      unless @screened
+        return LazyDFA::GAVE_UP unless valid?
+        return LazyDFA::NO_MATCH if filter.rejects?(bytes, @byte_index, anchored?(plan))
+      end
       if anchored?(plan)
         finish, _ = one_pass.search(bytes, @byte_index, @byte_index, slots, scratch, nil)
         return finish

@@ -134,7 +134,9 @@ module Mica::Regex
     # returns `LazyDFA::GAVE_UP` there.
     def search(haystack : Bytes, start : Int32, search_start : Int32, slots : Slice(Int64), scratch : Slice(Int64),
                meter : SearchMeter?, stop : Int32 = Int32::MAX) : {Int32, Int32}
-      scratch.fill(PikeVM::UNSET)
+      # Slot counts are small: plain loops beat the `memset` and `memcpy`
+      # calls of `fill` and `copy_from`.
+      scratch.size.times { |index| scratch.unsafe_put(index, PikeVM::UNSET) }
       at = start
       charged = start
       size = haystack.size
@@ -152,12 +154,17 @@ module Mica::Regex
       bytes = haystack.to_unsafe
       row = 0
       reaches_match = @match_edges.unsafe_fetch(0) >= 0
+      # The last match found is written to *slots* only when the scratch
+      # slots are about to change or the search ends: until then it is the
+      # scratch slots plus `pending_edge` written at `found`, so a run of
+      # bytes that each reach a match (`\w+`) copies the slots once.
+      pending_edge = -1
       while true
         if reaches_match || (at >= size && @match_edges.unsafe_fetch(row // @class_count) >= 0)
-          edge = edges[@match_edges.unsafe_fetch(row // @class_count)]
+          edge_index = @match_edges.unsafe_fetch(row // @class_count)
+          edge = edges[edge_index]
           if holds?(edge, haystack, at, search_start)
-            slots.copy_from(scratch.to_unsafe, slots.size)
-            write(edge, at, slots)
+            pending_edge = edge_index
             found = at
             undecided = false
           elsif @list_of_shadows.unsafe_fetch(row // @class_count)
@@ -181,9 +188,17 @@ module Mica::Regex
         while at < bound
           step = steps[row &+ class_of[bytes[at]]]
           break unless step >= 0 && step & (STEP_TAKES_EDGE | STEP_REACHES_MATCH) == 0
-          row = step >> 2
           reaches_match = false
           at &+= 1
+          if step >> 2 == row
+            # A state that loops on itself (a run of `[^,]`): the row stays
+            # fixed, so each byte's loads no longer wait for the one before.
+            while at < bound && steps[row &+ class_of[bytes[at]]] == step
+              at &+= 1
+            end
+          else
+            row = step >> 2
+          end
         end
         next if at >= bound
         cell = row &+ class_of[bytes[at]]
@@ -191,21 +206,42 @@ module Mica::Regex
         if step & STEP_TAKES_EDGE != 0
           edge = edges[table[cell]]
           break unless holds?(edge, haystack, at, search_start)
+          if pending_edge >= 0
+            record_match(edges[pending_edge], found, scratch, slots)
+            pending_edge = -1
+          end
           write(edge, at, scratch)
         end
         row = step >> 2
         reaches_match = step & STEP_REACHES_MATCH != 0
         at &+= 1
       end
+      record_match(edges[pending_edge], found, scratch, slots) if pending_edge >= 0
       meter.try(&.charge(at - charged + 1, charged))
       {undecided ? LazyDFA::GAVE_UP : found, at - start}
     end
 
+    # Writes the match that *edge* completes at *at* into *slots*: the
+    # scratch slots, then the edge's own.
+    @[AlwaysInline]
+    private def record_match(edge : Edge, at : Int32, scratch : Slice(Int64), slots : Slice(Int64)) : Nil
+      slots.size.times { |index| slots.unsafe_put(index, scratch.unsafe_fetch(index)) }
+      write(edge, at, slots)
+    end
+
+    # The line and text ends, the assertions a match path most often
+    # checks at every byte (`^.*$`), are tested here without a call.
+    @[AlwaysInline]
     private def holds?(edge : Edge, haystack : Bytes, at : Int32, search_start : Int32) : Bool
       looks = edge.looks
       while looks != 0
-        kind = looks.trailing_zeros_count
-        return false unless Look.holds?(Program::LookKind.new(kind.to_i32), haystack, at, search_start)
+        kind = Program::LookKind.new(looks.trailing_zeros_count.to_i32)
+        held = case kind
+               when .end_of_line? then at == haystack.size || haystack.unsafe_fetch(at) == Look::LINE_FEED
+               when .end_of_text? then at == haystack.size
+               else                    Look.holds?(kind, haystack, at, search_start)
+               end
+        return false unless held
         looks &= looks - 1
       end
       true

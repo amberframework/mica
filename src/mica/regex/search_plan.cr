@@ -59,6 +59,14 @@ module Mica::Regex
     @short_searches : Atomic(Int32)
     # Unanchored short searches that ran out of tries (see `ShortSearch`).
     @short_declines = Atomic(Int32).new(0)
+    # Candidate searches that ran out of tries (see `CandidateSearch`).
+    @candidate_declines = Atomic(Int32).new(0)
+    # Candidate searches that found their match (counted without a
+    # read-modify-write: a lost count only delays the verdict).
+    @candidate_matches = Atomic(Int32).new(0)
+    # Searches that skipped the candidate search (see
+    # `candidate_searches_pay?`).
+    @candidate_skips = Atomic(Int32).new(0)
     # The last haystack a short search found to be valid UTF-8.
     @short_validated = Atomic(String?).new(nil)
     # 1 once a caller read groups that a search had left to read later.
@@ -245,6 +253,32 @@ module Mica::Regex
 
     def note_short_decline : Nil
       @short_declines.add(1, :relaxed)
+    end
+
+    # True while this program's candidate searches usually find their
+    # match within `CandidateSearch::MAX_TRIES` tries: fewer than
+    # `CandidateSearch::MAX_DECLINES` declines, or at least
+    # `CandidateSearch::MATCHES_PER_DECLINE` matches for each.
+    #
+    # A program that fails this still tries one search in
+    # `CandidateSearch::RETRY_INTERVAL`, so matches found later (the text
+    # changed, or the declines came early) can bring it back.
+    def candidate_searches_pay? : Bool
+      declines = @candidate_declines.get(:relaxed)
+      return true if declines < CandidateSearch::MAX_DECLINES
+      return true if @candidate_matches.get(:relaxed) >= declines.to_i64 * CandidateSearch::MATCHES_PER_DECLINE
+      skipped = @candidate_skips.get(:relaxed) &+ 1
+      @candidate_skips.set(skipped, :relaxed)
+      skipped % CandidateSearch::RETRY_INTERVAL == 0
+    end
+
+    def note_candidate_match : Nil
+      matches = @candidate_matches.get(:relaxed)
+      @candidate_matches.set(matches &+ 1, :relaxed) if matches < Int32::MAX
+    end
+
+    def note_candidate_decline : Nil
+      @candidate_declines.add(1, :relaxed)
     end
 
     # True when *haystack* is the very `String` a short search validated
