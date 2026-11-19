@@ -381,7 +381,10 @@ module Mica::Regex
           inner = run.entry
           return {-1, at} unless first_visit?((copy_first + inner).to_i64 * columns + (at - start))
         end
-        return {GAVE_UP, at} if (@visits_left -= 1) < 0
+        if (@visits_left -= 1) < 0
+          @gave_up = true
+          return {GAVE_UP, at}
+        end
         meter.charge(1, at)
       end
     end

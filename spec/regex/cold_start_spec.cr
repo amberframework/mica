@@ -124,4 +124,14 @@ describe "Mica::Regex cold start" do
     end
     checked.should be >= 2
   end
+
+  it_satisfies "REGEX-R3-first-search", "hands a first search that reaches its visit limit inside a run to the plan" do
+    # Runs of 49 letters make every start walk up to 49 copies before a
+    # digit stops it, past the capped search's visits, so the first search
+    # gives up inside a run and the plan finds the match at the end.
+    haystack = ("ж" * 49 + "1") * 400 + "δ" * 50
+    found, _ = first_search_span("\\p{L}{50}", haystack)
+    found.should_not be_nil
+    found.should eq(plan_span("\\p{L}{50}", haystack))
+  end
 end
