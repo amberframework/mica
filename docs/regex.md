@@ -665,7 +665,11 @@ counter: 64 MiB by default, each cache at most 2 MiB. A cache reserves
 charge (`PikeVM.workspace_charge`, bounded by `max_pike_bytes`) before its
 buffer is allocated. When a reservation does not fit, idle members are
 evicted, least recently used first; an evicted lease drops its caches and
-reserves new ones when it is next used. When none is idle, a lazy DFA gives
+reserves new ones when it is next used. A lease's forward and reverse
+caches build their states in one shared scratch space, sized for the DFA
+with the most nodes; a reverse DFA widened to read classes backward gets a
+larger one, and each cache still reserves the scratch space as its own, so
+the pool's count stays an upper bound. When none is idle, a lazy DFA gives
 up and the search runs on the Pike VM; a Pike VM workspace the pool still
 cannot supply raises `SearchLimitError` naming `cache_pool_max_bytes`, so
 nothing is allocated past the cap and no wrong answer is returned. A call
