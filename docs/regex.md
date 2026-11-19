@@ -335,6 +335,15 @@ transitions from one table shared by every program and copy
 (`Program#list_of_shared_tables`, targets relative to the reading state),
 so a copy of `\w` adds 354 states and no transitions. The preflight
 counts its exact states.
+A counted large class whose copies stand for at least 1,024 states
+(`\p{L}{256}`: 256 copies of 300 states) is not even copied: the
+program holds the copies as one `Program::ClassRun` (the first state,
+the count and the class's memoized block) and numbers its states as the
+copies would be numbered, so compiling `\p{L}{256}` takes about as long as
+`\p{L}`. A first search reads the run's states through
+`Program#state_at`, which works each one out from the block, and the
+plan builds `list_of_states` (the program the copies written out compile
+to, state for state) when it is first built.
 A class of one escape or property lowers to a set shared by the process,
 and so does every written class of up to 32 items (`[0-9a-f]`, kept for
 up to 512 classes, the table emptied and refilled when full), each ASCII
