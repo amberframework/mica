@@ -61,7 +61,9 @@ it. Everything below is accepted:
   scripts, `sc:`/`scx:`, Bidi classes, Boolean properties, `Any`, `Xan`,
   `Xps`, `Xsp`, `Xwd`, `Xuc`).
 - **Anchors and assertions:** `^ $ \A \z \Z \b \B \G`, `[[:<:]]` and
-  `[[:>:]]`.
+  `[[:>:]]`. As in PCRE2, which reads them as `\b(?=\w)` and
+  `\b(?<=\w)`, each is two items: a quantifier after one repeats the
+  lookaround alone, and the `\b` stays (`a[[:<:]]*` does not match `ab`).
 - **Other atoms:** `.`, `\N`, `\R`.
 - **Quantifiers:** `* + ? {n} {n,} {n,m} {,m}` (spaces allowed inside the
   braces), each with a lazy `?` suffix; counts up to 65535.

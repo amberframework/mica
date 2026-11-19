@@ -19,7 +19,7 @@ module Mica::Regex
       if word_boundary_class?
         kind = @bytes[@pos + 2] == '<'.ord ? Ast::AssertionKind::WordStart : Ast::AssertionKind::WordEnd
         @pos += 6
-        add_assertion(start, kind, @options.ascii_backslash_w?)
+        add_posix_word_assertion(start, kind)
         @quantifiable = true
         return
       end
@@ -220,6 +220,36 @@ module Mica::Regex
       ascii_set = Ast::AsciiSet.new(index)
       ascii_set = Ast::AsciiSet::Alpha if @options.ignore_case? && (ascii_set.lower? || ascii_set.upper?)
       Ast::ClassItem.ascii(ascii_set, negated)
+    end
+
+    # Appends `[[:<:]]` (*kind* `WordStart`) or `[[:>:]]` (`WordEnd`) as
+    # PCRE2 lowers it: `\b(?=\w)` or `\b(?<=\w)`, two items, so a
+    # quantifier repeats the lookaround alone and the `\b` stays. The
+    # lookaround's `\w` is PCRE2's UCP word set (`\p{Xwd}`) even under
+    # `(?aW)`, which makes only the `\b` ASCII.
+    #
+    # Once `\b` holds, the lookaround holds exactly where the Unicode word
+    # assertion *kind* does. Under `(?aW)` the `\b` is the ASCII one, and
+    # there "a Unicode word character follows" (or precedes) holds exactly
+    # where *kind* or the Unicode `\B` does: with the ASCII `\b`, the
+    # characters on both sides cannot both be Unicode non-word characters,
+    # so the Unicode `\B` means both are word characters.
+    private def add_posix_word_assertion(start : Int32, kind : Ast::AssertionKind) : Nil
+      ascii = @options.ascii_backslash_w?
+      add_assertion(start, Ast::AssertionKind::WordBoundary, ascii)
+      unless ascii
+        add_assertion(start, kind)
+        return
+      end
+      charge_node(instance_sizeof(Ast::Assertion), start)
+      word_side = Ast::Assertion.new(start, kind)
+      charge_node(instance_sizeof(Ast::Assertion), start)
+      word_both_sides = Ast::Assertion.new(start, Ast::AssertionKind::NotWordBoundary)
+      charge_node(instance_sizeof(Ast::Alternation), start)
+      @ledger.charge_array(2, sizeof(Ast::Node), "an alternation", start)
+      either = Ast::Alternation.new(start, [word_side, word_both_sides] of Ast::Node)
+      charge_node(instance_sizeof(Ast::Group), start)
+      append(Ast::Group.new(start, 0, nil, either))
     end
 
     # `[[:<:]]` or `[[:>:]]` (@pos is after the first `[`).

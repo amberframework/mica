@@ -239,7 +239,10 @@ describe Mica::Regex::Syntax do
       hir_of("(?:ab)+").should eq("(cat a b){1,}")
       hir_of("a|b|").should eq("(alt a b (empty))")
       hir_of("\\bx\\B").should eq("(cat (look word_boundary) x (look not_word_boundary))")
-      hir_of("[[:<:]]").should eq("(look word_start)")
+      # PCRE2's \b(?=\w) and \b(?<=\w): two items, so a quantifier
+      # repeats only the second.
+      hir_of("[[:<:]]").should eq("(cat (look word_boundary) (look word_start))")
+      hir_of("[[:>:]]*").should eq("(cat (look word_boundary) (look word_end){0,})")
     end
   end
 
