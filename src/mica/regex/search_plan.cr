@@ -10,7 +10,10 @@ module Mica::Regex
   #    no assertion (`LiteralSet#exact?`): the prefilter finds the match.
   # 2. **Lazy DFA**, forward for the end and reverse for the start, with
   #    the prefilter skipping ahead while the forward DFA is in its start
-  #    state, for every program without `\G`.
+  #    state, for every program without `\G`. A program whose matches are
+  #    short (`short_match`) finds the start with the forward DFA run
+  #    anchored from each start instead, and is searched that way while
+  #    the forward cache thrashes.
   # 3. **Pike VM** (span layout) when neither applies, under
   #    `CompileOptions::FirstLine` or `EndAnchored`, and whenever a lazy DFA
   #    gives up (cache thrash, a full `CachePool`, a Unicode word assertion
@@ -42,6 +45,8 @@ module Mica::Regex
     # Set (after @one_pass) once the one-pass build ran, as its result may
     # be nil.
     @one_pass_built = Atomic(Int32).new(0)
+    @short_match = Atomic(ShortMatch?).new(nil)
+    @short_match_built = Atomic(Int32).new(0)
     @mutex = Mutex.new
     @list_of_idle_leases = [] of SearchLease
     # The most recently returned lease, taken without the mutex.
@@ -108,6 +113,19 @@ module Mica::Regex
         end
       end
       @one_pass.get
+    end
+
+    # The analysis of short matches (made on first use), or nil when a
+    # match can be long (see `ShortMatch`).
+    def short_match : ShortMatch?
+      return @short_match.get if @short_match_built.get == 1
+      @mutex.synchronize do
+        if @short_match_built.get == 0
+          @short_match.set(ShortMatch.analyze(@program))
+          @short_match_built.set(1)
+        end
+      end
+      @short_match.get
     end
 
     # Takes an idle lease (its caches warm from earlier searches) or makes

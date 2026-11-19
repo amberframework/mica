@@ -17,7 +17,28 @@ module Mica::Regex
     getter list_of_marks : Array(UInt8)
     # How many times the cache has been cleared.
     getter clears = 0
+    # True once a clear found the searches building a state for fewer than
+    # `LazyDFA::MINIMUM_BYTES_PER_STATE` bytes read: the unanchored DFA
+    # thrashes on this program, so a searcher prefers
+    # `LazyDFA#find_from_each_start` where the program allows it, trying
+    # the unanchored DFA again now and then (`retry?`).
+    getter? thrashing = false
+    # States built and bytes read since the cache was made (see
+    # `judge_retry`).
+    getter states_built = 0_i64
+    getter bytes_read = 0_i64
+    @searches_since_thrash = 0
+    @retry_interval = FIRST_RETRY_INTERVAL
     getter dfa : LazyDFA
+
+    # Searches between retries of the unanchored DFA once it thrashes; the
+    # interval doubles, up to `LAST_RETRY_INTERVAL`, each time a retry
+    # thrashes again.
+    FIRST_RETRY_INTERVAL = 256
+    LAST_RETRY_INTERVAL  = 1 << 20
+    # The fewest states a retry builds before its rate can count as
+    # thrashing.
+    RETRY_STATES = 32
     @list_of_keys : Array(Array(Int32))
     @state_ids : Hash(Array(Int32), Int32)
     @start_states : Array(Int32)
@@ -72,11 +93,39 @@ module Mica::Regex
     @[AlwaysInline]
     def note_bytes(count : Int32) : Nil
       @bytes_since_clear += count
+      @bytes_read += count
+    end
+
+    # Counts a search made from each start because the cache thrashes, and
+    # returns true (forgetting the thrashing) once the retry interval has
+    # passed, so that search tries the unanchored DFA again; the caller
+    # then reports how it went to `judge_retry`.
+    def retry? : Bool
+      @searches_since_thrash += 1
+      return false if @searches_since_thrash < @retry_interval
+      @thrashing = false
+      @searches_since_thrash = 0
+      true
+    end
+
+    # Judges a retry of the unanchored DFA that started when `states_built`
+    # was *states_before* and `bytes_read` was *bytes_before*: when it
+    # built at least `RETRY_STATES` states at fewer than
+    # `LazyDFA::MINIMUM_BYTES_PER_STATE` bytes each, the cache thrashes
+    # again and the next retry waits twice as long.
+    def judge_retry(states_before : Int64, bytes_before : Int64) : Nil
+      built = @states_built - states_before
+      return if built < RETRY_STATES
+      return if @bytes_read - bytes_before >= LazyDFA::MINIMUM_BYTES_PER_STATE.to_i64 * built
+      @thrashing = true
+      @retry_interval = Math.min(@retry_interval * 2, LAST_RETRY_INTERVAL)
     end
 
     # Drops every state and gives the memory back to the pool (its lease
     # is being evicted, see `SearchLease`).
     def evict : Nil
+      @thrashing = false
+      @retry_interval = FIRST_RETRY_INTERVAL
       @transition_table = [] of Int32
       @list_of_marks = [] of UInt8
       @list_of_keys = [] of Array(Int32)
@@ -148,6 +197,7 @@ module Mica::Regex
       @list_of_marks << mark
       @bytes_used += cost
       @states_since_clear += 1
+      @states_built += 1
       id
     end
 
@@ -160,8 +210,9 @@ module Mica::Regex
     private def clear(meter : SearchMeter) : Bool
       meter.charge(@list_of_keys.size, 0)
       @clears += 1
-      thrashing = @clears > LazyDFA::MAX_CLEARS &&
-                  @bytes_since_clear < LazyDFA::MINIMUM_BYTES_PER_STATE.to_i64 * @states_since_clear
+      sparse = @bytes_since_clear < LazyDFA::MINIMUM_BYTES_PER_STATE.to_i64 * @states_since_clear
+      @thrashing = true if sparse
+      thrashing = @clears > LazyDFA::MAX_CLEARS && sparse
       @transition_table.clear
       @list_of_marks.clear
       @list_of_keys.clear

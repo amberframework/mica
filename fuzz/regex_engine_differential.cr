@@ -8,6 +8,9 @@
 #   lazy DFAs with the prefilter, then the one-pass DFA, the backtracker
 #   or a Pike VM over the span), accelerators on;
 # - the same with the literal accelerators off (`Engine::NoAccelerators`);
+# - the same with every unanchored search of a program whose matches are
+#   short made from each start (`Engine::EachStart`), the path the default
+#   one takes once its forward cache thrashes;
 # - R2's two-phase search (Pike VM span, then the backtracker or a Pike
 #   VM over the span);
 # - one Pike VM pass with every slot;
@@ -127,6 +130,23 @@ module EngineDifferential
     iterated = scan(program, haystack, Mica::Regex::Engine::Auto)
     iterated_two_phase = scan(program, haystack, Mica::Regex::Engine::TwoPhase)
     return "scan #{iterated} vs two-phase scan #{iterated_two_phase}" unless iterated == iterated_two_phase
+    check_each_start(program, haystack, two_phase, iterated_two_phase)
+  end
+
+  # Returns how the path from each start (`Engine::EachStart`) disagrees
+  # with the two-phase results *two_phase* and *iterated_two_phase*, or nil.
+  private def self.check_each_start(program : Mica::Regex::Program, haystack : String, two_phase : Array(Int64)?,
+                                    iterated_two_phase : Array(Array(Int64))) : String?
+    each_start = find(program, haystack, Mica::Regex::Engine::EachStart, true)
+    return "from each start #{each_start} vs two-phase #{two_phase}" unless each_start == two_phase
+    each_start_span = find(program, haystack, Mica::Regex::Engine::EachStart, false)
+    unless each_start_span == two_phase.try(&.first(2))
+      return "span-only from each start #{each_start_span} vs two-phase #{two_phase}"
+    end
+    each_start_matches = matches?(program, haystack, Mica::Regex::Engine::EachStart)
+    return "matches? from each start #{each_start_matches} vs #{two_phase}" unless each_start_matches == !two_phase.nil?
+    iterated = scan(program, haystack, Mica::Regex::Engine::EachStart)
+    return "scan from each start #{iterated} vs two-phase scan #{iterated_two_phase}" unless iterated == iterated_two_phase
     nil
   end
 

@@ -41,3 +41,4 @@ REGEX-R3-selection	docs/regex.md Engine selection	Each search takes the fastest 
 REGEX-R3-complexity	docs/regex.md Search complexity	The accelerator, cache-thrash and iteration families stay within their envelopes and grow linearly
 REGEX-R3-conformance	docs/regex.md Conformance	The RE2, Rust and PCRE2 (valid UTF-8) corpora give identical results on every engine path
 REGEX-R3-differential	docs/regex.md Engine differential	Every engine path, accelerators on and off, agrees on generated patterns over every short string
+REGEX-R3-short-match	docs/regex.md Short matches	A program whose matches span at most 256 bytes finds its match start with the anchored forward DFA instead of the reverse DFA, and once its forward cache thrashes it is searched from each start (skipping starts too far before the next final byte); both agree with every other engine and stay linear
