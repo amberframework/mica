@@ -21,6 +21,7 @@ module Mica::Regex
       end
       ledger.charge_object(instance_sizeof(Hir::Pattern), "a Hir pattern", pattern.root.offset)
       root = list_of_results.pop? || empty_node(ledger, pattern.root.offset)
+      root = factor_root(root, ledger, pattern.root.offset) if root.is_a?(Hir::Alternation)
       Hir::Pattern.new(root, pattern.capture_count, pattern.list_of_group_names, pattern.options, dialect,
         pattern.source_end)
     end
@@ -62,9 +63,7 @@ module Mica::Regex
         Hir::Concatenation.new(children_from(list_of_results, first_child, ledger, offset))
       when Ast::Alternation
         ledger.charge_object(instance_sizeof(Hir::Alternation), "a Hir alternation", offset)
-        list_of_branches = factor_first_literals(children_from(list_of_results, first_child, ledger, offset), ledger,
-          offset)
-        list_of_branches.size == 1 ? list_of_branches[0] : Hir::Alternation.new(list_of_branches)
+        Hir::Alternation.new(children_from(list_of_results, first_child, ledger, offset))
       when Ast::Group
         child = child_count > 0 ? list_of_results[first_child] : empty_node(ledger, offset)
         return child unless node.capturing?
@@ -94,6 +93,19 @@ module Mica::Regex
       list_of_children = Array(Hir::Node).new(count)
       (first...list_of_results.size).each { |index| list_of_children << list_of_results[index] }
       list_of_children
+    end
+
+    # The pattern's top-level alternation with its shared first literals
+    # factored (see `factor_first_literals`). Only the top level: a
+    # factored alternation inside a larger pattern can make it one-pass
+    # where building the one-pass DFA costs more than its first searches
+    # save.
+    private def self.factor_root(root : Hir::Alternation, ledger : AllocationLedger, offset : Int32) : Hir::Node
+      list_of_branches = factor_first_literals(root.list_of_branches, ledger, offset)
+      return root if list_of_branches.same?(root.list_of_branches)
+      return list_of_branches[0] if list_of_branches.size == 1
+      ledger.charge_object(instance_sizeof(Hir::Alternation), "a Hir alternation", offset)
+      Hir::Alternation.new(list_of_branches)
     end
 
     # Factors the first literal out of each run of adjacent branches that

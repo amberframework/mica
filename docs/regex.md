@@ -219,12 +219,14 @@ it once; each merge step is charged with the heap's depth.
 `LineBreak` (`\R`, kept as its own node because PCRE2 matches it atomically:
 `\r\n` is never split by backtracking), `Repetition` with explicit counts,
 `Capture`, `Concatenation`, `Alternation` and `Empty`. Non-capturing groups
-and option settings are gone. Adjacent branches that start with the same
-literal share it: `,|,\s` becomes `,(?:|\s)` and `sam|samwise`
+and option settings are gone. Adjacent branches of the pattern's top-level
+alternation that start with the same literal share it: `,|,\s` becomes `,(?:|\s)` and `sam|samwise`
 `sam(?:|wise)`. Leftmost-first matching tries the same paths in the same
 order either way, so every match and group is unchanged, and the one-pass
 DFA can read the factored form, where the shared first byte made the
-branches ambiguous.
+branches ambiguous. An alternation inside a larger pattern is left as
+written: made one-pass there, its one-pass DFA can cost more to build
+than the first searches it would serve.
 
 ## Native API
 
