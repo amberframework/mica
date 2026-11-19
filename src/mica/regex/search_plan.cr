@@ -273,6 +273,12 @@ module Mica::Regex
       one_pass
     end
 
+    # True once a search has built the one-pass DFA (see `one_pass`),
+    # whether or not the program is one-pass.
+    def one_pass_built? : Bool
+      @one_pass_built.get == 1
+    end
+
     # The one-pass DFA when a search has built it already (see `one_pass`),
     # or nil.
     def built_one_pass : OnePassDFA?

@@ -278,7 +278,7 @@ module Mica::Regex
             chunk_end = at + meter.readable(wanted_end - at, at)
           end
           at &+= 1
-          if entry == current && entry & (SPECIAL | START_ENTRY) == 0 && !words
+          if entry == current && entry & SPECIAL == 0 && !words && (scan.nil? || entry & START_ENTRY == 0)
             # A state that loops to itself (`.*`, `[^"]*`): its row stays,
             # so the loads of the run no longer wait on each other.
             row = entry & ROW_MASK

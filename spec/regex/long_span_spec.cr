@@ -13,7 +13,8 @@ private LIMITS  = Mica::Regex::SearchLimits::TRUSTED_INPUT
 private def slots_of(program : Mica::Regex::Program, haystack : String, engine : Mica::Regex::Engine,
                      captures : Bool = true) : Array(Int64)?
   searcher = Mica::Regex::Searcher.new(program, haystack, LIMITS, nil, engine)
-  found = searcher.find(0, Mica::Regex::MatchOptions::None, captures).try(&.to_a)
+  slots = searcher.find(0, Mica::Regex::MatchOptions::None, captures)
+  found = slots && (captures ? slots.to_a : slots.to_a.first(2))
   searcher.finish
   found
 end
@@ -74,6 +75,27 @@ describe "Mica::Regex long spans" do
         haystack = unit * (64 * program.state_count // unit.bytesize + 2 + shape * 37)
         haystack += "\n" if shape == 3
         agree(source, haystack)
+      end
+    end
+  end
+
+  it_satisfies "REGEX-R3-dfa", "runs self-looping states, the start state included, as the Pike VM steps them" do
+    agree("([A-Z]awyer|[A-Z]inn)[0-9\\s]", "awyerinn" * 10_000 + "Sawyer\n").should eq([80_000_i64, 80_007_i64, 80_000_i64, 80_006_i64])
+    agree("\"([^\"]*)\"", "x" * 3000 + "\"" + "é" * 2000 + "\"").should eq([3000_i64, 7002_i64, 3001_i64, 7001_i64])
+    agree("a[^\\n]*z", "b" * 3000 + "a" + "q" * 3000 + "\nz").should be_nil
+    seed = 20261120_u64
+    alphabet = ["a", "b", "é", "\n", "z"]
+    400.times do |index|
+      random = Random::PCG32.new(seed, index.to_u64)
+      source = EngineDifferential.pattern(random)
+      begin
+        Mica::Regex::Expression.new(source, compile_limits: TRUSTED)
+      rescue Mica::Regex::SyntaxError | Mica::Regex::CompileLimitError
+        next
+      end
+      2.times do
+        unit = String.build { |io| (1 + random.rand(4)).times { io << alphabet.sample(random) } }
+        agree(source, unit * (500 + random.rand(500)) + alphabet.sample(random))
       end
     end
   end

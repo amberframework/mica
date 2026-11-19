@@ -401,21 +401,32 @@ module Mica::Regex
     # anchored, the pattern is one-pass and groups are wanted (without
     # groups the forward lazy DFA alone is cheaper per byte than the
     # one-pass DFA). An anchored search uses the one-pass DFA once an
-    # earlier capture pass has built it, or builds it when its *remaining*
-    # bytes are at least `ONE_PASS_BYTES_PER_STATE` per program state (the
-    # build, O(m) per DFA state, then costs less than the two passes it
-    # replaces), so a short search that never matches never builds it.
+    # earlier capture pass has built it; before that, one whose *remaining*
+    # bytes pass its probe (`one_pass_probe_bytes`) reads them on the
+    # forward DFA first (see `find_anchored`), so a search that never
+    # matches, or ends early, never builds it.
     private def start_search?(anchored : Bool, end_anchored : Bool, want_captures : Bool, remaining : Int32) : Bool
       return false unless @engine.auto? && !@start_search_off && !end_anchored && !@dfa_gave_up
       plan = @plan || return false
       return false if @program.options.first_line? || plan.literal_search? || !plan.forward
       return !!plan.prefilter unless anchored
       return false unless want_captures
-      !plan.built_one_pass.nil? || remaining.to_i64 >= ONE_PASS_BYTES_PER_STATE * @program.state_count
+      return !plan.built_one_pass.nil? if plan.one_pass_built?
+      remaining.to_i64 > one_pass_probe_bytes
     end
 
-    # See `start_search?`.
-    ONE_PASS_BYTES_PER_STATE = 64_i64
+    # The most bytes an anchored search with groups reads on the forward
+    # DFA before it builds the one-pass DFA (see `find_anchored`): at
+    # least `ONE_PASS_BYTES_PER_STATE` per program state, so the build
+    # (O(m) per DFA state, at most m of them) costs no more than the
+    # probe's reading did.
+    private def one_pass_probe_bytes : Int64
+      Math.max(ONE_PASS_PROBE_BYTES, ONE_PASS_BYTES_PER_STATE * @program.state_count)
+    end
+
+    # See `one_pass_probe_bytes`.
+    ONE_PASS_PROBE_BYTES     = 4_096_i64
+    ONE_PASS_BYTES_PER_STATE =    64_i64
 
     # Searches anchored at each position where a match must start (see
     # `start_search?`): on the one-pass DFA, which gives the span and the
@@ -439,14 +450,8 @@ module Mica::Regex
     # most n plus one per try, and the call stays linear.
     private def find_at_starts(bytes : Bytes, byte_index : Int32, anchored : Bool) : Bool?
       plan = @plan || return nil
+      return find_anchored(plan, bytes, byte_index) if anchored
       one_pass = plan.one_pass
-      if anchored
-        return nil unless one_pass
-        # A decisive one-pass DFA never gives up once it has read to the
-        # end, so the only try reads as far as the match needs: one pass
-        # in place of the span search and then the capture pass.
-        return try_start(one_pass, nil, nil, bytes, byte_index, byte_index, !one_pass.decisive?)
-      end
       forward = nil
       cache = nil
       unless one_pass
@@ -464,6 +469,34 @@ module Mica::Regex
         return nil if @start_search_off || scan.ineffective?
         at = candidate + 1
       end
+    end
+
+    # The anchored search with groups (see `start_search?`), on the
+    # one-pass DFA once it is built. Before that, the forward DFA reads up
+    # to `one_pass_probe_bytes`: a search it decides there takes its span
+    # (path `LazyDFA`; the capture pass follows), and one still undecided,
+    # a long match such as `(?s)^(.*)$` over a large haystack, builds the
+    # one-pass DFA and reads the match once on it. A decisive one-pass DFA
+    # never gives up once it has read to the end, so that try reads as far
+    # as the match needs: one pass in place of the span search and then the
+    # capture pass. The probe's bytes are read at most twice.
+    private def find_anchored(plan : SearchPlan, bytes : Bytes, byte_index : Int32) : Bool?
+      unless plan.one_pass_built?
+        forward = plan.forward || return nil
+        lease = @lease || return nil
+        cache = lease.forward_cache(forward) || return nil
+        stop = Math.min(byte_index.to_i64 + one_pass_probe_bytes, Int32::MAX.to_i64).to_i32
+        finish = forward.find_end(cache, bytes, byte_index, true, false, nil, @meter, stop)
+        unless finish == LazyDFA::GAVE_UP
+          return false if finish < 0
+          @span_slots[0] = byte_index.to_i64
+          @span_slots[1] = finish.to_i64
+          @last_path = Path::LazyDFA
+          return true
+        end
+      end
+      one_pass = plan.one_pass || return nil
+      try_start(one_pass, nil, nil, bytes, byte_index, byte_index, !one_pass.decisive?)
     end
 
     # The most bytes one try at a start reads before it gives up: a try
