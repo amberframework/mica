@@ -156,6 +156,7 @@ module Mica::Regex
     getter pool : CachePool
     @forward_cache : DFACache?
     @reverse_cache : DFACache?
+    @builder : DFABuilder?
     # The last haystack validated, held strongly: while it is held its
     # address cannot be reused by another string, so identity proves it is
     # the same (immutable) string. A searcher parked in the lease holds its
@@ -212,12 +213,19 @@ module Mica::Regex
     # The forward cache, made on first use; nil when the pool cannot supply
     # a new cache (the search then runs on the Pike VM).
     def forward_cache(dfa : LazyDFA) : DFACache?
-      @forward_cache ||= DFACache.reserve?(dfa, @pool)
+      @forward_cache ||= DFACache.reserve?(dfa, @pool, builder(dfa))
     end
 
     # The reverse cache, as `forward_cache`.
     def reverse_cache(dfa : LazyDFA) : DFACache?
-      @reverse_cache ||= DFACache.reserve?(dfa, @pool)
+      @reverse_cache ||= DFACache.reserve?(dfa, @pool, builder(dfa))
+    end
+
+    # The scratch space both caches build their states in: the forward and
+    # the reverse DFA have one node per program state, and a search builds
+    # in one cache at a time.
+    private def builder(dfa : LazyDFA) : DFABuilder
+      @builder ||= DFABuilder.new(dfa.program.state_count)
     end
 
     # True when *haystack* is the very `String` this lease validated last:
@@ -230,7 +238,7 @@ module Mica::Regex
       @validated = haystack
     end
 
-    # Drops the caches (with their builders' scratch space) and the kept
+    # Drops the caches (with their shared builder's scratch space) and the kept
     # Pike VM workspace, giving their bytes back to the pool. Runs only
     # while the lease is idle and EVICTING; a cache is reserved afresh when
     # the lease is next used.
@@ -239,6 +247,7 @@ module Mica::Regex
       @forward_cache = nil
       @reverse_cache.try(&.evict)
       @reverse_cache = nil
+      @builder = nil
       @pike.try(&.release)
     end
   end
