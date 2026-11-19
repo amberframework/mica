@@ -85,10 +85,11 @@ module Mica::Regex
     @list_of_shared_tables = [] of Array(Program::Transition)
     # The copies of large classes the program reads in place
     # (`Program::ClassCopy`), numbered from `COPY_BASE` while compiling.
-    @list_of_class_copies = [] of Program::ClassCopy
+    # (Made on the first copy, so a program without any allocates none.)
+    @list_of_class_copies : Array(Program::ClassCopy)? = nil
     @copied_state_count = 0
     # The memoized classes a counted repetition repeats (see `in_place?`).
-    @list_of_in_place_sets = [] of CodePointSet
+    @list_of_in_place_sets : Array(CodePointSet)? = nil
     # The states the held list may take before it grows to the bound.
     @held_capacity : Int32
     # The preflight's bound on states, where the held list grows to.
@@ -106,7 +107,7 @@ module Mica::Regex
     private def initialize(@pattern : Hir::Pattern, @estimate : Int64, @limits : CompileLimits,
                            @ledger : AllocationLedger, @meter : Core::WorkMeter)
       @state_bound = @estimate.clamp(1_i64, @limits.max_program_states).to_i32
-      @held_capacity = repeats_a_large_class? ? Math.min(@state_bound, FIRST_HELD_STATES) : @state_bound
+      @held_capacity = @state_bound > FIRST_HELD_STATES && repeats_a_large_class? ? FIRST_HELD_STATES : @state_bound
       @ledger.charge_object(instance_sizeof(Compiler), "the compiler", 0)
       @ledger.charge_array(@held_capacity, sizeof(Program::State), "the program states", 0)
       # The states at the preflight's bound: the held list grown to it, or
@@ -235,7 +236,7 @@ module Mica::Regex
       @ledger.charge_object(instance_sizeof(Program), "the program", 0)
       Program.new(@list_of_states, @list_of_transitions, start, @pattern.capture_count, group_names,
         @pattern.options, @limits.max_pike_bytes - workspace_charge, @pattern.source_end, literal_set,
-        @list_of_class_blocks, @list_of_shared_tables, @list_of_class_copies)
+        @list_of_class_blocks, @list_of_shared_tables, @list_of_class_copies || Program::NO_CLASS_COPIES)
     end
 
     # Numbers the class copies after the held states: every reference to a
@@ -243,7 +244,7 @@ module Mica::Regex
     # other copies' exits) moves from `COPY_BASE` to the held count.
     # Returns *start*, moved the same way.
     private def relocate_copies(start : Int32) : Int32
-      return start if @list_of_class_copies.empty?
+      copies = @list_of_class_copies || return start
       shift = @list_of_states.size - COPY_BASE
       states = @list_of_states.to_unsafe
       @list_of_states.size.times do |index|
@@ -258,7 +259,7 @@ module Mica::Regex
         transition = transitions[index]
         transitions[index] = transition.copy_with(target: transition.target + shift) if transition.target >= COPY_BASE
       end
-      @list_of_class_copies.map! do |copy|
+      copies.map! do |copy|
         copy.copy_with(first_state: copy.first_state + shift, exit: copied(copy.exit, shift))
       end
       @list_of_class_blocks.map! do |block|
@@ -584,13 +585,13 @@ module Mica::Regex
     # `Program::ClassBlock` when they are more than one.
     private def compile_recorded_class(set : CodePointSet, next_state : Int32) : Int32
       first_state = @list_of_states.size
-      copies = @list_of_class_copies.size
+      copies = @copied_state_count
       entry = compile_class(set, next_state)
       end_state = @list_of_states.size
-      if @list_of_class_copies.size > copies
-        copy = @list_of_class_copies.last
-        first_state = copy.first_state
-        end_state = first_state + copy.list_of_template_states.size
+      if @copied_state_count > copies
+        # The class was copied in place: its states are the last copy's.
+        first_state = COPY_BASE + copies
+        end_state = COPY_BASE + @copied_state_count
       end
       if end_state - first_state > 1
         @ledger.charge_append(sizeof(Program::ClassBlock), "a class block", 0)
@@ -711,7 +712,8 @@ module Mica::Regex
       @meter.enforce { Core::Position.new(0_i64) } if @meter.charge(block_states.size)
       first_state = COPY_BASE + @copied_state_count
       @ledger.charge_append(sizeof(Program::ClassCopy), "a class copy", 0)
-      @list_of_class_copies << Program::ClassCopy.new(first_state, block_states, table_id, next_state)
+      list_of_copies = @list_of_class_copies ||= [] of Program::ClassCopy
+      list_of_copies << Program::ClassCopy.new(first_state, block_states, table_id, next_state)
       @copied_state_count += block_states.size
       block.entry + first_state
     end
@@ -785,12 +787,14 @@ module Mica::Regex
             end
       return unless set && ClassMemo.memoized?(set) && !in_place?(set)
       @ledger.charge_append(sizeof(CodePointSet), "a repeated class", 0)
-      @list_of_in_place_sets << set
+      list_of_sets = @list_of_in_place_sets ||= [] of CodePointSet
+      list_of_sets << set
     end
 
     # True when *set*'s copies are read in place (see `mark_in_place`).
     private def in_place?(set : CodePointSet) : Bool
-      @list_of_in_place_sets.any?(&.same?(set))
+      list_of_sets = @list_of_in_place_sets
+      !list_of_sets.nil? && list_of_sets.any?(&.same?(set))
     end
 
     # Marks a repeated small class to be copied rather than rebuilt. A

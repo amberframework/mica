@@ -124,7 +124,7 @@ module Mica::Regex
                    @literal_set : LiteralSet? = nil,
                    @list_of_class_blocks : Array(ClassBlock) = [] of ClassBlock,
                    @list_of_shared_tables : Array(Array(Transition)) = [] of Array(Transition),
-                   @list_of_class_copies : Array(ClassCopy) = [] of ClassCopy)
+                   @list_of_class_copies : Array(ClassCopy) = NO_CLASS_COPIES)
       @state_count = @list_of_held_states.size
       if last_copy = @list_of_class_copies.last?
         @state_count = last_copy.first_state + last_copy.list_of_template_states.size
@@ -135,7 +135,13 @@ module Mica::Regex
     # of a copy's state (see `state_at`) and published through the atomic,
     # so a thread that sees it sees it whole.
     @expanded_states = Atomic(Array(State)?).new(nil)
-    @expansion_mutex = Mutex.new
+    # One lock for every program's expansion (it runs once per program
+    # with copies, so a lock per program would cost each compile an
+    # allocation for nothing).
+    @@expansion_mutex = Mutex.new
+
+    # The class copies of a program that has none (shared, never changed).
+    NO_CLASS_COPIES = [] of ClassCopy
 
     # The number of states the program holds (`list_of_class_copies` adds
     # the rest).
@@ -159,7 +165,7 @@ module Mica::Regex
 
     # Writes the class copies out after the held states (see `state_at`).
     private def expand_states : Array(State)
-      @expansion_mutex.synchronize do
+      @@expansion_mutex.synchronize do
         if built = @expanded_states.get(:acquire)
           return built
         end
