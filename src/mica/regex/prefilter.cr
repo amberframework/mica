@@ -11,8 +11,8 @@ module Mica::Regex
   #   frequency rank) is found with `memchr` and the literal is checked
   #   around it. When even that byte is common in text (`COMMON_RANK`),
   #   the searcher looks for a pair instead, the two least common bytes
-  #   at their distance in the literal and a third, the least common of
-  #   the rest, eight positions per step; when the byte turns out dense
+  #   at their distance in the literal, and a third, the least common of
+  #   the rest, once the pair proves dense, eight positions per step; when the byte turns out dense
   #   in the haystack (`b{30}a` over a run of `b`), it switches to a pair
   #   (`list_of_dense_tests`);
   # - **packed pairs**: at most three distinct first bytes, one of them
@@ -57,6 +57,11 @@ module Mica::Regex
     # The pair tests the pair search runs (`PackedPairs`, or `RareByte`
     # with a pair), else empty.
     getter list_of_pair_tests : Array(PairTest)
+    # The same tests with a third byte where a test's pair is common
+    # (`PairTest::COMMON_PAIR_WEIGHT`), which a scan switches to once the
+    # pairs prove dense in its haystack (see `PrefilterScan#find_pairs`);
+    # empty when no test has a third byte.
+    getter list_of_narrow_tests : Array(PairTest)
     # For `RareByte` without a pair, the pair test a scan switches to when
     # the rare byte turns out dense in the haystack (see
     # `PrefilterScan#find_rare_byte`); empty when the literal has one
@@ -96,6 +101,7 @@ module Mica::Regex
       @mask_width = 0
       @masks = Slice(UInt64).empty
       @list_of_pair_tests = [] of PairTest
+      @list_of_narrow_tests = [] of PairTest
       @list_of_dense_tests = [] of PairTest
       first_bytes = @literals.map(&.[0]).uniq!
       if @literals.size == 1
@@ -114,10 +120,12 @@ module Mica::Regex
             @needle_offset = first
             @pair_gap = second - first
             @list_of_needles = [literal[first], literal[second]]
-            # Two common bytes (`t` and `h` of `the`) take a third, the
-            # least common of the rest.
-            third = (0...literal.size).reject { |index| index == first || index == second }.min_by? { |index| Prefilter.rank(literal[index]) } || first
-            @list_of_pair_tests = [PairTest.new(first, literal[first], 0_u8, second, literal[second], 0_u8, third, literal[third], 0_u8)]
+            @list_of_pair_tests = [pair]
+            # Two common bytes (`t` and `h` of `the`) may take a third,
+            # the least common of the rest.
+            if third = (0...literal.size).reject { |index| index == first || index == second }.min_by? { |index| Prefilter.rank(literal[index]) }
+              @list_of_narrow_tests = [PairTest.new(first, literal[first], 0_u8, second, literal[second], 0_u8, third, literal[third], 0_u8)]
+            end
           elsif literal[other] != rare
             @list_of_dense_tests = [pair]
           end
@@ -149,7 +157,8 @@ module Mica::Regex
     # `MAX_PAIR_TESTS`.
     private def use_pair_tests : Bool
       list_of_tests = PairTest.cover(@literals, MAX_PAIR_TESTS) || return false
-      @list_of_pair_tests = list_of_tests
+      @list_of_pair_tests = list_of_tests.map(&.without_third)
+      @list_of_narrow_tests = list_of_tests if list_of_tests.any?(&.reads_third?)
       true
     end
 
@@ -298,6 +307,20 @@ module Mica::Regex
       @reach = Math.max(@second_offset, @third_offset)
     end
 
+    # This test without its third byte.
+    def without_third : PairTest
+      copy = self
+      copy.drop_third
+      copy
+    end
+
+    protected def drop_third : Nil
+      @third_offset = @first_offset
+      @third_fold = @first_fold
+      @third_lanes = @first_lanes
+      @reach = @second_offset
+    end
+
     # True when the test reads a third byte.
     def reads_third? : Bool
       @third_offset != @first_offset
@@ -425,6 +448,10 @@ module Mica::Regex
   class PrefilterScan
     GUARD_CANDIDATES = 32
     MINIMUM_SKIP     =  8
+    # The pair search takes its narrow tests (`Prefilter#list_of_narrow_tests`)
+    # once `GUARD_CANDIDATES` candidates over a haystack came less than
+    # this many bytes apart on average.
+    NARROW_SKIP = 128
     # The bytes a scan reads between two charges to the meter.
     CHARGE_CHUNK = 4096
     # A byte in every lane of a word, and the high bit of every lane (the
@@ -449,6 +476,12 @@ module Mica::Regex
     # True once a rare-byte scan switched to its pair (see
     # `find_rare_byte`).
     @dense_switched = false
+    # The candidates verified and the bytes moved past over this haystack,
+    # across the calls that kept the scan's positions, and whether the pair
+    # search switched to its narrow tests (see `find_pairs`).
+    @haystack_candidates = 0
+    @haystack_skipped = 0_i64
+    @narrowed = false
 
     # With *verified_only* (the literal search), the scan never stops early:
     # every position it returns starts a literal.
@@ -468,6 +501,9 @@ module Mica::Regex
       @packed_from = 0
       return if keep_positions
       @dense_switched = false
+      @haystack_candidates = 0
+      @haystack_skipped = 0_i64
+      @narrowed = false
       @found_at = StaticArray(Int32, 3).new(-1)
       @scanned_from = StaticArray(Int32, 3).new(0)
     end
@@ -496,7 +532,11 @@ module Mica::Regex
     # class description).
     private def accept?(candidate : Int32, meter : SearchMeter, bits : UInt64 = UInt64::MAX) : Bool
       @candidates += 1
-      @skipped += candidate - @guard_from if candidate > @guard_from
+      @haystack_candidates += 1
+      if candidate > @guard_from
+        @skipped += candidate - @guard_from
+        @haystack_skipped += candidate - @guard_from
+      end
       @guard_from = candidate + 1
       @last_literal = @prefilter.literal_at(@haystack, candidate, meter, bits)
       return true if @last_literal >= 0
@@ -557,6 +597,11 @@ module Mica::Regex
     # word would read past the haystack, each position is tested byte by
     # byte. The meter is charged as in `find_packed`.
     private def find_pairs(from : Int32, meter : SearchMeter, list_of_tests : Array(PairTest)) : Int32
+      if list_of_tests.same?(@prefilter.list_of_pair_tests) && !@prefilter.list_of_narrow_tests.empty?
+        @narrowed ||= @haystack_candidates >= GUARD_CANDIDATES &&
+                      @haystack_skipped < @haystack_candidates.to_i64 * NARROW_SKIP
+        list_of_tests = @prefilter.list_of_narrow_tests if @narrowed
+      end
       if list_of_tests.any?(&.reads_third?)
         find_pairs_reading_three(from, meter, list_of_tests)
       else

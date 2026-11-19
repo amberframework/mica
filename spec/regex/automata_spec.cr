@@ -299,11 +299,14 @@ describe "Mica::Regex R3 engines" do
       {test.first_offset, test.second_offset}.should eq({1, 4})
       (test.first_fold & 0xFF).should eq(0x20)
       test.reads_third?.should be_false
-      # t and h are common together: (?i)the and the take e as a third byte.
+      twain.list_of_narrow_tests.should be_empty
+      # t and h are common together: (?i)the and the may take e as a third
+      # byte, once their pairs prove dense.
       ["(?i)the", "the"].each do |source|
         common = program(source).plan.prefilter.should_not be_nil
-        common.list_of_pair_tests.map(&.reads_third?).should eq([true])
-        common.list_of_pair_tests[0].third_offset.should eq(2)
+        common.list_of_pair_tests.map(&.reads_third?).should eq([false])
+        common.list_of_narrow_tests.map(&.reads_third?).should eq([true])
+        common.list_of_narrow_tests[0].third_offset.should eq(2)
       end
       # A Cyrillic word: one test over continuation bytes, the case bit
       # 0x20 there (Ш is D0 A8, ш is D1 88).
