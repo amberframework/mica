@@ -641,6 +641,7 @@ module Mica::Regex
     end
 
     private def compile_class_from_trie(set : CodePointSet, next_state : Int32) : Int32
+      return compile_ascii_class(set, next_state) if set.list_of_bounds[-1] < 0x80
       trie = @class_trie
       trie.build(set, @ledger, @meter)
       # A set of surrogates only (`\p{Cs}`) has no UTF-8 sequences: like an
@@ -656,6 +657,24 @@ module Mica::Regex
         states[node_index] = emit_trie_node(node_index, next_state)
       end
       states[0]
+    end
+
+    # Compiles a non-empty set of ASCII code points straight to the state
+    # its trie would give: every range is a one-byte sequence, so the trie
+    # is a root whose edges all end the class. One range is a `ByteRange`,
+    # several a `Sparse` state, in range order. Case-insensitive literals
+    # (`S` is `[Ss]`) take this path once per character.
+    private def compile_ascii_class(set : CodePointSet, next_state : Int32) : Int32
+      bounds = set.list_of_bounds
+      range_count = bounds.size // 2
+      @meter.enforce { Core::Position.new(0_i64) } if @meter.charge(range_count)
+      return emit_byte_range(bounds[0].to_u8, bounds[1].to_u8, next_state) if range_count == 1
+      first_transition = @list_of_transitions.size
+      range_count.times do |index|
+        @ledger.charge_append(sizeof(Program::Transition), "a class transition", 0)
+        @list_of_transitions << Program::Transition.new(bounds[index * 2].to_u8, bounds[index * 2 + 1].to_u8, next_state)
+      end
+      add_state(Program::State.new(Program::StateKind::Sparse, 0_u8, 0_u8, NONE, range_count, first_transition))
     end
 
     private def emit_trie_node(node_index : Int32, next_state : Int32) : Int32
