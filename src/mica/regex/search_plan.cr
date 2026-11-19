@@ -40,6 +40,10 @@ module Mica::Regex
     # the start state passes `\A` before it reads a byte): a search is
     # then anchored at its offset, and the reverse DFA is not needed.
     getter? anchored_start : Bool
+    # True when the program is anchored at its start and its one-pass DFA
+    # is small (`OnePassDFA.small?`): its first search builds the one-pass
+    # DFA and reads the groups with the match (see `defers_groups?`).
+    getter? reads_groups_on_first_search : Bool
     # The lazily built parts are published through atomics, so a search
     # on another thread that sees one sees it fully built.
     @reverse = Atomic(LazyDFA?).new(nil)
@@ -93,6 +97,7 @@ module Mica::Regex
       @prefilter = literal_set ? Prefilter.new(literal_set) : nil
       @literal_search = !!literal_set.try(&.exact?)
       @anchored_start = SearchPlan.anchored_start?(@program)
+      @reads_groups_on_first_search = @anchored_start && OnePassDFA.small?(@program, @byte_classes)
     end
 
     # The fewest bytes and the first bytes of a match (see `StartFilter`),
@@ -239,13 +244,14 @@ module Mica::Regex
     # match.
     #
     # Until a caller has read groups, this is also true while the one-pass
-    # DFA is not built, unless the program is anchored at its start: a
-    # program's first searches find their match without groups, so a
-    # caller that only asks whether and where it matched never pays for a
-    # capture pass or for building the one-pass DFA (the first capture
-    # pass, when a caller reads the groups, builds it). An anchored program
-    # makes one attempt, which the one-pass DFA reads with its groups in
-    # the same pass, so its first search builds the one-pass DFA. Once a
+    # DFA is not built: a program's first searches find their match
+    # without groups, so a caller that only asks whether and where it
+    # matched never pays for a capture pass or for building the one-pass
+    # DFA (the first capture pass, when a caller reads the groups, builds
+    # it). The exception is a program anchored at its start whose one-pass
+    # DFA is small (`reads_groups_on_first_search?`): it makes one attempt,
+    # the one-pass DFA reads that attempt with its groups in one pass, and
+    # building that DFA costs little, so its first search builds it. Once a
     # caller has read the groups of a match found without them
     # (`note_groups_read`), it is false for good: this program's callers
     # read groups, and reading them later costs more than reading them
@@ -253,7 +259,7 @@ module Mica::Regex
     def defers_groups? : Bool
       return false unless @program.slot_count > 2 && @groups_read.get(:relaxed) == 0
       return @one_pass.get.nil? if @one_pass_built.get == 1
-      !@anchored_start
+      !@reads_groups_on_first_search
     end
 
     # True while unanchored short searches of this program usually find

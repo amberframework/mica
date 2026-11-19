@@ -44,6 +44,19 @@ module Mica::Regex
       OnePassBuilder.new(program, byte_classes).build
     end
 
+    # The most cells the one-pass table of *program* can have: one row of
+    # *byte_classes* per NFA state, the most DFA states it can have.
+    def self.most_cells(program : Program, byte_classes : ByteClasses) : Int64
+      program.state_count.to_i64 * byte_classes.class_count
+    end
+
+    # True when the one-pass table of *program* has at most
+    # `OnePassBuilder::PRESIZED_TABLE_CELLS` cells, so building it, or
+    # finding the program is not one-pass, costs little.
+    def self.small?(program : Program, byte_classes : ByteClasses) : Bool
+      most_cells(program, byte_classes) <= OnePassBuilder::PRESIZED_TABLE_CELLS
+    end
+
     # For `search`: per table cell, the target state's row offset (state
     # times class count) shifted left by two, with `STEP_TAKES_EDGE` when
     # the edge has assertions or slots and `STEP_REACHES_MATCH` when the
@@ -368,8 +381,9 @@ module Mica::Regex
     def initialize(@program : Program, @byte_classes : ByteClasses)
       @dfa_state_of = Array(Int32).new(@program.state_count, -1)
       @seen = Array(Int32).new(@program.state_count, -1)
-      most_cells = @program.state_count.to_i64 * @byte_classes.class_count
-      @table = Array(Int32).new(most_cells.to_i32) if most_cells <= PRESIZED_TABLE_CELLS
+      if OnePassDFA.small?(@program, @byte_classes)
+        @table = Array(Int32).new(OnePassDFA.most_cells(@program, @byte_classes).to_i32)
+      end
     end
 
     def build : OnePassDFA?
