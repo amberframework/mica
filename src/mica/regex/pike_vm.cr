@@ -176,7 +176,10 @@ module Mica::Regex
       matched = false
       at = start
       while true
-        if @current_size == 0 && (matched || (anchored && at > start))
+        # With no live thread, the search is over once it has a match or
+        # may start no more threads: anchored past *start*, or past the
+        # FirstLine bound. Reading on would advance uncharged.
+        if @current_size == 0 && (matched || (at > start && (anchored || at > first_line_end)))
           break
         end
         if !matched && (at == start || (!anchored && boundary?(haystack, at) && at <= first_line_end))

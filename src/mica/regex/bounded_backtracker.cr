@@ -234,7 +234,9 @@ module Mica::Regex
           end
           return false if @gave_up
         end
-        break if anchored
+        # No later position may start a thread: anchored, or past the
+        # FirstLine bound. Reading on would advance uncharged.
+        break if anchored || at >= first_line_end
         at += 1
       end
       false

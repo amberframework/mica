@@ -297,7 +297,9 @@ and undo entry. An iteration call (`each_match`, `scan`, `gsub`, `sub`,
 reset it; its block, and the output it builds, are not regex work (output
 is bounded by `max_output_bytes` instead). Under `CompileOptions::FirstLine`
 the search for the first line feed is charged one operation per byte, and
-an iteration call scans each byte for it at most once. `split` meters and
+an iteration call scans each byte for it at most once; the Pike VM and the
+bounded backtracker stop once no thread is live and no start is allowed
+past that line feed, so nothing after the first line is read. `split` meters and
 validates the haystack on every path, the empty pattern (one operation per
 character) and `limit <= 1` included.
 
@@ -314,12 +316,13 @@ is the value for that call; a `timeout:` that passes raises
 call, before the haystack is validated, and then at work checkpoints, so a
 timeout that has already passed fails any call before it reads the
 haystack, while a running search notices its deadline at the next
-checkpoint. Every scan that reads ahead of an engine (the literal
+checkpoint. Validation, every scan that reads ahead of an engine (the literal
 accelerators, the final-byte skip, the `FirstLine` line feed search), the
 stepping loops of the lazy DFAs (forward, reverse and from each start) and
 of the one-pass DFA, and the character index conversion of `match` and
 `matches?` with a `pos` other than 0 read in windows the call's meter
-allows before each is read (`SearchMeter#readable`): a window never
+allows before each is read (`SearchMeter#readable`; a validation window
+ends before a lead byte, so no character is split): a window never
 passes the next checkpoint, so the budget and the clock are checked before
 a byte the call cannot pay for, not after. A loop that builds a DFA state
 inside a window charges what it has read first and has the rest of the
