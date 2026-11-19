@@ -48,6 +48,28 @@ module Mica::Regex
       exceeded(at) if @work_meter.charge(count)
     end
 
+    # Returns how many of the next *wanted* haystack bytes from *at* a scan
+    # may read now, one operation each, before it charges them: at least
+    # one when *wanted* is positive, and never past the next checkpoint
+    # (`Core::WorkMeter#headroom`). At a checkpoint it checks the budget
+    # and the deadline first, and when the allowance is spent it charges
+    # the first byte, which raises before the byte is read. A scan then
+    # reads that many bytes and charges what it read.
+    def readable(wanted : Int32, at : Int32) : Int32
+      return 0 if wanted <= 0
+      room = @work_meter.headroom
+      if room == 0
+        exceeded(at)
+        room = @work_meter.headroom
+        if room == 0
+          charge(1, at)
+          # Not reached: the allowance is spent, so the charge raised.
+          raise Mica::Error.new("internal error: a charge past the allowance did not raise")
+        end
+      end
+      room < wanted ? room.to_i32 : wanted
+    end
+
     # Raises `Mica::DeadlineExceededError` when the timeout has passed,
     # reading the clock now (charges read it only at checkpoints).
     def enforce_deadline(at : Int32) : Nil

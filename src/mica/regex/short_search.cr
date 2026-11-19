@@ -12,9 +12,10 @@ module Mica::Regex
   # Both answer only where the searcher would answer the same without
   # raising: no timeout is set (one already passed must fail), the offset
   # is a character boundary inside the haystack, the haystack is valid
-  # UTF-8, and the work they may do (validation plus at most
-  # `work_bound` steps) fits the call's allowance. Otherwise they decline
-  # and the caller runs the searcher.
+  # UTF-8, and the work they may do (validation, the start filter's scans
+  # and, for `run`, at most `work_bound` steps) fits the call's
+  # allowance. They check that before they read the haystack. Otherwise
+  # they decline and the caller runs the searcher.
   struct ShortSearch
     # The longest haystack a short search reads.
     MAX_BYTES = 256
@@ -48,8 +49,10 @@ module Mica::Regex
     def rejects? : Bool
       bytes = @haystack.to_slice
       plan = @program.plan
-      return false unless plan.start_filter.rejects?(bytes, @byte_index, anchored?(plan))
-      fits?(0) && valid?
+      filter = plan.start_filter
+      return false unless fits?(filter.scan_work(bytes.size, @byte_index))
+      return false unless filter.rejects?(bytes, @byte_index, anchored?(plan))
+      valid?
     end
 
     # Runs the search on the one-pass DFA into *slots* (`slot_count`
@@ -64,8 +67,11 @@ module Mica::Regex
       one_pass = plan.short_search_one_pass || return LazyDFA::GAVE_UP
       bytes = @haystack.to_slice
       bound = work_bound(bytes.size)
-      return LazyDFA::GAVE_UP unless fits?(bound) && valid?
       filter = plan.start_filter
+      # The filter's scans, the start scan between tries (at most one
+      # pass), and the tries themselves.
+      steps = filter.scan_work(bytes.size, @byte_index) + (bytes.size - @byte_index) + bound
+      return LazyDFA::GAVE_UP unless fits?(steps) && valid?
       return LazyDFA::NO_MATCH if filter.rejects?(bytes, @byte_index, anchored?(plan))
       if anchored?(plan)
         finish, _ = one_pass.search(bytes, @byte_index, @byte_index, slots, scratch, nil)

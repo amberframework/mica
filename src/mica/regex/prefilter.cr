@@ -217,8 +217,9 @@ module Mica::Regex
     # Returns the first position at or after *from* holding *needle*
     # (`Int32::MAX` when none), reusing the last result while it is still
     # ahead, and charging each byte `memchr` reads once. The scan runs in
-    # `CHARGE_CHUNK` windows, each charged before the next is read, so a
-    # search over budget stops within one window of its limit.
+    # windows of at most `CHARGE_CHUNK` bytes that the meter allows before
+    # each is read (`SearchMeter#readable`), so a search over budget stops
+    # before the first byte it cannot pay for.
     private def next_needle(slot : Int32, needle : UInt8, from : Int32, meter : SearchMeter) : Int32
       found_at = @found_at[slot]
       return found_at if from >= @scanned_from[slot] && found_at >= from
@@ -226,7 +227,7 @@ module Mica::Regex
       index = nil
       at = from
       while at < @haystack.size
-        stop = at + Math.min(CHARGE_CHUNK, @haystack.size - at)
+        stop = at + meter.readable(Math.min(CHARGE_CHUNK, @haystack.size - at), at)
         if found = @haystack[at, stop - at].index(needle)
           index = at + found
           meter.charge(found + 1, at)
@@ -240,8 +241,9 @@ module Mica::Regex
       @found_at[slot] = index || Int32::MAX
     end
 
-    # The packed search, charging each byte it reads once, in
-    # `CHARGE_CHUNK` windows and at each candidate.
+    # The packed search, charging each byte it reads once, at each
+    # candidate and in windows of at most `CHARGE_CHUNK` positions that the
+    # meter allows before each is read (`SearchMeter#readable`).
     private def find_packed(from : Int32, meter : SearchMeter) : Int32
       width = @prefilter.mask_width
       masks = @prefilter.masks
@@ -250,22 +252,27 @@ module Mica::Regex
       bytes = @haystack.to_unsafe
       table = masks.to_unsafe
       while at <= last
-        stop = Math.min(last, at + (CHARGE_CHUNK - 1))
+        # A window ends at its first candidate: verifying it charges the
+        # meter, so the next window is sized after that charge.
+        stop = at + meter.readable(Math.min(CHARGE_CHUNK, last + 1 - at), at) - 1
         chunk_from = at
+        bits = 0_u64
         while at <= stop
           bits = table[bytes[at]]
           if width > 1
             bits &= table[256 + bytes[at + 1]]
             bits &= table[512 + bytes[at + 2]] if width > 2
           end
-          if bits != 0
-            meter.charge(at - chunk_from + 1, at)
-            return at if accept?(at, meter, bits)
-            chunk_from = at + 1
-          end
+          break if bits != 0
           at += 1
         end
-        meter.charge(at - chunk_from, chunk_from) if at > chunk_from
+        if at <= stop
+          meter.charge(at - chunk_from + 1, at)
+          return at if accept?(at, meter, bits)
+          at += 1
+        elsif at > chunk_from
+          meter.charge(at - chunk_from, chunk_from)
+        end
       end
       meter.charge(@haystack.size - at, at) if at < @haystack.size
       -1

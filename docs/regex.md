@@ -302,9 +302,15 @@ four times the cap in all, plus a few bytes per match. A call that runs out rais
 `limit_name` is `max_work` or `max_output_bytes` and whose `limit_value`
 is the value for that call; a `timeout:` that passes raises
 `Mica::DeadlineExceededError`. The clock is read at the start of every
-call and then at work checkpoints, so a timeout that has already passed
-fails any call, while a running search notices its deadline at the next
-checkpoint. A search never returns a partial or wrong result.
+call, before the haystack is validated, and then at work checkpoints, so a
+timeout that has already passed fails any call before it reads the
+haystack, while a running search notices its deadline at the next
+checkpoint. Every scan that reads ahead of an engine (the literal
+accelerators, the final-byte skip, the `FirstLine` line feed search) reads
+in windows the call's meter allows before each is read
+(`SearchMeter#readable`): a window never passes the next checkpoint, so
+the budget and the clock are checked before a byte the call cannot pay
+for, not after. A search never returns a partial or wrong result.
 
 ## Engines
 
@@ -443,7 +449,9 @@ much as the cost per byte:
   with no lease and no engine, when too few bytes remain or none of them
   can start a match (only the first, when the search is anchored), or the
   a required byte is missing. They do so only where the searcher would also return no match without raising:
-  the haystack is valid UTF-8 and its validation fits the work allowance,
+  the haystack is valid UTF-8 and its validation and the filter's scans
+  (`StartFilter#scan_work`) fit the work allowance, checked before the
+  first scan,
   the offset is a character boundary, and no timeout is set.
 - **Short haystacks on the one-pass DFA.** Once a one-pass program has had
   a few short searches (`ShortSearch::BUILD_AFTER`, so a pattern searched
@@ -649,7 +657,8 @@ alone finds matches, in priority order at the leftmost candidate.
 Every candidate is verified before it is returned. The accelerators follow
 roadmap 6.2.2: they are consulted only while the forward DFA is in its
 start state and only move forward, so no byte is read twice by them, and
-every byte read and every literal byte compared is charged. **The guard:**
+every byte read and every literal byte compared is charged before it is
+read. **The guard:**
 once 32 candidates have been verified and they came less than 8 bytes
 apart on average, a prefilter that is only an accelerator stops at the
 candidate it holds (no match starts before it), and the call stops using

@@ -59,6 +59,14 @@ module Mica::Regex
       @list_of_required_bytes.any? { |byte| !tail.index(byte) }
     end
 
+    # The most bytes `rejects?` reads from *from* in a haystack of
+    # *haystack_size* bytes: the start scan, then one scan per required
+    # byte. A caller with a work allowance checks it before the scans run.
+    def scan_work(haystack_size : Int32, from : Int32) : Int32
+      remaining = Math.max(haystack_size - from, 0)
+      remaining * (1 + @list_of_required_bytes.size)
+    end
+
     # The first position from *from* through *last* where a match may
     # start (the byte there is one a match starts with, and at least
     # `minimum_bytes` bytes remain), or -1. Uses `memchr` when matches

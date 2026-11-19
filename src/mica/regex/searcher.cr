@@ -193,9 +193,13 @@ module Mica::Regex
       raise error
     end
 
-    # Validates the haystack (unless the lease validated this very string)
-    # and reads the deadline.
+    # Reads the deadline, then validates the haystack (unless the lease
+    # validated this very string).
     private def begin_call : Nil
+      # The deadline is read at the start of every call, before the
+      # haystack is read, so a timeout that has already passed fails even a
+      # search too short to reach a clock checkpoint.
+      @meter.enforce_deadline(0)
       lease = @lease
       unless lease && lease.validated?(@haystack)
         # Validation reads every byte once: one operation per byte. A lease
@@ -208,10 +212,6 @@ module Mica::Regex
         end
         lease.try(&.remember_validated(@haystack))
       end
-      # The deadline is read at the start of every call, so a timeout that
-      # has already passed fails even a search too short to reach a clock
-      # checkpoint.
-      @meter.enforce_deadline(0)
     end
 
     # True once the prefilter proved ineffective in this call (for specs).
@@ -642,12 +642,25 @@ module Mica::Regex
     # `CompileOptions::FirstLine`, or `Int32::MAX`. A scan already made
     # from at or before *start* answers when its line feed is at or after
     # *start* (no line feed lies between); otherwise the bytes from
-    # *start* are scanned, each charged one operation.
+    # *start* are scanned, each charged one operation, in windows the
+    # meter allows before each is read (`SearchMeter#readable`).
     private def first_line_end(bytes : Bytes, start : Int32, anchored : Bool) : Int32
       return Int32::MAX if anchored || !@program.options.first_line?
       return @line_feed_at if @line_scan_start >= 0 && @line_scan_start <= start <= @line_feed_at
-      line_feed_at = bytes.index(Look::LINE_FEED, start) || bytes.size
-      @meter.charge(line_feed_at - start + 1, start)
+      line_feed_at = bytes.size
+      at = start
+      while at < bytes.size
+        window = @meter.readable(bytes.size - at, at)
+        if found = bytes[at, window].index(Look::LINE_FEED)
+          @meter.charge(found + 1, at)
+          line_feed_at = at + found
+          break
+        end
+        @meter.charge(window, at)
+        at += window
+      end
+      # The end of the haystack, when no line feed was found.
+      @meter.charge(1, bytes.size) if line_feed_at == bytes.size
       @line_scan_start = start
       @line_feed_at = line_feed_at
     end

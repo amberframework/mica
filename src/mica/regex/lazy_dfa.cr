@@ -463,12 +463,13 @@ module Mica::Regex
     end
 
     # The first position at or after *from* holding *byte*, or `Int32::MAX`;
-    # charges the bytes `memchr` reads, in windows of 4096 bytes.
+    # charges the bytes `memchr` reads, in windows of at most 4096 bytes
+    # that the meter allows before each is read (`SearchMeter#readable`).
     private def next_byte(haystack : Bytes, byte : UInt8, from : Int32, meter : SearchMeter) : Int32
       at = from
       size = haystack.size
       while at < size
-        stop = Math.min(size, at + 4096)
+        stop = at + meter.readable(Math.min(size - at, 4096), at)
         if found = haystack[at, stop - at].index(byte)
           meter.charge(found + 1, at)
           return at + found

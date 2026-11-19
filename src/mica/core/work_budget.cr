@@ -183,6 +183,15 @@ module Mica::Core
       raise ArgumentError.new("raise_exceeded needs a failing verdict")
     end
 
+    # Returns how many more operations `charge` takes before it asks the
+    # caller to check the meter (the next checkpoint: the allowance, or the
+    # next clock read when a timeout is set). A caller that reads its input
+    # in windows sizes each window by it, so the meter is checked before a
+    # read it cannot pay for, not after.
+    def headroom : Int64
+      @checkpoint > @operations ? @checkpoint - @operations : 0_i64
+    end
+
     # Returns the operations allowed for the units seen so far.
     def allowance : Int64
       @budget.allowance(@units)
