@@ -320,12 +320,20 @@ for, not after. A search never returns a partial or wrong result.
 every class and literal is a UTF-8 automaton (classes share their leading
 byte ranges in a trie, so a class emits at most the byte ranges the size
 preflight counted for it). A large class (16 ranges or more, such as `\w`
-or `\p{L}`) is built once per process as a minimal automaton, its equal
-suffixes sharing states, and copied into each program that uses it; the
-preflight counts its exact states. A class of one escape or property
-lowers to a set shared by the process, an alternation of classes and
+or `\p{L}`, or any class reaching three-byte sequences, such as `.` or
+`[^"']`) is built once per process as a minimal automaton, its equal
+suffixes sharing states, and copied into each program that uses it (one
+memory copy, relocated in place); the preflight counts its exact states.
+A class of one escape or property lowers to a set shared by the process,
+and so does every written class of up to 32 items (`[0-9a-f]`, kept for
+up to 512 classes, the table emptied and refilled when full), each ASCII
+character under `IgnoreCase`, and `.`; an ASCII class compiles straight
+to its one byte state. The case folding table is decoded once per
+process. An alternation of classes and
 single characters around a large class compiles as their union, and a
-repeated small class is built once and copied. The compiler expands
+repeated small class is built once and copied; a counted literal or class
+(`[\w.%+-]{1,256}`) is emitted in one loop rather than one task round per
+copy. The compiler expands
 repetitions, never recurses on the pattern (it keeps a task stack),
 charges every allocation to the ledger, checks `max_program_states` as
 it emits and `max_pike_bytes` when it finishes, and never emits more
