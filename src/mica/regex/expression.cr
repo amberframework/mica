@@ -198,6 +198,125 @@ module Mica::Regex
       match_at_byte_index(haystack, byte_offset, options, limits: limits, timeout: deadline)
     end
 
+    # Returns the span of the first match in *haystack* at or after byte
+    # *byte_offset*, or nil, without reading its groups. Once the expression
+    # has adapted (its plan and caches are built over its first searches),
+    # a call allocates nothing. Raises as `search` does.
+    #
+    # ```
+    # number = Mica::Regex.compile("[0-9]+", dialect: :crystal, compile_limits: Mica::Regex::CompileLimits::TRUSTED_PATTERN)
+    # number.search_span("id 2026", limits: Mica::Regex::SearchLimits::REQUEST) # => Mica::Regex::Span(@byte_begin=3, @byte_end=7)
+    # ```
+    def search_span(haystack : String, byte_offset : Int32 = 0, options : MatchOptions = MatchOptions::None, *,
+                    limits : SearchLimits, deadline : Time::Span? = nil) : Span?
+      span = nil
+      find_slots(haystack, byte_offset, options, limits, deadline, false) do |slots|
+        span = Span.new(slots[0].to_i32, slots[1].to_i32)
+      end
+      span
+    end
+
+    # Finds the first match in *haystack* at or after byte *byte_offset*
+    # with its groups, yields them as `Groups`, and returns the block's
+    # value, or nil when nothing matches. The groups are copied into
+    # `Groups::STACK_SLOTS` slots in the caller's stack frame (a pattern with
+    # more groups uses a heap buffer), so once the expression has adapted a
+    # call allocates nothing beyond what the block does. Raises as `search`
+    # does.
+    #
+    # ```
+    # date = Mica::Regex.compile("(\\d{4})-(\\d{2})", dialect: :crystal, compile_limits: Mica::Regex::CompileLimits::TRUSTED_PATTERN)
+    # date.search_groups("due 2026-11", limits: Mica::Regex::SearchLimits::REQUEST) { |groups| groups.byte_begin(2) } # => 9
+    # ```
+    def search_groups(haystack : String, byte_offset : Int32 = 0, options : MatchOptions = MatchOptions::None, *,
+                      limits : SearchLimits, deadline : Time::Span? = nil, & : Groups -> _)
+      storage = uninitialized StaticArray(Int32, Groups::STACK_SLOTS)
+      slot_count = @program.slot_count
+      slots = slot_count <= Groups::STACK_SLOTS ? Slice.new(storage.to_unsafe, slot_count) : Slice(Int32).new(slot_count)
+      found = find_slots(haystack, byte_offset, options, limits, deadline, true) do |found_slots|
+        slot_count.times { |index| slots[index] = found_slots[index].to_i32 }
+      end
+      return nil unless found
+      yield Groups.new(haystack, slots)
+    end
+
+    # Yields the span of each successive match in *haystack*, as
+    # `each_match` finds them (after an empty match the next search starts
+    # one character later), without reading groups. All searches share one
+    # work allowance and one deadline, and once the expression has adapted
+    # the call allocates nothing.
+    def each_span(haystack : String, options : MatchOptions = MatchOptions::None, *, limits : SearchLimits,
+                  deadline : Time::Span? = nil, & : Span ->) : Nil
+      searcher = Searcher.open(@program, haystack, limits, deadline, @cache_pool)
+      byte_offset = 0
+      while found = searcher.find(byte_offset, options, false)
+        span = Span.new(found[0].to_i32, found[1].to_i32)
+        yield span
+        byte_offset = span.byte_end
+        byte_offset += char_bytesize_at(haystack, byte_offset) if span.empty?
+      end
+    ensure
+      searcher.try(&.finish)
+    end
+
+    # Runs one search of *string* from *byte_index* on the fastest path the
+    # call allows (as `match_at_byte_index` does, without deferring
+    # groups), yields the found slots (group 0 only unless *captures*;
+    # valid only inside the block, which must not search again), and
+    # returns true; returns false when nothing matches.
+    private def find_slots(string : String, byte_index : Int32, options : MatchOptions, limits : SearchLimits,
+                           timeout : Time::Span?, captures : Bool, & : Slice(Int64) ->) : Bool
+      if FirstSearch.applies?(@program, string, byte_index, limits)
+        searcher = Searcher.first_search(@program, string, limits, timeout, @cache_pool)
+        found = searcher.find(byte_index, options, captures)
+        return false unless found
+        yield found
+        return true
+      end
+      # Slots and scratch on the stack for the short and candidate searches:
+      # `ShortSearch::MAX_SLOTS` each (both decline a program with more).
+      buffer = uninitialized StaticArray(Int64, 32)
+      # The work a candidate search did before it declined.
+      spent = 0_i64
+      short = ShortSearch.new(@program, string, byte_index, options, limits, timeout)
+      if short.applies?
+        plan = @program.plan
+        return false if short.rejects?(plan)
+        slot_count = Math.min(@program.slot_count, ShortSearch::MAX_SLOTS)
+        slots = Slice.new(buffer.to_unsafe, slot_count)
+        scratch = Slice.new(buffer.to_unsafe + ShortSearch::MAX_SLOTS, slot_count)
+        finish = short.run(plan, slots, scratch)
+        return false if finish == LazyDFA::NO_MATCH
+        unless finish == LazyDFA::GAVE_UP
+          yield slots
+          return true
+        end
+      elsif timeout.nil?
+        candidates = CandidateSearch.new(@program, @program.plan, string, byte_index, options, limits, timeout)
+        if one_pass = candidates.one_pass
+          slots = Slice.new(buffer.to_unsafe, @program.slot_count)
+          scratch = Slice.new(buffer.to_unsafe + ShortSearch::MAX_SLOTS, @program.slot_count)
+          finish = candidates.run(one_pass, slots, scratch)
+          return false if finish == LazyDFA::NO_MATCH
+          unless finish == LazyDFA::GAVE_UP
+            yield slots
+            return true
+          end
+          spent = candidates.spent
+        end
+      end
+      searcher = Searcher.open(@program, string, limits, timeout, @cache_pool)
+      # The work a candidate search did before it declined counts against
+      # the call's allowance.
+      searcher.meter.charge(spent, byte_index) if spent > 0
+      found = searcher.find(byte_index, options, captures)
+      return false unless found
+      yield found
+      true
+    ensure
+      searcher.try(&.finish)
+    end
+
     # Returns true when *string* has a match at or after character index
     # *pos*. Stops at the first match it reaches. A *pos* other than 0 is
     # read as `match` reads it.
