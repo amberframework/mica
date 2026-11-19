@@ -337,6 +337,26 @@ describe Mica::Regex::Syntax do
         .count(&.kind.split?).should be > 0
     end
 
+    it_satisfies "REGEX-R1-preflight", "lowers a written class once per process and refuses it the same way afterward" do
+      first = Mica::Regex::Syntax.translate("(?i)[0-9a-fk]", dialect: :crystal, compile_limits: TRUSTED)
+      again = Mica::Regex::Syntax.translate("(?i)x[0-9a-fk]", dialect: :crystal, compile_limits: TRUSTED)
+      first_class = first.root.as(Mica::Regex::Hir::Class)
+      again_class = again.root.as(Mica::Regex::Hir::Concatenation).list_of_children[1].as(Mica::Regex::Hir::Class)
+      again_class.code_point_set.should be(first_class.code_point_set)
+      # 0-9, A-F, a-f, K, k and the Kelvin sign: folding is applied.
+      first_class.code_point_set.list_of_bounds.should eq([0x30, 0x39, 0x41, 0x46, 0x4B, 0x4B, 0x61, 0x66, 0x6B, 0x6B, 0x212A, 0x212A])
+      # Case-sensitive, restricted and negated forms are kept apart.
+      plain = Mica::Regex::Syntax.translate("[0-9a-fk]", dialect: :crystal, compile_limits: TRUSTED).root.as(Mica::Regex::Hir::Class)
+      plain.code_point_set.range_count.should eq(3)
+      restricted = Mica::Regex::Syntax.translate("(*CASELESS_RESTRICT)(?i)[0-9a-fk]", dialect: :crystal, compile_limits: TRUSTED)
+      restricted.root.as(Mica::Regex::Hir::Class).code_point_set.list_of_bounds.should_not contain(0x212A)
+      negated = Mica::Regex::Syntax.translate("(?i)[^0-9a-fk]", dialect: :crystal, compile_limits: TRUSTED).root.as(Mica::Regex::Hir::Class)
+      negated.code_point_set.list_of_bounds.first(2).should eq([0, 0x2F])
+      # A smaller max_class_ranges still refuses the kept set.
+      error_of("(?i)[0-9a-fk]", Mica::Regex::CompileLimits.custom(max_class_ranges: 5)).as(Mica::Regex::CompileLimitError)
+        .limit_name.should eq("max_class_ranges")
+    end
+
     it_satisfies "REGEX-R1-preflight", "copies a repeated small class exactly as it would rebuild it" do
       {".{3}" => "...", "[a-zé]{2,3}" => "[a-zé][a-zé](?:[a-zé])?", "x[^\"']{0,2}" => "x(?:[^\"'](?:[^\"'])?)?"}.each do |repeated, written|
         copied = Mica::Regex::Syntax.compile(repeated, dialect: :crystal, compile_limits: TRUSTED)

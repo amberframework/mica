@@ -42,7 +42,7 @@ module Mica::Regex
       items = char_class.list_of_items
       item = items.first?
       unless items.size == 1 && item && !item.item_kind.range? && !(char_class.options.ignore_case? && dialect.ecma262?)
-        return lower_items(char_class, dialect, limits, ledger, meter)
+        return lower_written_class(char_class, dialect, limits, ledger, meter)
       end
       key = {item, char_class.negated?}
       shared = @@shared_mutex.synchronize { @@shared_sets[key]? }
@@ -55,6 +55,46 @@ module Mica::Regex
     # are at most two per escape and property, so the table stays small.
     @@shared_mutex = Mutex.new
     @@shared_sets = {} of {Ast::ClassItem, Bool} => CodePointSet
+
+    # The most items a class may have for its lowering to be kept in
+    # `@@written_sets`, and the most classes kept there.
+    WRITTEN_CLASS_ITEMS =  32
+    WRITTEN_CLASSES     = 512
+
+    # What a written class lowers from: its items, negation, whether it is
+    # folded and restricted, and the dialect.
+    private alias WrittenClassKey = {Array(Ast::ClassItem), Bool, Bool, Bool, Dialect}
+
+    # Lowers a class of several items or of ranges (`[0-9a-f]`,
+    # `[\w.-]`). Under `IgnoreCase` its ranges are closed over their fold
+    # orbits, which reads the fold table member by member, and a pattern
+    # often writes the same class many times (`[0-9a-f]{8}-[0-9a-f]{4}`),
+    # so the sets of classes up to `WRITTEN_CLASS_ITEMS` items are kept
+    # for the process (up to `WRITTEN_CLASSES` of them, after which new
+    # classes are lowered each time). The same set object comes back for
+    # the same class, so `ClassMemo` finds its automaton by identity. A
+    # kept set larger than the caller's `max_class_ranges` is lowered
+    # again, so the refusal is the same.
+    private def self.lower_written_class(char_class : Ast::CharClass, dialect : Dialect, limits : CompileLimits,
+                                         ledger : AllocationLedger, meter : Core::WorkMeter) : CodePointSet
+      items = char_class.list_of_items
+      return lower_items(char_class, dialect, limits, ledger, meter) if items.size > WRITTEN_CLASS_ITEMS
+      options = char_class.options
+      folding = options.ignore_case? && !dialect.xsd?
+      restricted = folding && options.caseless_restrict? && dialect.crystal?
+      key = {items, char_class.negated?, folding, restricted, dialect}
+      written = @@shared_mutex.synchronize { @@written_sets[key]? }
+      return written if written && written.range_count <= limits.max_class_ranges
+      set = lower_items(char_class, dialect, limits, ledger, meter)
+      @@shared_mutex.synchronize do
+        kept = @@written_sets[key]?
+        return kept if kept && kept.range_count <= limits.max_class_ranges
+        @@written_sets[{items.dup, key[1], key[2], key[3], key[4]}] = set if @@written_sets.size < WRITTEN_CLASSES
+      end
+      set
+    end
+
+    @@written_sets = {} of WrittenClassKey => CodePointSet
 
     private def self.lower_items(char_class : Ast::CharClass, dialect : Dialect, limits : CompileLimits,
                                  ledger : AllocationLedger, meter : Core::WorkMeter) : CodePointSet
