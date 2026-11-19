@@ -520,7 +520,8 @@ every path. The search is O(m·(L + 1) + c) and finds the span and the
 groups in one pass. A pattern that backtracks hard over the haystack
 (`(a|a)*$` over a run of a's) could make the backtracker cost more than
 the plan, so a first search makes at most `FirstSearch.visit_limit`
-visits (256 plus 8 per state, about what building the plan costs); one
+visits (512 plus 8 per state, about what building the plan costs: a
+small program's plan takes about 4 us, over a thousand visits); one
 still undecided then goes on in the same call, under the same meter and
 deadline, on the plan's engines, having spent at most about what the plan
 costs. Later searches, iteration calls (`scan`, `gsub`, `split`) and
@@ -553,7 +554,9 @@ automaton over one UTF-8 sequence, entered only at its entry, so a pair
 inside a copy can be reached from one entry pair alone: the search marks
 only the entry pairs, which keeps every pair visited at most once, and
 charges one operation and one visit per state it steps through, with no
-run lookup per state. `\p{L}{256}` over 256 letters went from about 13
+run lookup per state. Outside runs, `Program#sparse_target` reads the
+entry state of a large class's block (`.`, `\w`, `[^A-Z]`) the same way,
+with one load per byte. `\p{L}{256}` over 256 letters went from about 13
 to 4 us cold, and `[0-9A-Za-z_]{256}` from about 6.6 to 2.5 us.
 
 A first search has no lease, so its backtracker would allocate a bitset

@@ -83,6 +83,11 @@ module Mica::Regex
     # `Program#list_of_shared_tables`); a `Sparse` state names one by its
     # position plus one, in a byte, so at most `MAX_SHARED_TABLES`.
     @list_of_shared_tables = [] of Array(Program::Transition)
+    # For each shared table, where its block's entry state reads it and
+    # that entry's target for each byte (`ClassMemo::Block#entry_targets`),
+    # or -1 and an empty slice (see `Program#sparse_target`).
+    @list_of_entry_firsts = [] of Int32
+    @list_of_entry_targets = [] of Slice(Int32)
     # The runs of class copies held as their block (`Program::ClassRun`),
     # in state order, and the states they stand for: state numbers count
     # them, `@list_of_states` does not hold them.
@@ -231,7 +236,7 @@ module Mica::Regex
       @ledger.charge_object(instance_sizeof(Program), "the program", 0)
       Program.new(@list_of_states, @list_of_transitions, start, @pattern.capture_count, group_names,
         @pattern.options, @limits.max_pike_bytes - workspace_charge, @pattern.source_end, literal_set,
-        @list_of_class_blocks, @list_of_shared_tables, @list_of_runs)
+        @list_of_class_blocks, @list_of_shared_tables, @list_of_runs, @list_of_entry_firsts, @list_of_entry_targets)
     end
 
     private def charge_literal_set(literal_set : LiteralSet) : Nil
@@ -454,7 +459,7 @@ module Mica::Regex
       return nil if copies.to_i64 * block_states.size < RUN_MIN_STATES
       table_id = 0_u8
       unless table.empty?
-        table_id = shared_table_id(table) || return nil
+        table_id = shared_table_id(table, ClassMemo.memoized?(set) ? memo_block(set) : nil) || return nil
       end
       added = copies.to_i64 * block_states.size
       check_state_room(added.to_i32, written: false)
@@ -671,7 +676,7 @@ module Mica::Regex
     # states one by one would check and charge them.
     private def instantiate(block : ClassMemo::Block, next_state : Int32) : Int32
       if table = block.shared_table
-        if table_id = shared_table_id(table)
+        if table_id = shared_table_id(table, block)
           return instantiate_shared(block, table_id, next_state)
         end
       end
@@ -709,12 +714,21 @@ module Mica::Regex
     # The number a `Sparse` state uses for *table* (its position in the
     # program's shared tables, plus one), adding it the first time; nil
     # once `MAX_SHARED_TABLES` are in use, when the block is copied whole.
-    private def shared_table_id(table : Array(Program::Transition)) : UInt8?
+    private def shared_table_id(table : Array(Program::Transition), block : ClassMemo::Block? = nil) : UInt8?
       if index = @list_of_shared_tables.index(&.same?(table))
         return (index + 1).to_u8
       end
       return nil if @list_of_shared_tables.size >= MAX_SHARED_TABLES
       @ledger.charge_append(sizeof(Array(Program::Transition)), "a shared class table", 0)
+      @ledger.charge_append(sizeof(Int32) + sizeof(Slice(Int32)), "a shared class table", 0)
+      entry_targets = block.try(&.entry_targets)
+      if block && entry_targets
+        @list_of_entry_firsts << block.list_of_states[block.entry].argument
+        @list_of_entry_targets << entry_targets
+      else
+        @list_of_entry_firsts << -1
+        @list_of_entry_targets << Slice(Int32).empty
+      end
       @list_of_shared_tables << table
       @list_of_shared_tables.size.to_u8
     end
