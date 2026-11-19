@@ -459,11 +459,10 @@ module Mica::Regex
       added = copies.to_i64 * block_states.size
       check_state_room(added.to_i32, written: false)
       @meter.enforce { Core::Position.new(0_i64) } if @meter.charge(added + copies)
-      if block_states.size > 1
-        copies.times { @ledger.charge_append(sizeof(Program::ClassBlock), "a class block", 0) }
-      end
+      @ledger.charge_appends(copies, sizeof(Program::ClassBlock), "a class block", 0) if block_states.size > 1
       @ledger.charge_append(sizeof(Program::ClassRun), "a class run", 0)
-      run = Program::ClassRun.new(state_total, copies, block_states, table_id, entry, next_state)
+      entry_targets = memo_block(set).entry_targets if ClassMemo.memoized?(set)
+      run = Program::ClassRun.new(state_total, copies, block_states, table_id, entry, next_state, entry_targets)
       @list_of_runs << run
       @run_states += run.size
       run.last_entry

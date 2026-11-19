@@ -84,8 +84,11 @@ module Mica::Regex
     # a counted item from the last copy back. Its `Sparse` states read
     # shared table *table_id*. A copy's states are exactly the ones
     # `Compiler#instantiate_shared` would have emitted (see `state_at`).
+    #
+    # *entry_targets*, for a large class's block, is its entry's target
+    # for each byte (`ClassMemo::Block#entry_targets`).
     record ClassRun, first_state : Int32, copies : Int32, list_of_block_states : Array(State), table_id : UInt8,
-      entry : Int32, exit : Int32 do
+      entry : Int32, exit : Int32, entry_targets : Slice(Int32)? = nil do
       # The states the run stands for.
       def size : Int32
         copies * list_of_block_states.size
@@ -293,10 +296,44 @@ module Mica::Regex
       end
     end
 
+    # Yields the kind and byte range of every state, with how many states
+    # share them: a run's copies are alike in both, so each state of its
+    # block is yielded once, with the run's copy count (other fields of a
+    # run's state, its targets and its table, are those of the block, not
+    # of a copy). Reads each physical state and each run's block once,
+    # without building `list_of_states`.
+    def each_distinct_state(& : State, Int32 ->) : Nil
+      if states = @materialized
+        states.each { |state| yield state, 1 }
+        return
+      end
+      @list_of_physical_states.each { |state| yield state, 1 }
+      @list_of_runs.each do |run|
+        run.list_of_block_states.each do |state|
+          yield state.kind.sparse? ? state.copy_with(low: run.table_id) : state, run.copies
+        end
+      end
+    end
+
     # Finds the last run that starts at or before *index* by a binary
     # search (the runs are in state order), yielding before each run it
     # reads: at most `run_reads_per_state` yields.
     private def run_state_at(index : Int32, & : ->) : State
+      slot = pending_run_slot(index) { yield }
+      return @list_of_physical_states[index] if slot < 0
+      yield
+      run = @list_of_runs.unsafe_fetch(slot)
+      return run.state_at(index) if index < run.end_state
+      state_outside_runs(index, slot)
+    end
+
+    # :nodoc:
+    # The index in `list_of_runs` of the last run that starts at or before
+    # state *index* (-1 when none does), found by a binary search that
+    # yields before each run it reads. The state is in that run when it is
+    # before the run's `end_state`; otherwise read it with
+    # `state_outside_runs`.
+    def pending_run_slot(index : Int32, & : ->) : Int32
       low = 0
       high = @list_of_runs.size
       while low < high
@@ -308,11 +345,15 @@ module Mica::Regex
           high = middle
         end
       end
-      return @list_of_physical_states[index] if low == 0
-      yield
-      run = @list_of_runs.unsafe_fetch(low - 1)
-      return run.state_at(index) if index < run.end_state
-      @list_of_physical_states[index - @list_of_run_offsets.unsafe_fetch(low - 1) - run.size]
+      low - 1
+    end
+
+    # :nodoc:
+    # State *index*, which lies in no run, given the `pending_run_slot` of
+    # the runs before it.
+    def state_outside_runs(index : Int32, run_slot : Int32) : State
+      return @list_of_physical_states[index] if run_slot < 0
+      @list_of_physical_states[index - @list_of_run_offsets.unsafe_fetch(run_slot) - @list_of_runs.unsafe_fetch(run_slot).size]
     end
 
     # Builds every state and class block from the physical states and the
@@ -486,15 +527,16 @@ module Mica::Regex
     # True when the states plus the sparse transitions they read (in the
     # program's own list and in shared tables) number at most
     # *allowance*. Stops counting once past it. With *meter*, charges one
-    # operation for each state it reads, before reading it.
+    # operation for each state it reads, before reading it (a run's block
+    # is read once for all its copies, see `each_distinct_state`).
     private def edges_within?(allowance : Int64, meter : SearchMeter? = nil, at : Int32 = 0) : Bool
       edges = state_count.to_i64 + @list_of_transitions.size
       return false if edges > allowance
       return true if @list_of_shared_tables.empty?
-      each_state do |state, _|
+      each_distinct_state do |state, copies|
         meter.charge(1, at) if meter
         next unless state.kind.sparse? && state.low != 0
-        edges += state.alternate
+        edges += state.alternate.to_i64 * copies
         return false if edges > allowance
       end
       true

@@ -141,9 +141,56 @@ module Mica::Regex
     # True when the last search reached `visit_limit` before it decided.
     getter? gave_up = false
 
-    def initialize(@program : Program, @slot_count : Int32)
+    def initialize(program : Program, @slot_count : Int32)
+      @program = program
       @slots = Slice(Int64).new(@slot_count, PikeVM::UNSET)
       @visited = Slice(UInt64).new(0)
+    end
+
+    # The program this backtracker searches; nil while it waits as a
+    # pool's spare (see `CachePool#take_spare_backtracker`).
+    @program : Program?
+
+    # The most bytes a spare backtracker keeps between programs (see
+    # `detach`): its bitset at its largest (`MAX_VISITED_BITS`, 32 KiB),
+    # the first chunks of its job stack and a hash set of up to
+    # `SPARE_SPARSE_SLOTS` pairs.
+    SPARE_JOB_CHUNKS   =    3
+    SPARE_SPARSE_SLOTS = 2048
+
+    # Points this backtracker at *program* for its next searches, keeping
+    # the buffers it already has (a spare taken from a `CachePool`).
+    def attach(program : Program, slot_count : Int32) : Nil
+      @program = program
+      @slot_count = slot_count
+      @slots = Slice(Int64).new(slot_count, PikeVM::UNSET) if @slots.size < slot_count
+      @visit_limit = Int64::MAX
+    end
+
+    # Lets go of the program and frees what a spare does not keep (the job
+    # chunks past `SPARE_JOB_CHUNKS`, a hash set larger than
+    # `SPARE_SPARSE_SLOTS`), so a spare holds at most
+    # `spare_retained_bytes`, and no program.
+    def detach : Nil
+      @program = nil
+      while @chunk_count > SPARE_JOB_CHUNKS
+        last = @chunk_count - 1
+        GC.free(@list_of_chunks[last].as(Void*))
+        @job_capacity -= @list_of_chunk_sizes[last]
+        @list_of_chunks[last] = Pointer(Job).null
+        @list_of_chunk_sizes[last] = 0_i64
+        @chunk_count = last
+      end
+      if @sparse_visited.size > SPARE_SPARSE_SLOTS
+        GC.free(@sparse_visited.to_unsafe.as(Void*))
+        @sparse_visited = Slice(UInt64).new(0)
+      end
+    end
+
+    # The most bytes a detached backtracker holds (see `detach`).
+    def self.spare_retained_bytes : Int64
+      jobs = (FIRST_JOB_CHUNK << SPARE_JOB_CHUNKS) - FIRST_JOB_CHUNK
+      MAX_VISITED_BITS // 8 + jobs * sizeof(Job) + SPARE_SPARSE_SLOTS * sizeof(UInt64)
     end
 
     # Searches like `PikeVM#search`, over *start*..*end_bound*, which must
@@ -152,10 +199,11 @@ module Mica::Regex
     def search(haystack : Bytes, start : Int32, end_bound : Int32, search_start : Int32, anchored : Bool,
                end_anchored : Bool, meter : SearchMeter, slots : Slice(Int64),
                first_line_end : Int32) : Bool
+      program = @program || raise Mica::Error.new("internal error: a spare backtracker searched before it was attached")
       span = end_bound - start
       columns = span + 1
-      bits = @program.state_count.to_i64 * columns
-      if BoundedBacktracker.fits?(@program, span)
+      bits = program.state_count.to_i64 * columns
+      if BoundedBacktracker.fits?(program, span)
         @sparse = false
         words = ((bits + 63) // 64).to_i32
         if @visited.size < words
@@ -167,7 +215,7 @@ module Mica::Regex
         # Each visit pushes at most one job, after the one each start pushes.
         limit_jobs(bits + 1)
         @visits_left = @visit_limit
-      elsif @visit_limit != Int64::MAX && BoundedBacktracker.fits_capped?(@program, span)
+      elsif @visit_limit != Int64::MAX && BoundedBacktracker.fits_capped?(program, span)
         @sparse = true
         clear_sparse
         limit_jobs(SPARSE_VISITS + 1)
@@ -180,7 +228,7 @@ module Mica::Regex
       while at <= end_bound
         if at == start || (!anchored && boundary?(haystack, at) && at <= first_line_end)
           @slots.fill(PikeVM::UNSET)
-          if explore_from(haystack, start, columns, at, end_bound, search_start, end_anchored, meter)
+          if explore_from(program, haystack, start, columns, at, end_bound, search_start, end_anchored, meter)
             @slot_count.times { |slot| slots[slot] = @slots[slot] }
             return true
           end
@@ -192,10 +240,16 @@ module Mica::Regex
       false
     end
 
-    private def explore_from(haystack : Bytes, start : Int32, columns : Int32, from : Int32, end_bound : Int32,
+    private def explore_from(program : Program, haystack : Bytes, start : Int32, columns : Int32, from : Int32, end_bound : Int32,
                              search_start : Int32, end_anchored : Bool, meter : SearchMeter) : Bool
       clear_jobs
-      push_job(@program.start_state, from.to_i64)
+      push_job(program.start_state, from.to_i64)
+      # While the program's runs are pending (a first search), the run the
+      # last state read was found in: states first_state...end_state.
+      runs_pending = program.runs_pending?
+      run_slot = -1
+      run_first = 0
+      run_end = 0
       while @job_count > 0
         job = pop_job
         if job.state < 0
@@ -205,22 +259,35 @@ module Mica::Regex
         current = job.state
         at = job.at.to_i32
         while true
-          bit = current.to_i64 * columns + (at - start)
-          if @sparse
-            break unless mark_sparse?(bit)
-          else
-            word = bit >> 6
-            mask = 1_u64 << (bit & 63)
-            visited = @visited.to_unsafe + word
-            break if visited.value & mask != 0
-            visited.value |= mask
-          end
+          break unless first_visit?(current.to_i64 * columns + (at - start))
           if (@visits_left -= 1) < 0
             @gave_up = true
             return false
           end
           meter.charge(1, at)
-          state = @program.state_at(current, meter, at)
+          if runs_pending
+            unless run_first <= current < run_end
+              run_slot = program.pending_run_slot(current) { meter.charge(1, at) }
+              meter.charge(1, at)
+              if run_slot >= 0
+                run = program.list_of_runs.unsafe_fetch(run_slot)
+                run_first = run.first_state
+                run_end = run.end_state
+              else
+                run_first = run_end = 0
+              end
+            end
+            if run_first <= current < run_end
+              current, at = follow_run(program, program.list_of_runs.unsafe_fetch(run_slot), current, at, haystack,
+                start, columns, end_bound, meter)
+              return false if current == GAVE_UP
+              break if current < 0
+              next
+            end
+            state = program.state_outside_runs(current, run_slot)
+          else
+            state = program.state_at(current, meter, at)
+          end
           case state.kind
           when .byte_range?
             break unless at < end_bound
@@ -230,7 +297,7 @@ module Mica::Regex
             at += 1
           when .sparse?
             break unless at < end_bound
-            target = @program.sparse_target(current, state, haystack.unsafe_fetch(at))
+            target = program.sparse_target(current, state, haystack.unsafe_fetch(at))
             break if target < 0
             current = target
             at += 1
@@ -257,6 +324,98 @@ module Mica::Regex
         end
       end
       false
+    end
+
+    # `follow_run`'s answer when the search reached its visit limit.
+    private GAVE_UP = -2
+
+    # Follows the class copies of *run* from *current* (a state of the run
+    # whose pair at *at* is marked and charged) over the haystack, and
+    # returns the state after the run with the position there, or -1 when
+    # a byte leaves the class or the pair of a copy's entry was visited
+    # before (`GAVE_UP` at the visit limit).
+    #
+    # A copy is a deterministic automaton over one UTF-8 sequence (its
+    # `Sparse` ranges are disjoint), entered only at its entry, so a pair
+    # inside a copy is reached from one entry pair alone: only the entry
+    # pairs are marked, which keeps every visit at most once, and the
+    # states are read from the run's block (no lookup of the run per
+    # state). Each state read is one visit and one operation, as in
+    # `explore_from`.
+    private def follow_run(program : Program, run : Program::ClassRun, current : Int32, at : Int32, haystack : Bytes,
+                           start : Int32, columns : Int32, end_bound : Int32, meter : SearchMeter) : {Int32, Int32}
+      block = run.list_of_block_states
+      block_size = block.size
+      table = run.table_id == 0 ? program.list_of_transitions : program.list_of_shared_tables.unsafe_fetch(run.table_id.to_i32 - 1)
+      relative = current - run.first_state
+      copy = relative.unsafe_div(block_size)
+      copy_first = run.first_state + copy * block_size
+      inner = relative - copy * block_size
+      entry_targets = run.entry_targets
+      while true
+        return {-1, at} unless at < end_bound
+        state = block.unsafe_fetch(inner)
+        byte = haystack.unsafe_fetch(at)
+        if state.kind.sparse?
+          target = if entry_targets && inner == run.entry
+                     entry_targets.unsafe_fetch(byte)
+                   else
+                     BoundedBacktracker.table_target(table, state.argument, state.alternate, byte)
+                   end
+          return {-1, at} if target == ClassMemo::NO_TRANSITION
+          leaves = target == Program::SHARED_EXIT
+          inner += target unless leaves
+        elsif state.kind.byte_range?
+          return {-1, at} unless state.low <= byte <= state.high
+          target = state.next_state
+          leaves = target == ClassMemo::EXIT
+          inner = target unless leaves
+        else
+          return {-1, at}
+        end
+        at += 1
+        if leaves
+          return {run.exit, at} if copy == 0
+          copy -= 1
+          copy_first -= block_size
+          inner = run.entry
+          return {-1, at} unless first_visit?((copy_first + inner).to_i64 * columns + (at - start))
+        end
+        return {GAVE_UP, at} if (@visits_left -= 1) < 0
+        meter.charge(1, at)
+      end
+    end
+
+    # The target of the transition among *count* of *table* from *first*
+    # that holds *byte*, or `ClassMemo::NO_TRANSITION`: a binary search over sorted,
+    # disjoint ranges, as `Program#sparse_target`.
+    @[AlwaysInline]
+    protected def self.table_target(table : Array(Program::Transition), first : Int32, count : Int32, byte : UInt8) : Int32
+      low = first
+      high = first + count
+      while low < high
+        middle = (low + high) >> 1
+        transition = table.unsafe_fetch(middle)
+        if transition.high < byte
+          low = middle + 1
+        elsif transition.low > byte
+          high = middle
+        else
+          return transition.target
+        end
+      end
+      ClassMemo::NO_TRANSITION
+    end
+
+    # Marks the pair *bit* visited; false when it already was.
+    @[AlwaysInline]
+    private def first_visit?(bit : Int64) : Bool
+      return mark_sparse?(bit) if @sparse
+      visited = @visited.to_unsafe + (bit >> 6)
+      mask = 1_u64 << (bit & 63)
+      return false if visited.value & mask != 0
+      visited.value |= mask
+      true
     end
 
     # Sets the most jobs a search may hold to *limit*. The stack is empty

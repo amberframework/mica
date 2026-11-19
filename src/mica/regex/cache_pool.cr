@@ -70,6 +70,30 @@ module Mica::Regex
       pool
     end
 
+    # One backtracker kept between programs for their first searches (see
+    # `FirstSearch`), which have no lease: a program compiled and searched
+    # once then reuses its bitset and job stack instead of allocating them.
+    # A spare holds no program and at most
+    # `BoundedBacktracker.spare_retained_bytes` (about 60 KiB); it is
+    # outside the pool's cap, as the backtracker a lease keeps is.
+    @spare_backtracker = Atomic(BoundedBacktracker?).new(nil)
+
+    # :nodoc:
+    # Takes the spare backtracker, if one is waiting (one atomic exchange,
+    # so two threads never share it), attached to *program*.
+    def take_spare_backtracker(program : Program) : BoundedBacktracker?
+      backtracker = @spare_backtracker.swap(nil)
+      backtracker.try(&.attach(program, program.slot_count))
+      backtracker
+    end
+
+    # :nodoc:
+    # Keeps *backtracker*, detached from its program, as the spare.
+    def keep_spare_backtracker(backtracker : BoundedBacktracker) : Nil
+      backtracker.detach
+      @spare_backtracker.set(backtracker)
+    end
+
     # Returns the bytes reserved now by every member of the pool.
     def reserved_bytes : Int64
       @reserved.get

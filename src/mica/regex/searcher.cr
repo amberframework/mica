@@ -225,6 +225,10 @@ module Mica::Regex
       plan = @plan = @program.plan
       lease = plan.lease(@cache_pool)
       lease.remember_validated(@haystack)
+      if backtracker = @backtracker
+        @backtracker = nil
+        @cache_pool.keep_spare_backtracker(backtracker)
+      end
       attach(lease)
     end
 
@@ -309,7 +313,9 @@ module Mica::Regex
 
     # Hands the leased caches back to the program for later calls. Without
     # a lease (an engine other than `Auto` or `NoAccelerators`), releases
-    # the Pike VM workspace, so its charge goes back to the pool now.
+    # the Pike VM workspace, so its charge goes back to the pool now, and
+    # gives the backtracker to the pool as its spare (see
+    # `CachePool#take_spare_backtracker`).
     def finish : Nil
       if (lease = @lease) && (plan = @plan)
         @lease = nil
@@ -317,9 +323,15 @@ module Mica::Regex
         @pike = nil
         @backtracker = nil
         plan.give_back(lease)
-      elsif pike = @pike
-        @pike = nil
-        pike.release
+      else
+        if pike = @pike
+          @pike = nil
+          pike.release
+        end
+        if backtracker = @backtracker
+          @backtracker = nil
+          @cache_pool.keep_spare_backtracker(backtracker)
+        end
       end
     end
 
@@ -924,8 +936,14 @@ module Mica::Regex
       @pike = PikeVM.new(@program, captures, @cache_pool)
     end
 
+    # The backtracker: the lease's, or for a call without one (a first
+    # search) the pool's spare, which `finish` gives back.
     private def backtracker : BoundedBacktracker
-      @backtracker ||= BoundedBacktracker.new(@program, @program.slot_count)
+      if backtracker = @backtracker
+        return backtracker
+      end
+      spare = @cache_pool.take_spare_backtracker(@program) unless @lease
+      @backtracker = spare || BoundedBacktracker.new(@program, @program.slot_count)
     end
   end
 end

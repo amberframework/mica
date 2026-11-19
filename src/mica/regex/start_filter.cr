@@ -113,7 +113,7 @@ module Mica::Regex
     def self.required_bytes(program : Program, meter : SearchMeter? = nil, at : Int32 = 0) : Array(UInt8)
       seen = StaticArray(Bool, 128).new(false)
       list_of_candidates = [] of UInt8
-      program.each_state do |state, _|
+      program.each_distinct_state do |state, _|
         meter.charge(1, at) if meter
         next unless state.kind.byte_range? && state.low == state.high && state.low < 0x80
         next if seen[state.low]

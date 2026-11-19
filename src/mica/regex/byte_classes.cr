@@ -18,7 +18,7 @@ module Mica::Regex
         boundaries[low] = true
         boundaries[high + 1] = true
       end
-      program.each_state do |state, _|
+      program.each_distinct_state do |state, _|
         mark.call(state.low.to_i32, state.high.to_i32) if state.kind.byte_range?
       end
       program.each_transition_range { |low, high| mark.call(low.to_i32, high.to_i32) }

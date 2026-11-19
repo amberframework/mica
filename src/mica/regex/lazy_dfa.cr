@@ -185,7 +185,7 @@ module Mica::Regex
     # The assertion kinds *program* uses.
     def self.looks_used(program : Program) : Array(Program::LookKind)
       list_of_kinds = [] of Program::LookKind
-      program.each_state { |state, _| list_of_kinds << Program::LookKind.new(state.argument) if state.kind.look? }
+      program.each_distinct_state { |state, _| list_of_kinds << Program::LookKind.new(state.argument) if state.kind.look? }
       list_of_kinds.uniq!
     end
 

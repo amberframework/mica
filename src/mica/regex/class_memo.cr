@@ -31,14 +31,21 @@ module Mica::Regex
     EXIT = -2
     # No target.
     NONE = -1
+    # No transition holds the byte (in `Block#entry_targets`).
+    NO_TRANSITION = Int32::MIN + 1
 
     # A class automaton: its states and transitions with targets relative
     # to the block (`EXIT` for the exit), and, for a block of the memo,
     # the same transitions as a table programs share
     # (`Program#list_of_shared_tables`): targets relative to the state
     # that holds them, `Program::SHARED_EXIT` for the exit.
+    #
+    # A memoized block also keeps *entry_targets*: for each byte value, the
+    # shared-table target of the entry state's transition that holds it, or
+    # `NO_TRANSITION`, so a first search reads a copy's lead byte with one
+    # load (see `BoundedBacktracker`).
     record Block, list_of_states : Array(Program::State), list_of_transitions : Array(Program::Transition),
-      entry : Int32, shared_table : Array(Program::Transition)? = nil
+      entry : Int32, shared_table : Array(Program::Transition)? = nil, entry_targets : Slice(Int32)? = nil
 
     # A set as a hash key: the hash is the set's digest, computed once when
     # the set was made, and equality is the same object (the shared sets of
@@ -122,7 +129,23 @@ module Mica::Regex
         ledger.charge_hash_entry(sizeof(UInt64) + sizeof(Int32), "a class block", 0)
         shared_nodes[digest] = state
       end
-      Block.new(list_of_states, list_of_transitions, node_states[0], shared_table(list_of_states, list_of_transitions, ledger))
+      table = shared_table(list_of_states, list_of_transitions, ledger)
+      entry = node_states[0]
+      Block.new(list_of_states, list_of_transitions, entry, table, entry_targets(list_of_states[entry], table, ledger))
+    end
+
+    # The target in *table* for each byte value at *entry* (a `Sparse`
+    # state; nil for any other), `NO_TRANSITION` where it has none.
+    private def self.entry_targets(entry : Program::State, table : Array(Program::Transition),
+                                   ledger : AllocationLedger) : Slice(Int32)?
+      return nil unless entry.kind.sparse?
+      ledger.charge(AllocationLedger.granules(256 * sizeof(Int32)), "a class entry table", 0)
+      targets = Slice(Int32).new(256, NO_TRANSITION)
+      entry.alternate.times do |offset|
+        transition = table[entry.argument + offset]
+        (transition.low..transition.high).each { |byte| targets[byte] = transition.target }
+      end
+      targets
     end
 
     # The transitions of a block as a shared table: each target relative

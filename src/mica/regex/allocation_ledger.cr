@@ -85,6 +85,13 @@ module Mica::Regex
       charge(element_bytes.to_i64 * GROWTH_FACTOR, what, offset)
     end
 
+    # Charges *count* elements of *element_bytes* appended to a growing
+    # array, as *count* calls of `charge_append` would.
+    def charge_appends(count : Int, element_bytes : Int, what : String, offset : Int32) : Nil
+      raise ArgumentError.new("Negative count: #{count}") if count < 0
+      charge(element_bytes.to_i64 * GROWTH_FACTOR * count, what, offset)
+    end
+
     # Charges one entry added to a `Hash` or `Set` whose key and value take
     # *entry_bytes*: the entry, its hash and its index slot, with the
     # growth of both tables (the hash object is charged when it is
