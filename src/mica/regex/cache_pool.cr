@@ -198,11 +198,15 @@ module Mica::Regex
 
     # Reserves enough to hold *total* bytes in all, in steps of at least
     # *step* bytes (`CachePool::RESERVATION_BYTES` for a lazy-DFA cache,
-    # 1 for a Pike VM workspace, which reserves its exact charge); false
-    # when the pool refuses.
-    def cover(total : Int64, step minimum_step : Int64 = CachePool::RESERVATION_BYTES) : Bool
+    # 1 for a Pike VM workspace, which reserves its exact charge), never
+    # holding more than *ceiling* bytes (a lazy-DFA cache's
+    # `max_cache_bytes`); false when *total* is over *ceiling* or the pool
+    # refuses.
+    def cover(total : Int64, step minimum_step : Int64 = CachePool::RESERVATION_BYTES,
+              ceiling : Int64 = Int64::MAX) : Bool
       return true if total <= @bytes
-      step = Math.max(minimum_step, total - @bytes)
+      return false if total > ceiling
+      step = Math.min(Math.max(minimum_step, total - @bytes), ceiling - @bytes)
       return false unless @pool.reserve(step)
       @bytes += step
       true

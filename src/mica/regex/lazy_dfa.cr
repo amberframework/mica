@@ -30,6 +30,9 @@ module Mica::Regex
   # whether it is a word character, and the state after it records whether
   # the previous one was. The search loops decode each non-ASCII character
   # once to choose the symbol (`wide_char`). The DFA never gives up on them.
+  # ASCII-mode word assertions (`(?aW)`) in the same pattern read their own
+  # look-behind bit, since a non-ASCII letter is a word character for one
+  # kind and not for the other.
   #
   # **Cost.** A transition the cache holds costs one table read. Building a
   # state costs one operation per NFA state its closure visits, at most
@@ -54,16 +57,19 @@ module Mica::Regex
     MINIMUM_BYTES_PER_STATE = 10
 
     # State flags (the first entry of a state's key).
-    TEXT_EDGE       =  0x01 # forward: at the start of the text; reverse: at its end
-    PREVIOUS_LF     =  0x02 # the byte read last was a line feed
-    PREVIOUS_WORD   =  0x04 # the byte read last was an ASCII word character
-    PREVIOUS_WIDE   =  0x08 # the byte read last was not ASCII
-    PREVIOUS_TAIL   =  0x10 # reverse: the byte read last was a continuation byte
-    FINAL_LF_EDGE   =  0x20 # reverse: just before a line feed that ends the text
-    UNANCHORED      =  0x40 # forward: start a thread at every character
-    START_PENDING   =  0x80 # forward: start a thread here (anchored start)
-    MATCH_BEHIND    = 0x100 # the closure before the last byte reached a match
-    LOOKBEHIND_BITS =  0x3F
+    TEXT_EDGE             =  0x01 # forward: at the start of the text; reverse: at its end
+    PREVIOUS_LF           =  0x02 # the byte read last was a line feed
+    PREVIOUS_WORD         =  0x04 # the byte read last was an ASCII word character (ASCII assertions)
+    PREVIOUS_WIDE         =  0x08 # the byte read last was not ASCII
+    PREVIOUS_TAIL         =  0x10 # reverse: the byte read last was a continuation byte
+    FINAL_LF_EDGE         =  0x20 # reverse: just before a line feed that ends the text
+    UNANCHORED            =  0x40 # forward: start a thread at every character
+    START_PENDING         =  0x80 # forward: start a thread here (anchored start)
+    PREVIOUS_UNICODE_WORD = 0x100 # the character read last was a Unicode word character (Unicode assertions)
+    MATCH_BEHIND          = 0x200 # the closure before the last byte reached a match
+    # A start state never carries `MATCH_BEHIND`, so its flags index a
+    # table of this many entries (see `DFACache#start_state`).
+    START_FLAG_COUNT = MATCH_BEHIND
 
     # Per-state markers in `DFACache` (one byte per state).
     MARK_MATCH = 0x01_u8
@@ -105,7 +111,7 @@ module Mica::Regex
       final_newline = looks.includes?(Program::LookKind::EndOfTextOrFinalNewline)
       line_end = looks.includes?(Program::LookKind::EndOfLine) ||
                  looks.includes?(Program::LookKind::NotBeforeLineFeed)
-      words = @unicode_words || looks.any? { |kind| LazyDFA.ascii_word?(kind) }
+      ascii_words = looks.any? { |kind| LazyDFA.ascii_word?(kind) }
       @final_lf = !@reverse && final_newline
       relevant = UNANCHORED | START_PENDING | MATCH_BEHIND
       if @reverse
@@ -117,7 +123,10 @@ module Mica::Regex
         relevant |= TEXT_EDGE if text_start || line_start
         relevant |= PREVIOUS_LF if line_start
       end
-      relevant |= PREVIOUS_WORD if words
+      # ASCII and Unicode word assertions disagree on a non-ASCII word
+      # character, so each kind keeps its own look-behind bit.
+      relevant |= PREVIOUS_WORD if ascii_words
+      relevant |= PREVIOUS_UNICODE_WORD if @unicode_words
       @relevant_flags = relevant
     end
 
@@ -361,16 +370,17 @@ module Mica::Regex
     end
 
     # The flags reading *byte* (read as *symbol*) leaves for the next
-    # position. A non-ASCII byte counts as a word byte when its symbol is a
-    # word symbol (with Unicode word assertions).
+    # position. An ASCII word byte sets both word bits; a non-ASCII byte
+    # sets only `PREVIOUS_UNICODE_WORD`, when its symbol is a word symbol
+    # (with Unicode word assertions).
     private def symbol_flags(byte : Int32, symbol : Int32) : Int32
       flags = 0
       flags |= PREVIOUS_LF if byte == Look::LINE_FEED
       if byte < 0x80
-        flags |= PREVIOUS_WORD if Look.word_code_point?(byte, true)
+        flags |= PREVIOUS_WORD | PREVIOUS_UNICODE_WORD if Look.word_code_point?(byte, true)
       else
         flags |= PREVIOUS_WIDE
-        flags |= PREVIOUS_WORD if symbol >= @word_offset
+        flags |= PREVIOUS_UNICODE_WORD if symbol >= @word_offset
       end
       flags
     end
@@ -497,7 +507,7 @@ module Mica::Regex
       in .search_start?
         nil
       in .word_boundary?, .not_word_boundary?, .word_start?, .word_end?
-        word_look(kind, flags & PREVIOUS_WORD != 0, symbol_word?(byte, symbol))
+        word_look(kind, flags & PREVIOUS_UNICODE_WORD != 0, symbol_word?(byte, symbol))
       in .word_boundary_ascii?, .not_word_boundary_ascii?, .word_start_ascii?, .word_end_ascii?
         word_look(kind, flags & PREVIOUS_WORD != 0, word_byte?(byte))
       end
@@ -587,7 +597,7 @@ module Mica::Regex
       in .search_start?
         nil
       in .word_boundary?, .not_word_boundary?, .word_start?, .word_end?
-        word_look(kind, symbol_word?(byte, symbol), flags & PREVIOUS_WORD != 0)
+        word_look(kind, symbol_word?(byte, symbol), flags & PREVIOUS_UNICODE_WORD != 0)
       in .word_boundary_ascii?, .not_word_boundary_ascii?, .word_start_ascii?, .word_end_ascii?
         word_look(kind, word_byte?(byte), flags & PREVIOUS_WORD != 0)
       end

@@ -31,10 +31,10 @@ module Mica::Regex
     # Returns a new cache for *dfa*, its fixed parts (the builder's scratch
     # space, the start-state table and the two dead states) reserved from
     # *pool* before they are allocated, or nil when the pool cannot supply
-    # them.
+    # them or they do not fit under its `max_cache_bytes`.
     def self.reserve?(dfa : LazyDFA, pool : CachePool) : DFACache?
       reservation = CacheReservation.new(pool)
-      return nil unless reservation.cover(initial_bytes(dfa))
+      return nil unless reservation.cover(initial_bytes(dfa), ceiling: pool.max_cache_bytes)
       new(dfa, pool, reservation)
     end
 
@@ -44,7 +44,7 @@ module Mica::Regex
     end
 
     protected def self.fixed_bytes_of(dfa : LazyDFA) : Int64
-      16_i64 * dfa.program.state_count + 4_i64 * LazyDFA::MATCH_BEHIND * 2 + 256
+      16_i64 * dfa.program.state_count + 4_i64 * LazyDFA::START_FLAG_COUNT + 256
     end
 
     protected def self.state_bytes_of(dfa : LazyDFA, key_size : Int32) : Int64
@@ -58,7 +58,7 @@ module Mica::Regex
       @list_of_marks = [] of UInt8
       @list_of_keys = [] of Array(Int32)
       @state_ids = {} of Array(Int32) => Int32
-      @start_states = Array(Int32).new(LazyDFA::MATCH_BEHIND * 2, -1)
+      @start_states = Array(Int32).new(LazyDFA::START_FLAG_COUNT, -1)
       @builder = DFABuilder.new(@dfa.program.state_count)
       reset_states
     end
@@ -152,7 +152,7 @@ module Mica::Regex
     end
 
     private def reserve(bytes : Int64) : Bool
-      @reservation.cover(bytes)
+      @reservation.cover(bytes, ceiling: @pool.max_cache_bytes)
     end
 
     # Clears the cache, charging one operation per state discarded. Returns
