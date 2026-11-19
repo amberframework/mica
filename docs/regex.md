@@ -767,7 +767,8 @@ much as the cost per byte:
   is asked (`Program::MIN_BYTES_AFTER`, so a pattern read once never pays
   for it), the fewest bytes a match reads from each state, in one 0-1
   breadth-first pass over its reversed edges. The backtracker drops a
-  pair whose state cannot reach a match before the bound, so
+  pair whose state cannot reach a match before the bound, in its tight
+  greedy-loop path and the loop's job of exits as in its general loop, so
   `([A-Za-z]{14})|…|([A-Za-z]{5})` over a seven-letter word tries the
   longer alternatives without reading them.
 - **Fixed-length starts.** When every match of a program spans the same
