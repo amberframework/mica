@@ -68,6 +68,19 @@ describe "Mica::Regex required bytes" do
     end
   end
 
+  describe "Program#required_bytes_for_first_search" do
+    it_satisfies "REGEX-R3-first-search", "counts the transitions a large class reads from its shared table" do
+      program = compiled_program("\\w{2}z")
+      program.list_of_transitions.should be_empty
+      program.list_of_shared_tables.should_not be_empty
+      # About 700 states read about 2,800 transitions from shared tables:
+      # within a 1,000-byte span's allowance (4,256), past a 200-byte one's
+      # (1,056), though the states alone fit it.
+      program.required_bytes_for_first_search(200).should be_nil
+      program.required_bytes_for_first_search(1_000).should eq(['z'.ord.to_u8])
+    end
+  end
+
   describe "a first search" do
     it_satisfies "REGEX-R3-first-search", "checks the required bytes of a small program before the backtracker runs" do
       pattern = Mica::Regex::Expression.new("(a|a)*b", compile_limits: TRUSTED)
