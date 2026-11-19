@@ -635,7 +635,13 @@ module Mica::Regex
       end
       unless found
         found = if BoundedBacktracker.fits?(@program, finish - start)
-                  backtracker.search(bytes, start, finish, byte_index, true, end_anchored, @meter, slots, Int32::MAX)
+                  workspace = backtracker
+                  # The pass must end at *finish*: an alternative too long
+                  # for the span fails before it reads.
+                  workspace.list_of_min_bytes = @program.list_of_min_bytes
+                  found_here = workspace.search(bytes, start, finish, byte_index, true, end_anchored, @meter, slots, Int32::MAX)
+                  workspace.list_of_min_bytes = nil
+                  found_here
                 else
                   capped_capture_pass(bytes, byte_index, start, finish, end_anchored, slots) ||
                     pike(true).search(bytes, start, finish, byte_index, true, end_anchored, false, @meter, slots,
@@ -789,8 +795,10 @@ module Mica::Regex
       slots = @capture_slots
       workspace = backtracker
       workspace.visit_limit = FirstSearch.visit_limit(@program)
+      workspace.list_of_min_bytes = @program.list_of_min_bytes
       found = workspace.search(bytes, byte_index, finish, byte_index, true, end_anchored, @meter, slots, Int32::MAX)
       workspace.visit_limit = Int64::MAX
+      workspace.list_of_min_bytes = nil
       return false if workspace.gave_up? || !found
       unless slots[1] == finish
         raise Mica::Error.new("internal error: the backtracker found no match ending at #{finish}")

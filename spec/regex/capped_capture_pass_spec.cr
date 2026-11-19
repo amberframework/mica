@@ -48,4 +48,32 @@ describe "Mica::Regex capped capture pass" do
     expected.should_not be_empty
     scan_groups(program, haystack, Mica::Regex::Engine::Auto).should eq(expected)
   end
+
+  it "finds the fewest bytes a match reads from each state, once a program has asked often enough" do
+    program = program_of("([a-z]{3})|(ab)|(x+)")
+    Mica::Regex::Program::MIN_BYTES_AFTER.times { program.list_of_min_bytes }
+    min_bytes = program.list_of_min_bytes.should_not be_nil
+    min_bytes[program.start_state].should eq(1)
+    program.list_of_states.each_with_index do |state, index|
+      min_bytes[index].should eq(0) if state.kind.match?
+    end
+    unreachable = program_of("a(?:b|\\z\\Ac)")
+    (Mica::Regex::Program::MIN_BYTES_AFTER + 1).times { unreachable.list_of_min_bytes }
+    unreachable.list_of_min_bytes.should_not be_nil
+    large = program_of(OVERLAPPING_WORDS)
+    (Mica::Regex::Program::MIN_BYTES_AFTER + 1).times { large.list_of_min_bytes.should be_nil }
+  end
+
+  it "reads the same groups with alternatives too long for the span dropped at once" do
+    source = "([A-Za-z]{14})|([A-Za-z]{13})|([A-Za-z]{12})|([A-Za-z]{11})|([A-Za-z]{10})|([A-Za-z]{9})|" \
+             "([A-Za-z]{8})|([A-Za-z]{7})|([A-Za-z]{6})|([A-Za-z]{5})|(a(?:b|c)?\\b)"
+    program = program_of(source)
+    haystack = "the quick brown fox jumps over extraordinarily lazy dogs, a ab ac abc; " * 6
+    expected = scan_groups(program, haystack, Mica::Regex::Engine::PikeVM)
+    expected.size.should be > Mica::Regex::Program::MIN_BYTES_AFTER
+    scan_groups(program, haystack, Mica::Regex::Engine::Auto).should eq(expected)
+    program.list_of_min_bytes.should_not be_nil
+    scan_groups(program, haystack, Mica::Regex::Engine::Auto).should eq(expected)
+    scan_groups(program, haystack, Mica::Regex::Engine::TwoPhase).should eq(expected)
+  end
 end

@@ -150,6 +150,11 @@ module Mica::Regex
     # `gave_up?`); unlimited unless set.
     setter visit_limit : Int64 = Int64::MAX
     @visits_left = Int64::MAX
+    # The fewest bytes a match reads from each state (see
+    # `Program#list_of_min_bytes`), for a search that must end by its
+    # bound: a pair whose state cannot reach a match before the bound is
+    # dropped unvisited. Nil (the default) checks nothing.
+    setter list_of_min_bytes : Array(Int32)? = nil
     # True when the last search reached `visit_limit` before it decided.
     getter? gave_up = false
 
@@ -177,6 +182,8 @@ module Mica::Regex
       @slot_count = slot_count
       @slots = Slice(Int64).new(slot_count, PikeVM::UNSET) if @slots.size < slot_count
       @visit_limit = Int64::MAX
+      # Another program numbers its states differently.
+      @list_of_min_bytes = nil
     end
 
     # Lets go of the program and frees what a spare does not keep (the job
@@ -185,6 +192,7 @@ module Mica::Regex
     # `spare_retained_bytes`, and no program.
     def detach : Nil
       @program = nil
+      @list_of_min_bytes = nil
       while @chunk_count > SPARE_JOB_CHUNKS
         last = @chunk_count - 1
         GC.free(@list_of_chunks[last].as(Void*))
@@ -271,6 +279,7 @@ module Mica::Regex
       sparse = @sparse
       visited_words = @visited.to_unsafe
       visits_left = @visits_left
+      min_bytes = @list_of_min_bytes
       while @job_count > 0
         job = pop_job
         if job.state < 0
@@ -280,6 +289,9 @@ module Mica::Regex
         current = job.state
         at = job.at.to_i32
         while true
+          # A state whose fewest bytes to a match pass the bound fails
+          # whatever it reads (the search reads nothing at or past it).
+          break if min_bytes && end_bound - at < min_bytes.unsafe_fetch(current)
           bit = current.to_i64 * columns + (at - start)
           if sparse
             break unless mark_sparse?(bit)
