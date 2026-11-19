@@ -85,8 +85,14 @@ module Mica::Regex
       @ledger.charge_object(instance_sizeof(Compiler), "the compiler", 0)
       @ledger.charge_array(capacity, sizeof(Program::State), "the program states", 0)
       @list_of_states = Array(Program::State).new(capacity)
-      @ledger.charge_array(0, sizeof(Program::Transition), "the program transitions", 0)
-      @list_of_transitions = [] of Program::Transition
+      transition_bound = transitions_bound
+      if PRESIZED_TRANSITIONS <= transition_bound <= @limits.max_program_states
+        @ledger.charge_array(transition_bound, sizeof(Program::Transition), "the program transitions", 0)
+        @list_of_transitions = Array(Program::Transition).new(transition_bound.to_i32)
+      else
+        @ledger.charge_array(0, sizeof(Program::Transition), "the program transitions", 0)
+        @list_of_transitions = [] of Program::Transition
+      end
       @ledger.charge_array(0, sizeof(Task), "the compiler task stack", 0)
       @list_of_tasks = [] of Task
       @ledger.charge_array(0, sizeof(Int32), "the compiler value stack", 0)
@@ -95,6 +101,55 @@ module Mica::Regex
       @class_trie = ClassTrie.new
       @ledger.charge_array(0, sizeof(Int32), "the class trie", 0)
       @list_of_trie_states = [] of Int32
+    end
+
+    # A program bound to have at least this many transitions gets its
+    # transition list allocated once, at the bound, rather than grown.
+    private PRESIZED_TRANSITIONS = 512_i64
+
+    # An upper bound on the transitions the program's classes emit: each
+    # class's transitions (a large class's memoized block exactly, a small
+    # class's UTF-8 byte ranges, which its trie never exceeds) times the
+    # copies its enclosing repetitions make (one more for an unbounded
+    # repetition's fresh copy). Saturates rather than overflows.
+    private def transitions_bound : Int64
+      total = 0_i64
+      @ledger.charge_array(0, sizeof({Hir::Node, Int64}), "the transition bound stack", 0)
+      stack = [] of {Hir::Node, Int64}
+      push_bound_entry(stack, @pattern.root, 1_i64)
+      while entry = stack.pop?
+        node, copies = entry
+        charge_work
+        case node
+        when Hir::Class
+          total = Preflight.add(total, Preflight.multiply(class_transitions(node.code_point_set), copies))
+        when Hir::LineBreak
+          total = Preflight.add(total, Preflight.multiply(OTHER_LINE_BREAKS.range_count.to_i64 * 4, copies))
+        when Hir::Repetition
+          maximum = node.maximum
+          repeated = maximum ? maximum.to_i64 : Math.max(node.minimum, 1).to_i64 + 1
+          push_bound_entry(stack, node.child, Preflight.multiply(copies, repeated))
+        when Hir::Capture
+          push_bound_entry(stack, node.child, copies)
+        when Hir::Concatenation
+          node.list_of_children.each { |child| push_bound_entry(stack, child, copies) }
+        when Hir::Alternation
+          node.list_of_branches.each { |branch| push_bound_entry(stack, branch, copies) }
+        end
+      end
+      total
+    end
+
+    private def push_bound_entry(stack : Array({Hir::Node, Int64}), node : Hir::Node, copies : Int64) : Nil
+      @ledger.charge_append(sizeof({Hir::Node, Int64}), "the transition bound stack", 0)
+      stack << {node, copies}
+    end
+
+    private def class_transitions(set : CodePointSet) : Int64
+      return memo_block(set).list_of_transitions.size.to_i64 if ClassMemo.memoized?(set)
+      byte_ranges = 0_i64
+      set.each_range { |first, last| byte_ranges += Utf8Sequences.count(first, last)[1] }
+      byte_ranges
     end
 
     protected def compile : Program
