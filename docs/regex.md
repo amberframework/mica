@@ -334,8 +334,9 @@ fast paths leave alone, and `Engine::TwoPhase` still runs them as R2 did:
    - the **bounded backtracker** when m × (L + 1) ≤ 256 Ki bits, for
      L = e − s: a depth-first search in priority order that visits each
      (state, position) pair once. Time O(m·(L + 1) + c); memory m·(L + 1)/8
-     bytes of bitset, a job stack of m·(L + 1) + 1 entries and c slots,
-     used only when that fits what the Pike VM workspace leaves of
+     bytes of bitset, a job stack of at most m·(L + 1) + 1 entries (grown
+     in doubling chunks as the search needs them, never copied) and c
+     slots, used only when that fits what the Pike VM workspace leaves of
      `max_pike_bytes` (`Program#backtracker_allowance`);
    - otherwise a **Pike VM** with every slot. Time O(m·c·(L + 1)); memory
      16·m·c + 32·m + 8·c bytes in one pointer-free buffer (two slot tables,
@@ -442,12 +443,17 @@ do, into a `DFACache` leased for the search:
   once in the search loop (the UCP word set is a bitmap below U+10000).
   The transition into a character then knows whether it is a word
   character, and the state after it records whether the previous one
-  was, so these assertions never send a search to the Pike VM.
+  was, so these assertions never send a search to the Pike VM. ASCII
+  word assertions (`(?aW)`) in the same pattern keep their own
+  previous-word bit, since a non-ASCII letter is a word character for
+  one kind and not for the other.
 - **Byte classes** (`ByteClasses`) group bytes no state can tell apart, so
   a state has one transition per class.
 - **Cost:** every byte read, every NFA state a new state's closure visits,
   and every state a cache clear discards is charged one operation. A cache
-  that would pass `CachePool#max_cache_bytes` is cleared; one that has
+  that would pass `CachePool#max_cache_bytes` is cleared, and no
+  reservation step takes a cache past that ceiling (a DFA whose fixed
+  parts do not fit under it runs the search on the Pike VM); one that has
   been cleared more than 3 times with fewer than 10 bytes read per state
   built since the last clear is thrashing, and the DFA gives up. So a
   search stays O(m·(n + 1)).
