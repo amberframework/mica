@@ -10,7 +10,7 @@ module Mica::Regex
   # in every generation of the cache.
   #
   # WARNING: A cache belongs to one search at a time.
-  class DFACache
+  class DFACache < PoolMember
     # The transition table (see the class description).
     getter transition_table : Array(Int32)
     # One byte of `LazyDFA::MARK_*` bits per state.
@@ -27,15 +27,33 @@ module Mica::Regex
     @bytes_since_clear = 0_i64
     @states_since_clear = 0
     @generation = 0
-    # IDLE, BUSY or EVICTING (see `acquire`, `evict_if_idle`).
-    @use = Atomic(Int32).new(BUSY)
 
-    private IDLE     = 0
-    private BUSY     = 1
-    private EVICTING = 2
+    # Returns a new cache for *dfa*, its fixed parts (the builder's scratch
+    # space, the start-state table and the two dead states) reserved from
+    # *pool* before they are allocated, or nil when the pool cannot supply
+    # them.
+    def self.reserve?(dfa : LazyDFA, pool : CachePool) : DFACache?
+      reservation = CacheReservation.new(pool)
+      return nil unless reservation.cover(initial_bytes(dfa))
+      new(dfa, pool, reservation)
+    end
 
-    def initialize(@dfa : LazyDFA, @pool : CachePool)
-      @reservation = CacheReservation.new(@pool)
+    # The bytes a new cache takes before its first state is built.
+    protected def self.initial_bytes(dfa : LazyDFA) : Int64
+      fixed_bytes_of(dfa) + 2 * state_bytes_of(dfa, 1)
+    end
+
+    protected def self.fixed_bytes_of(dfa : LazyDFA) : Int64
+      16_i64 * dfa.program.state_count + 4_i64 * LazyDFA::MATCH_BEHIND * 2 + 256
+    end
+
+    protected def self.state_bytes_of(dfa : LazyDFA, key_size : Int32) : Int64
+      # Table row, mark, key array (header and elements), hash entry and the
+      # key list slot.
+      4_i64 * dfa.stride + 1 + 32 + 4_i64 * key_size + 48 + 8
+    end
+
+    protected def initialize(@dfa : LazyDFA, @pool : CachePool, @reservation : CacheReservation)
       @transition_table = [] of Int32
       @list_of_marks = [] of UInt8
       @list_of_keys = [] of Array(Int32)
@@ -46,30 +64,9 @@ module Mica::Regex
       @pool.register(self)
     end
 
-    # Takes the cache for a search, waiting while the pool evicts it.
-    def acquire : Nil
-      until @use.compare_and_set(IDLE, BUSY)[1]
-        Fiber.yield
-      end
-    end
-
-    # Hands the cache back; the pool may now evict it.
-    def release_to_pool : Nil
-      @use.set(IDLE)
-    end
-
-    # Evicts the cache when no search holds it (see `evict`). Returns true
-    # when it did.
-    def evict_if_idle : Bool
-      return false unless @use.compare_and_set(IDLE, EVICTING)[1]
-      evict
-      @use.set(IDLE)
-      true
-    end
-
     # Bytes the builder's scratch space and the cache's fixed parts take.
     private def fixed_bytes : Int64
-      16_i64 * @dfa.program.state_count + 4_i64 * @start_states.size + 256
+      DFACache.fixed_bytes_of(@dfa)
     end
 
     # Records *count* bytes read by the search, for the thrash rule.
@@ -79,7 +76,7 @@ module Mica::Regex
     end
 
     # Drops every state and gives the memory back to the pool.
-    private def evict : Nil
+    protected def evict : Nil
       @transition_table = [] of Int32
       @list_of_marks = [] of UInt8
       @list_of_keys = [] of Array(Int32)
@@ -186,40 +183,7 @@ module Mica::Regex
     end
 
     private def state_bytes(key_size : Int32) : Int64
-      # Table row, mark, key array (header and elements), hash entry and the
-      # key list slot.
-      4_i64 * @dfa.stride + 1 + 32 + 4_i64 * key_size + 48 + 8
-    end
-  end
-
-  # :nodoc:
-  # The bytes one `DFACache` has reserved from its pool. It is a separate
-  # object, referring to nothing but the pool, so its finalizer can give
-  # the bytes back when the cache is collected without a finalization
-  # cycle (the cache itself is reachable from its own program).
-  class CacheReservation
-    getter bytes = 0_i64
-
-    def initialize(@pool : CachePool)
-    end
-
-    # Reserves enough to hold *total* bytes in all, in steps of
-    # `CachePool::RESERVATION_BYTES`; false when the pool refuses.
-    def cover(total : Int64) : Bool
-      return true if total <= @bytes
-      step = Math.max(CachePool::RESERVATION_BYTES, total - @bytes)
-      return false unless @pool.reserve(step)
-      @bytes += step
-      true
-    end
-
-    def release_all : Nil
-      @pool.release(@bytes)
-      @bytes = 0_i64
-    end
-
-    def finalize
-      @pool.release(@bytes)
+      DFACache.state_bytes_of(@dfa, key_size)
     end
   end
 

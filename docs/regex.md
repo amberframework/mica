@@ -483,11 +483,18 @@ it. The reverse-suffix and reverse-inner optimizations are not built (see
 
 ## Cache memory
 
-`CachePool` (roadmap 6.2.4) caps the bytes all lazy-DFA caches hold
-together, process wide, with an atomic counter: 64 MiB by default, each
-cache at most 2 MiB. A cache reserves 64 KiB at a time before it grows.
-When a reservation does not fit, idle caches are evicted (oldest first);
-when none is idle, the search runs on the Pike VM. The default pool is the
+`CachePool` (roadmap 6.2.1 and 6.2.4) caps the bytes that lazy-DFA caches
+and Pike VM workspaces hold together, process wide, with an atomic
+counter: 64 MiB by default, each cache at most 2 MiB. A cache reserves
+64 KiB at a time before it grows; a Pike VM workspace reserves its exact
+charge (`PikeVM.workspace_charge`, bounded by `max_pike_bytes`) before its
+buffer is allocated. When a reservation does not fit, idle members are
+evicted, least recently used first. When none is idle, a lazy DFA gives
+up and the search runs on the Pike VM; a Pike VM workspace the pool still
+cannot supply raises `SearchLimitError` naming `cache_pool_max_bytes`, so
+nothing is allocated past the cap and no wrong answer is returned. A call
+that fails as it starts (invalid UTF-8, a deadline already passed) hands
+its lease back first, so its caches stay evictable. The default pool is the
 one deliberate piece of global state; an application sets it once at its
 boundary, and callers that need isolation pass their own pool to
 `Expression.new(..., cache_pool:)`:
@@ -496,8 +503,8 @@ boundary, and callers that need isolation pass their own pool to
 Mica::Regex.configure_cache_pool(max_bytes: 32_i64 * 1024 * 1024)
 ```
 
-A cache is freed with its lease; the bytes it reserved go back to the pool
-then (a finalizer on a small reservation object, so collection needs no
+A cache or workspace is freed with its lease; the bytes it reserved go back
+to the pool then (a finalizer on a small reservation object, so collection needs no
 cycle through the program).
 
 ## Search complexity

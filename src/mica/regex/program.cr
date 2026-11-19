@@ -92,14 +92,25 @@ module Mica::Regex
                    @literal_set : LiteralSet? = nil)
     end
 
-    @plan : SearchPlan?
+    # Published through an atomic, so a thread that sees the plan sees it
+    # fully built.
+    @plan = Atomic(SearchPlan?).new(nil)
     @plan_mutex = Mutex.new
 
     # :nodoc:
     # The engines and caches of this program's searches (built on the first
     # search, see `SearchPlan`).
     def plan : SearchPlan
-      @plan || @plan_mutex.synchronize { @plan ||= SearchPlan.new(self) }
+      if built = @plan.get
+        return built
+      end
+      @plan_mutex.synchronize do
+        built = @plan.get
+        return built if built
+        built = SearchPlan.new(self)
+        @plan.set(built)
+        built
+      end
     end
 
     # Returns the number of states (m in the bounds).

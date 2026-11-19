@@ -329,8 +329,9 @@ module Mica::Regex
     # of bounds, read directly or as its complement. It only reads the
     # bounds it is given.
     private class RangeStream
-      @bounds : Array(Int32)?
-      @set_id : Int32
+      # The bounds as `first, last` pairs (an ASCII set's array, or the
+      # decoded table of a Unicode set).
+      @bounds : Slice(Int32)
       @count : Int32
       @index : Int32
       getter current_first : Int32 = 0
@@ -346,16 +347,15 @@ module Mica::Regex
       end
 
       def initialize(bounds : Array(Int32), @negated : Bool)
-        @bounds = bounds
-        @set_id = -1
+        @bounds = Slice.new(bounds.to_unsafe, bounds.size, read_only: true)
         @count = bounds.size // 2
         @index = 0
         load
       end
 
-      def initialize(@set_id : Int32, @negated : Bool)
-        @bounds = nil
-        @count = Unicode.range_count(@set_id)
+      def initialize(set_id : Int32, @negated : Bool)
+        @bounds = Unicode.decoded_ranges(set_id)
+        @count = Unicode.range_count(set_id)
         @index = 0
         load
       end
@@ -390,11 +390,7 @@ module Mica::Regex
       end
 
       private def range_at(index : Int32) : {Int32, Int32}
-        if bounds = @bounds
-          {bounds[index * 2], bounds[index * 2 + 1]}
-        else
-          Unicode.range_at(@set_id, index)
-        end
+        {@bounds[index * 2], @bounds[index * 2 + 1]}
       end
     end
   end

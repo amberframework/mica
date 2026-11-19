@@ -145,7 +145,10 @@ module EngineDifferential
   end
 
   private def self.matches?(program : Mica::Regex::Program, haystack : String, engine : Mica::Regex::Engine) : Bool
-    Mica::Regex::Searcher.new(program, haystack, SEARCH_LIMITS, nil, engine).matches?(0, Mica::Regex::MatchOptions::None)
+    searcher = Mica::Regex::Searcher.new(program, haystack, SEARCH_LIMITS, nil, engine)
+    searcher.matches?(0, Mica::Regex::MatchOptions::None)
+  ensure
+    searcher.try(&.finish)
   end
 
   private def self.find(program : Mica::Regex::Program, haystack : String, engine : Mica::Regex::Engine,
@@ -154,5 +157,7 @@ module EngineDifferential
     slots = searcher.find(0, Mica::Regex::MatchOptions::None, captures)
     return nil unless slots
     captures ? slots.to_a : slots.to_a.first(2)
+  ensure
+    searcher.try(&.finish)
   end
 end

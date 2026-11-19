@@ -33,9 +33,13 @@ module Mica::Regex
     getter prefilter : Prefilter?
     # True when the prefilter alone finds matches (see `LiteralSet#exact?`).
     getter? literal_search : Bool
-    @reverse : LazyDFA?
-    @one_pass : OnePassDFA?
-    @one_pass_built = false
+    # The lazily built parts are published through atomics, so a search
+    # on another thread that sees one sees it fully built.
+    @reverse = Atomic(LazyDFA?).new(nil)
+    @one_pass = Atomic(OnePassDFA?).new(nil)
+    # Set (after @one_pass) once the one-pass build ran, as its result may
+    # be nil.
+    @one_pass_built = Atomic(Int32).new(0)
     @mutex = Mutex.new
     @list_of_idle_leases = [] of SearchLease
     # The most recently returned lease, taken without the mutex.
@@ -52,20 +56,29 @@ module Mica::Regex
     # The reverse lazy DFA (built on first use), or nil.
     def reverse : LazyDFA?
       return nil unless @forward
-      @reverse || @mutex.synchronize { @reverse ||= LazyDFA.new(@program, @byte_classes, true) }
+      if built = @reverse.get
+        return built
+      end
+      @mutex.synchronize do
+        built = @reverse.get
+        return built if built
+        built = LazyDFA.new(@program, @byte_classes, true)
+        @reverse.set(built)
+        built
+      end
     end
 
     # The one-pass DFA (built on first use), or nil when the program is not
     # one-pass.
     def one_pass : OnePassDFA?
-      return @one_pass if @one_pass_built
+      return @one_pass.get if @one_pass_built.get == 1
       @mutex.synchronize do
-        unless @one_pass_built
-          @one_pass = OnePassDFA.build(@program, @byte_classes)
-          @one_pass_built = true
+        if @one_pass_built.get == 0
+          @one_pass.set(OnePassDFA.build(@program, @byte_classes))
+          @one_pass_built.set(1)
         end
       end
-      @one_pass
+      @one_pass.get
     end
 
     # Takes an idle lease (its caches warm from earlier searches) or makes
@@ -138,9 +151,14 @@ module Mica::Regex
       @searcher = searcher
     end
 
-    # Drops the kept workspaces (a lease that goes to the idle list).
+    # Drops the kept workspaces (a lease that goes to the idle list). The
+    # Pike VM workspace is taken back from the pool first, so the pool
+    # cannot evict it while it is released.
     def drop_workspaces : Nil
-      @pike.try(&.release)
+      if pike = @pike
+        pike.acquire
+        pike.release
+      end
       @pike = nil
       @backtracker = nil
       @searcher = nil
@@ -149,12 +167,15 @@ module Mica::Regex
     def initialize(@plan : SearchPlan, @pool : CachePool)
     end
 
-    def forward_cache(dfa : LazyDFA) : DFACache
-      @forward_cache ||= DFACache.new(dfa, @pool)
+    # The forward cache, made on first use; nil when the pool cannot supply
+    # a new cache (the search then runs on the Pike VM).
+    def forward_cache(dfa : LazyDFA) : DFACache?
+      @forward_cache ||= DFACache.reserve?(dfa, @pool)
     end
 
-    def reverse_cache(dfa : LazyDFA) : DFACache
-      @reverse_cache ||= DFACache.new(dfa, @pool)
+    # The reverse cache, as `forward_cache`.
+    def reverse_cache(dfa : LazyDFA) : DFACache?
+      @reverse_cache ||= DFACache.reserve?(dfa, @pool)
     end
 
     # True when *haystack* is the very `String` this lease validated last:
@@ -169,16 +190,21 @@ module Mica::Regex
       @validated = WeakRef.new(haystack)
     end
 
-    # Takes the caches back from the pool for a search.
+    # Takes the caches and the kept Pike VM workspace back from the pool
+    # for a search.
     def wake : Nil
       @forward_cache.try(&.acquire)
       @reverse_cache.try(&.acquire)
+      @pike.try(&.acquire)
     end
 
-    # Hands the caches to the pool while the lease is idle (evictable).
+    # Hands the caches and the kept Pike VM workspace to the pool while the
+    # lease is idle (evictable).
     def sleep : Nil
-      @forward_cache.try(&.release_to_pool)
-      @reverse_cache.try(&.release_to_pool)
+      tick = @pool.tick
+      @forward_cache.try(&.release_to_pool(tick))
+      @reverse_cache.try(&.release_to_pool(tick))
+      @pike.try(&.release_to_pool(tick))
     end
   end
 end

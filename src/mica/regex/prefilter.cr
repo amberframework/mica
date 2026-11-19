@@ -124,6 +124,8 @@ module Mica::Regex
   class PrefilterScan
     GUARD_CANDIDATES = 32
     MINIMUM_SKIP     =  8
+    # The bytes a scan reads between two charges to the meter.
+    CHARGE_CHUNK = 4096
 
     getter prefilter : Prefilter
     # How many candidates the scan has verified.
@@ -203,17 +205,32 @@ module Mica::Regex
 
     # Returns the first position at or after *from* holding *needle*
     # (`Int32::MAX` when none), reusing the last result while it is still
-    # ahead, and charging each byte `memchr` reads once.
+    # ahead, and charging each byte `memchr` reads once. The scan runs in
+    # `CHARGE_CHUNK` windows, each charged before the next is read, so a
+    # search over budget stops within one window of its limit.
     private def next_needle(slot : Int32, needle : UInt8, from : Int32, meter : SearchMeter) : Int32
       found_at = @found_at[slot]
       return found_at if from >= @scanned_from[slot] && found_at >= from
       return Int32::MAX if from >= @haystack.size
-      index = @haystack.index(needle, from)
-      meter.charge((index || @haystack.size) - from + 1, from)
+      index = nil
+      at = from
+      while at < @haystack.size
+        stop = at + Math.min(CHARGE_CHUNK, @haystack.size - at)
+        if found = @haystack[at, stop - at].index(needle)
+          index = at + found
+          meter.charge(found + 1, at)
+          break
+        end
+        meter.charge(stop - at, at)
+        at = stop
+      end
+      meter.charge(1, @haystack.size) unless index
       @scanned_from[slot] = from
       @found_at[slot] = index || Int32::MAX
     end
 
+    # The packed search, charging each byte it reads once, in
+    # `CHARGE_CHUNK` windows and at each candidate.
     private def find_packed(from : Int32, meter : SearchMeter) : Int32
       width = @prefilter.mask_width
       masks = @prefilter.masks
@@ -221,21 +238,25 @@ module Mica::Regex
       at = Math.max(from, 0)
       bytes = @haystack.to_unsafe
       table = masks.to_unsafe
-      checked = 0
       while at <= last
-        bits = table[bytes[at]]
-        if width > 1
-          bits &= table[256 + bytes[at + 1]]
-          bits &= table[512 + bytes[at + 2]] if width > 2
+        stop = Math.min(last, at + (CHARGE_CHUNK - 1))
+        chunk_from = at
+        while at <= stop
+          bits = table[bytes[at]]
+          if width > 1
+            bits &= table[256 + bytes[at + 1]]
+            bits &= table[512 + bytes[at + 2]] if width > 2
+          end
+          if bits != 0
+            meter.charge(at - chunk_from + 1, at)
+            return at if accept?(at, meter, bits)
+            chunk_from = at + 1
+          end
+          at += 1
         end
-        if bits != 0
-          meter.charge(at - from - checked + 1, at)
-          checked = at - from + 1
-          return at if accept?(at, meter, bits)
-        end
-        at += 1
+        meter.charge(at - chunk_from, chunk_from) if at > chunk_from
       end
-      meter.charge(Math.max(0, @haystack.size - from - checked), from)
+      meter.charge(@haystack.size - at, at) if at < @haystack.size
       -1
     end
   end

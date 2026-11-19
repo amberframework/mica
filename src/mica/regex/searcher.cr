@@ -96,17 +96,19 @@ module Mica::Regex
     @lease : SearchLease?
     @scan : PrefilterScan?
     @prefilter_off = false
+    # Searches started in this call (see `check_resumed_deadline`).
+    @searches_started = 0
 
     def initialize(@program : Program, @haystack : String, limits : SearchLimits, timeout : Time::Span?,
-                   @engine : Engine = Engine::Auto, cache_pool : CachePool = CachePool.default,
+                   @engine : Engine = Engine::Auto, @cache_pool : CachePool = CachePool.default,
                    lease : SearchLease? = nil)
       @meter = SearchMeter.new(limits, @program.state_count, @haystack.bytesize, timeout)
       @capture_slots = Slice(Int64).new(@program.slot_count, PikeVM::UNSET)
       if @engine.automata?
         plan = @plan = @program.plan
-        attach(lease || plan.lease(cache_pool))
+        attach(lease || plan.lease(@cache_pool))
       end
-      begin_call
+      begin_call_or_finish
     end
 
     # Returns a searcher for one call of the default path over *haystack*:
@@ -130,16 +132,28 @@ module Mica::Regex
       @line_feed_at = -1
       @scan = nil
       @prefilter_off = false
+      @searches_started = 0
       @dfa_gave_up = false
       @last_path = Path::None
+      @cache_pool = lease.pool
       attach(lease)
-      begin_call
+      begin_call_or_finish
     end
 
     private def attach(lease : SearchLease) : Nil
       @lease = lease
       @pike = lease.take_pike
       @backtracker = lease.take_backtracker
+    end
+
+    # Starts the call; when that raises (an invalid haystack, a deadline
+    # already passed, a validation charge over the budget), gives the lease
+    # back first, so its caches return to the pool idle and evictable.
+    private def begin_call_or_finish : Nil
+      begin_call
+    rescue error
+      finish
+      raise error
     end
 
     # Validates the haystack (unless the lease validated this very string)
@@ -168,7 +182,9 @@ module Mica::Regex
       @prefilter_off || !!@scan.try(&.ineffective?)
     end
 
-    # Hands the leased caches back to the program for later calls.
+    # Hands the leased caches back to the program for later calls. Without
+    # a lease (an engine other than `Auto` or `NoAccelerators`), releases
+    # the Pike VM workspace, so its charge goes back to the pool now.
     def finish : Nil
       if (lease = @lease) && (plan = @plan)
         @lease = nil
@@ -176,6 +192,9 @@ module Mica::Regex
         @pike = nil
         @backtracker = nil
         plan.give_back(lease)
+      elsif pike = @pike
+        @pike = nil
+        pike.release
       end
     end
 
@@ -183,6 +202,7 @@ module Mica::Regex
     # *byte_index* (group 0 only unless *captures*), or nil. Raises
     # `ArgumentError` when *byte_index* is negative or inside a character.
     def find(byte_index : Int32, options : MatchOptions, captures : Bool) : Slice(Int64)?
+      check_resumed_deadline(byte_index)
       bytes = @haystack.to_slice
       return nil if byte_index > bytes.size
       check_start(bytes, byte_index)
@@ -210,6 +230,7 @@ module Mica::Regex
     # Returns true when anything matches at or after *byte_index*; stops at
     # the first match it reaches.
     def matches?(byte_index : Int32, options : MatchOptions) : Bool
+      check_resumed_deadline(byte_index)
       bytes = @haystack.to_slice
       return false if byte_index > bytes.size
       check_start(bytes, byte_index)
@@ -220,9 +241,10 @@ module Mica::Regex
           return literal_span(bytes, byte_index)
         end
         lease = @lease || raise Mica::Error.new("internal error: no lease")
-        found = dfa.find_end(lease.forward_cache(dfa), bytes, byte_index, anchored, true,
-          prefilter_scan(bytes, anchored), @meter)
-        return found >= 0 unless found == LazyDFA::GAVE_UP
+        if cache = lease.forward_cache(dfa)
+          found = dfa.find_end(cache, bytes, byte_index, anchored, true, prefilter_scan(bytes, anchored), @meter)
+          return found >= 0 unless found == LazyDFA::GAVE_UP
+        end
         @dfa_gave_up = true
       end
       pike(false).search(bytes, byte_index, bytes.size, byte_index, anchored, end_anchored, true, @meter, @span_slots,
@@ -268,8 +290,12 @@ module Mica::Regex
           return literal_span(bytes, byte_index)
         end
         lease = @lease || raise Mica::Error.new("internal error: no lease")
-        finish = dfa.find_end(lease.forward_cache(dfa), bytes, byte_index, anchored, false,
-          prefilter_scan(bytes, anchored), @meter)
+        cache = lease.forward_cache(dfa)
+        finish = if cache
+                   dfa.find_end(cache, bytes, byte_index, anchored, false, prefilter_scan(bytes, anchored), @meter)
+                 else
+                   LazyDFA::GAVE_UP
+                 end
         return false if finish == LazyDFA::NO_MATCH
         if finish >= 0
           start = anchored ? byte_index : reverse_start(lease, bytes, finish, byte_index)
@@ -289,7 +315,8 @@ module Mica::Regex
 
     private def reverse_start(lease : SearchLease, bytes : Bytes, finish : Int32, lower_bound : Int32) : Int32
       reverse = @program.plan.reverse || return LazyDFA::GAVE_UP
-      start = reverse.find_start(lease.reverse_cache(reverse), bytes, finish, lower_bound, @meter)
+      cache = lease.reverse_cache(reverse) || return LazyDFA::GAVE_UP
+      start = reverse.find_start(cache, bytes, finish, lower_bound, @meter)
       if start == LazyDFA::NO_MATCH
         raise Mica::Error.new("internal error: the reverse DFA found no start for the match ending at #{finish}")
       end
@@ -351,6 +378,15 @@ module Mica::Regex
       @line_feed_at = line_feed_at
     end
 
+    # Reads the deadline again when a later search of the call starts: the
+    # caller's block (an `each_match` or `gsub` block) runs between searches,
+    # and its time counts against the call's timeout. The first search was
+    # checked when the call started.
+    private def check_resumed_deadline(byte_index : Int32) : Nil
+      @meter.enforce_deadline(byte_index) if @searches_started > 0
+      @searches_started += 1
+    end
+
     private def check_start(bytes : Bytes, byte_index : Int32) : Nil
       raise ArgumentError.new("Negative byte index: #{byte_index}") if byte_index < 0
       if byte_index < bytes.size && bytes.unsafe_fetch(byte_index) & 0xC0 == 0x80
@@ -358,15 +394,20 @@ module Mica::Regex
       end
     end
 
-    # Returns the workspace, in the capture layout when *captures*. A span
+    # Returns the workspace, in the capture layout when *captures*, leased
+    # from the call's `CachePool` (`SearchLimitError` naming
+    # `cache_pool_max_bytes` when the pool cannot supply it). A span
     # workspace is released before a capture one replaces it.
     private def pike(captures : Bool) : PikeVM
       if workspace = @pike
-        return workspace if workspace.captures? || !captures
-        workspace.release
+        if workspace.captures? || !captures
+          workspace.prepare
+          return workspace
+        end
         @pike = nil
+        workspace.release
       end
-      @pike = PikeVM.new(@program, captures)
+      @pike = PikeVM.new(@program, captures, @cache_pool)
     end
 
     private def backtracker : BoundedBacktracker

@@ -149,30 +149,115 @@ describe "Mica::Regex R3 engines" do
       end
     end
 
-    it_satisfies "REGEX-R3-cache-pool", "runs a search on the Pike VM when the pool has no room left" do
-      pool = Mica::Regex::CachePool.new(max_bytes: 1_i64, max_cache_bytes: 128_i64 * 1024)
+    it_satisfies "REGEX-R3-cache-pool", "runs a search on the Pike VM when the pool has no room for a cache" do
+      # Room for a Pike VM workspace, not for one cache reservation step.
+      pool = Mica::Regex::CachePool.new(max_bytes: 4096_i64, max_cache_bytes: 128_i64 * 1024)
       found = searcher("[a-c]+d", "xxabcabd", Mica::Regex::Engine::Auto, pool)
       found.find(0, Mica::Regex::MatchOptions::None, false).try(&.to_a).should eq([2, 8])
       found.dfa_gave_up?.should be_true
-      pool.reserved_bytes.should eq(0)
+      found.last_path.should eq(Mica::Regex::Searcher::Path::PikeVM)
+      pool.reserved_bytes.should be > 0
+      pool.reserved_bytes.should be <= pool.max_bytes
+      found.finish
     end
 
-    it_satisfies "REGEX-R3-cache-pool", "evicts an idle cache to make room for a busy one" do
+    it_satisfies "REGEX-R3-cache-pool", "raises SearchLimitError when the pool cannot supply a Pike VM workspace" do
+      pool = Mica::Regex::CachePool.new(max_bytes: 1_i64, max_cache_bytes: 128_i64 * 1024)
+      found = searcher("[a-c]+d", "xxabcabd", Mica::Regex::Engine::Auto, pool)
+      error = expect_raises(Mica::Regex::SearchLimitError) do
+        found.find(0, Mica::Regex::MatchOptions::None, false)
+      end
+      error.limit_name.should eq("cache_pool_max_bytes")
+      error.limit_value.should eq(1)
+      pool.reserved_bytes.should eq(0)
+      found.finish
+    end
+
+    it_satisfies "REGEX-R3-cache-pool", "evicts the least recently used idle cache to make room for a busy one" do
       # Each search reserves one step for its forward cache and one for its
-      # reverse cache, so the pool holds one search's caches.
-      pool = Mica::Regex::CachePool.new(max_bytes: Mica::Regex::CachePool::RESERVATION_BYTES * 2,
-        max_cache_bytes: Mica::Regex::CachePool::RESERVATION_BYTES)
-      first = searcher("[a-c]+d", "xxabcabd", Mica::Regex::Engine::Auto, pool)
-      first.find(0, Mica::Regex::MatchOptions::None, false)
-      first.finish
-      pool.reserved_bytes.should eq(pool.max_bytes)
-      second = searcher("[d-f]+g", "xxdefdeg", Mica::Regex::Engine::Auto, pool)
-      second.find(0, Mica::Regex::MatchOptions::None, false).try(&.to_a).should eq([2, 8])
-      second.dfa_gave_up?.should be_false
-      pool.reserved_bytes.should eq(pool.max_bytes)
-      third = searcher("[g-i]+j", "xxghighj", Mica::Regex::Engine::Auto, pool)
-      third.find(0, Mica::Regex::MatchOptions::None, false).try(&.to_a).should eq([2, 8])
-      third.dfa_gave_up?.should be_true
+      # reverse cache; the pool holds two searches' caches and a Pike VM
+      # workspace.
+      step = Mica::Regex::CachePool::RESERVATION_BYTES
+      pool = Mica::Regex::CachePool.new(max_bytes: step * 4 + 8192, max_cache_bytes: step)
+      first = program("[a-c]+d")
+      second = program("[d-f]+g")
+      third = program("[g-i]+j")
+      run = ->(target : Mica::Regex::Program, haystack : String) do
+        found = Mica::Regex::Searcher.new(target, haystack, LIMITS, nil, Mica::Regex::Engine::Auto, pool)
+        span = found.find(0, Mica::Regex::MatchOptions::None, false).try(&.to_a)
+        {span, found}
+      end
+      run.call(first, "xxabcabd")[1].finish
+      run.call(second, "xxdefdeg")[1].finish
+      # The first program is used again, so the second is now the least
+      # recently used.
+      run.call(first, "xxabcabd")[1].finish
+      span, busy = run.call(third, "xxghighj")
+      span.should eq([2, 8])
+      busy.dfa_gave_up?.should be_false
+      span, again = run.call(first, "xxabcabd")
+      span.should eq([2, 8])
+      again.dfa_gave_up?.should be_false
+      span, evicted = run.call(second, "xxdefdeg")
+      span.should eq([2, 8])
+      evicted.dfa_gave_up?.should be_true
+      pool.reserved_bytes.should be <= pool.max_bytes
+      {busy, again, evicted}.each(&.finish)
+    end
+
+    it_satisfies "REGEX-R3-cache-pool", "gives the lease back when a call fails to start" do
+      step = Mica::Regex::CachePool::RESERVATION_BYTES
+      # Room for one expression's two caches and a Pike VM workspace.
+      pool = Mica::Regex::CachePool.new(max_bytes: step * 2 + 8192, max_cache_bytes: step)
+      warm = Mica::Regex::Expression.new("[a-c]+d", compile_limits: TRUSTED, cache_pool: pool)
+      warm.match("xxabcabd", limits: LIMITS).try(&.[0]).should eq("abcabd")
+      invalid = String.new(Bytes[0x61, 0xff, 0x62])
+      expect_raises(Mica::EncodingError) { warm.match(invalid, limits: LIMITS) }
+      expect_raises(Mica::DeadlineExceededError) { warm.match("xxabcabd", limits: LIMITS, timeout: -1.second) }
+      fresh = program("[d-f]+g")
+      found = Mica::Regex::Searcher.open(fresh, "xxdefdeg", LIMITS, nil, pool)
+      found.find(0, Mica::Regex::MatchOptions::None, false).try(&.to_a).should eq([2, 8])
+      found.last_path.should eq(Mica::Regex::Searcher::Path::LazyDFA)
+      found.dfa_gave_up?.should be_false
+      found.finish
+    end
+
+    it_satisfies "REGEX-R3-cache-pool", "admits exactly as many Pike VM workspaces as the pool holds" do
+      # Roadmap 6.2.1 concurrency gate: the Pike VM path is forced, and the
+      # pool is sized for exactly 8 workspaces of the program.
+      target = program("[a-c]{200}d")
+      charge = Mica::Regex::PikeVM.workspace_charge(target, captures: false)
+      pool = Mica::Regex::CachePool.new(max_bytes: charge * 8)
+      haystack = "x" + "abc" * 70 + "d"
+      expected = [(haystack.bytesize - 201).to_i64, haystack.bytesize.to_i64]
+      leased = Channel(Nil).new
+      barrier = Channel(Nil).new
+      done = Channel(Array(Int64)?).new
+      8.times do
+        spawn do
+          holder = Mica::Regex::Searcher.new(target, haystack, LIMITS, nil, Mica::Regex::Engine::PikeVM, pool)
+          first = holder.find(0, Mica::Regex::MatchOptions::None, false).try(&.to_a)
+          leased.send(nil)
+          barrier.receive
+          second = holder.find(0, Mica::Regex::MatchOptions::None, false).try(&.to_a)
+          holder.finish
+          done.send(first == second ? first : nil)
+        end
+      end
+      8.times { leased.receive }
+      pool.reserved_bytes.should eq(charge * 8)
+      8.times do
+        refused = Mica::Regex::Searcher.new(target, haystack, LIMITS, nil, Mica::Regex::Engine::PikeVM, pool)
+        error = expect_raises(Mica::Regex::SearchLimitError) do
+          refused.find(0, Mica::Regex::MatchOptions::None, false)
+        end
+        error.limit_name.should eq("cache_pool_max_bytes")
+        refused.finish
+        pool.reserved_bytes.should eq(charge * 8)
+      end
+      8.times { barrier.send(nil) }
+      8.times { done.receive.should eq(expected) }
+      pool.reserved_bytes.should eq(0)
     end
 
     it_satisfies "REGEX-R3-cache-pool", "is configured once at the application boundary" do

@@ -98,23 +98,14 @@ module Mica::Regex
       end
     end
 
-    # Returns range *index* of static set *set_id* as `{first, last}`.
-    def self.range_at(set_id : Int32, index : Int32) : {Int32, Int32}
-      bounds = decoded_bounds(set_id)
-      raise IndexError.new unless 0 <= index && index * 2 < bounds.size
-      {bounds.unsafe_fetch(index * 2), bounds.unsafe_fetch(index * 2 + 1)}
-    end
-
-    @@decoded_bounds = Array(Slice(Int32)?).new(Tables::SETS.size, nil)
-    @@decoded_mutex = Mutex.new
-
-    # The ranges of static set *set_id* as `first, last` pairs, decoded
-    # from the hex table once per process on first use (a set's classes are
-    # lowered from it every time a pattern uses it).
-    private def self.decoded_bounds(set_id : Int32) : Slice(Int32)
-      if bounds = @@decoded_bounds[set_id]
-        return bounds
-      end
+    # Returns the ranges of static set *set_id* as `first, last` pairs,
+    # decoded from the hex table once per process on first use (a set is
+    # lowered from them every time a pattern uses it). Callers read the
+    # slice and never write it.
+    def self.decoded_ranges(set_id : Int32) : Slice(Int32)
+      # Every read and write of the memo is under the mutex: a
+      # `Slice(Int32)?` is wider than a machine word, so an unsynchronized
+      # read could see a torn value. Callers take the slice once per class.
       @@decoded_mutex.synchronize do
         @@decoded_bounds[set_id] ||= begin
           bounds = Slice(Int32).new(range_count(set_id) * 2)
@@ -128,6 +119,9 @@ module Mica::Regex
         end
       end
     end
+
+    @@decoded_bounds = Array(Slice(Int32)?).new(Tables::SETS.size, nil)
+    @@decoded_mutex = Mutex.new
 
     # Returns true when *code_point* is in static set *set_id* (a binary
     # search).

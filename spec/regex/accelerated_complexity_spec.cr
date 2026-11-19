@@ -25,6 +25,8 @@ module AcceleratedComplexity
       offset = finish == found[0] ? finish + 1 : finish
     end
     {searcher.meter.operations, count}
+  ensure
+    searcher.try(&.finish)
   end
 end
 

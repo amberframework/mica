@@ -34,15 +34,22 @@ module Mica::Regex
   #
   # A workspace serves any number of searches in one call, one at a time.
   #
+  # **Pool lease** (roadmap 6.2.1). A workspace is a `CachePool` member:
+  # its charge is reserved from the pool before the buffer is allocated,
+  # and `SearchLimitError` naming `cache_pool_max_bytes` is raised when the
+  # pool cannot supply it. A workspace parked between calls is idle and
+  # the pool may evict it (free its buffer); `prepare` allocates it again,
+  # reserving first, before the next search.
+  #
   # WARNING: A workspace belongs to one fiber.
-  class PikeVM
+  class PikeVM < PoolMember
     # A slot that holds no position.
     UNSET = -1_i64
 
     # Returns the bytes the collector hands out for a workspace of
     # *program* in the span layout or (with *captures*) the capture
-    # layout: the buffer and this object, each rounded up to the
-    # collector's granule (`AllocationLedger.granules`).
+    # layout: the buffer, this object and its pool reservation, each
+    # rounded up to the collector's granule (`AllocationLedger.granules`).
     def self.workspace_charge(program : Program, captures : Bool) : Int64
       workspace_charge(program.state_count.to_i64, program.slot_count.to_i64, captures)
     end
@@ -54,7 +61,8 @@ module Mica::Regex
                 else
                   Program.span_workspace_bytes(state_count)
                 end
-      Preflight.add(AllocationLedger.granules(payload), AllocationLedger.granules(instance_sizeof(PikeVM)))
+      Preflight.add(Preflight.add(AllocationLedger.granules(payload), AllocationLedger.granules(instance_sizeof(PikeVM))),
+        AllocationLedger.granules(instance_sizeof(CacheReservation)))
     end
 
     # True when the workspace has the capture layout.
@@ -76,9 +84,52 @@ module Mica::Regex
     @current_size = 0
     @next_size = 0
 
-    def initialize(@program : Program, @captures : Bool)
-      states = @state_count = @program.state_count
-      slots_per_thread = @slot_count = @captures ? @program.slot_count : 0
+    @reservation : CacheReservation
+    @charge : Int64
+
+    # Builds a workspace of *program*, reserving its charge from *pool*
+    # first. Raises `SearchLimitError` naming `cache_pool_max_bytes` when
+    # the pool cannot supply it.
+    def initialize(@program : Program, @captures : Bool, pool : CachePool)
+      @state_count = @program.state_count
+      @slot_count = @captures ? @program.slot_count : 0
+      @charge = PikeVM.workspace_charge(@program, @captures)
+      @reservation = CacheReservation.new(pool)
+      reserve_charge
+      @buffer = Pointer(Int64).null
+      @current_slots = @next_slots = Pointer(Int64).null
+      @current_starts = @next_starts = Pointer(Int32).null
+      @current_dense = @current_sparse = @next_dense = @next_sparse = Pointer(UInt32).null
+      @stack = @scratch = Pointer(Int64).null
+      allocate
+      pool.register(self)
+    end
+
+    private def reserve_charge : Nil
+      return if @reservation.cover(@charge, step: 1_i64)
+      pool = @reservation.pool
+      raise SearchLimitError.new("cache_pool_max_bytes", pool.max_bytes,
+        "A Pike VM workspace of #{@charge} bytes, with #{pool.reserved_bytes} bytes of the pool held,",
+        Core::Position.new(0_i64))
+    end
+
+    # Makes the workspace ready for a search after the pool evicted it:
+    # reserves its charge again (raising `SearchLimitError` when the pool
+    # cannot supply it) and allocates the buffer.
+    def prepare : Nil
+      return unless @buffer.null?
+      reserve_charge
+      allocate
+    end
+
+    # Frees the buffer and gives the charge back (see `CachePool`).
+    protected def evict : Nil
+      release
+    end
+
+    private def allocate : Nil
+      states = @state_count
+      slots_per_thread = @slot_count
       # In 8-byte words: 2·m·c slots (captures only), 4·m UInt32 set
       # entries (2·m words), the stack (2·m words with captures, m without),
       # c scratch slots, and in the span layout 2·m Int32 starts (m words).
@@ -99,12 +150,14 @@ module Mica::Regex
       @scratch = @stack + stack_words
     end
 
-    # Hands the buffer back to the collector. The workspace must not be
-    # used afterward; `Searcher` calls this before it builds a capture
-    # workspace in place of a span one, so the two are never alive at once.
+    # Hands the buffer back to the collector and the charge back to the
+    # pool. `Searcher` calls this before it builds a capture workspace in
+    # place of a span one, so the two are never alive at once, and when a
+    # call that keeps no workspace ends. `prepare` makes it usable again.
     def release : Nil
-      GC.free(@buffer.as(Void*))
+      GC.free(@buffer.as(Void*)) unless @buffer.null?
       @buffer = Pointer(Int64).null
+      @reservation.release_all
     end
 
     # Searches *haystack* for the leftmost-first match that starts at a

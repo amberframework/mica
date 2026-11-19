@@ -31,6 +31,8 @@ module SearchComplexity
     searcher = Mica::Regex::Searcher.new(program, haystack, WIDE, nil, engine)
     searcher.find(0, Mica::Regex::MatchOptions::None, captures)
     searcher.meter.operations
+  ensure
+    searcher.try(&.finish)
   end
 
   # Runs every search of a scan (each_match's offsets) on one searcher and
@@ -43,6 +45,8 @@ module SearchComplexity
       offset = finish == found[0] ? finish + 1 : finish
     end
     searcher.meter.operations
+  ensure
+    searcher.try(&.finish)
   end
 
   # Checks the envelope and the growth of *measurements*, records them,

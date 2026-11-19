@@ -99,7 +99,8 @@ describe "Mica::Regex R2 review round 3" do
       program = expression.program
       program.state_count.should be > 65_536
       expected = Mica::Regex::AllocationLedger.granules(32_i64 * program.state_count) +
-                 Mica::Regex::AllocationLedger.granules(instance_sizeof(Mica::Regex::PikeVM))
+                 Mica::Regex::AllocationLedger.granules(instance_sizeof(Mica::Regex::PikeVM)) +
+                 Mica::Regex::AllocationLedger.granules(instance_sizeof(Mica::Regex::CacheReservation))
       Mica::Regex::PikeVM.workspace_charge(program, captures: false).should eq(expected)
       haystack = "a" * 90_000
       bytes = allocated_bytes do
@@ -115,9 +116,10 @@ describe "Mica::Regex R2 review round 3" do
       program = expression.program
       charge = Mica::Regex::PikeVM.workspace_charge(program, captures: true)
       charge.should be <= UNTRUSTED.max_pike_bytes
-      allocated_bytes { Mica::Regex::PikeVM.new(program, captures: true) }.should be <= charge
+      pool = Mica::Regex::CachePool.new
+      allocated_bytes { Mica::Regex::PikeVM.new(program, true, pool) }.should be <= charge
       span = Mica::Regex::PikeVM.workspace_charge(program, captures: false)
-      allocated_bytes { Mica::Regex::PikeVM.new(program, captures: false) }.should be <= span
+      allocated_bytes { Mica::Regex::PikeVM.new(program, false, pool) }.should be <= span
     end
 
     it_satisfies "REGEX-R2-compiler", "refuses the over-cap negative control" do

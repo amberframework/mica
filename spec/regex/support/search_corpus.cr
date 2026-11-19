@@ -258,6 +258,7 @@ module SearchCorpus
       break if (limit = job.match_limit) && list_of_matches.size >= limit
       offset = next_offset(job.haystack, slots[0].to_i32, slots[1].to_i32)
     end
+    searcher.finish
     Outcome.new(job.id, true, "", "", list_of_matches)
   rescue error : Mica::Regex::SearchLimitError
     # An engine path can need more work than the corpus limits allow (the

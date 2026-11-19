@@ -57,7 +57,12 @@ module Mica::Regex
       slots.fill(PikeVM::UNSET)
       state = 0
       at = start
+      charged = start
       while at < finish
+        if at - charged >= PrefilterScan::CHARGE_CHUNK
+          meter.charge(at - charged, at)
+          charged = at
+        end
         index = @table.unsafe_fetch(state * @class_count + @byte_classes.class_of(haystack.unsafe_fetch(at)))
         return false if index < 0
         edge = @list_of_edges.unsafe_fetch(index)
@@ -65,7 +70,7 @@ module Mica::Regex
         state = edge.target
         at += 1
       end
-      meter.charge(finish - start + 1, start)
+      meter.charge(finish - charged + 1, charged)
       index = @match_edges.unsafe_fetch(state)
       return false if index < 0
       take(@list_of_edges.unsafe_fetch(index), haystack, finish, search_start, slots)
