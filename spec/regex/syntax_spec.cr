@@ -334,6 +334,15 @@ describe Mica::Regex::Syntax do
         .count(&.kind.split?).should be > 0
     end
 
+    it_satisfies "REGEX-R1-preflight", "copies a repeated small class exactly as it would rebuild it" do
+      {".{3}" => "...", "[a-zé]{2,3}" => "[a-zé][a-zé](?:[a-zé])?", "x[^\"']{0,2}" => "x(?:[^\"'](?:[^\"'])?)?"}.each do |repeated, written|
+        copied = Mica::Regex::Syntax.compile(repeated, dialect: :crystal, compile_limits: TRUSTED)
+        rebuilt = Mica::Regex::Syntax.compile(written, dialect: :crystal, compile_limits: TRUSTED)
+        copied.list_of_states.should eq(rebuilt.list_of_states)
+        copied.list_of_transitions.should eq(rebuilt.list_of_transitions)
+      end
+    end
+
     it_satisfies "REGEX-R1-ledger", "refuses compiles that would pass max_compile_bytes" do
       limits = Mica::Regex::CompileLimits.custom(max_compile_bytes: 2_000_i64)
       error = error_of("a" * 500, limits).as(Mica::Regex::CompileLimitError)

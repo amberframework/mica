@@ -72,6 +72,10 @@ module Mica::Regex
     # The alternation merged into one class last, and its union.
     @last_merged_node : Hir::Alternation? = nil
     @last_merged_set : CodePointSet? = nil
+    # The small class of the repetition being compiled, and its emitted
+    # block once the first copy is built.
+    @repeated_small_set : CodePointSet? = nil
+    @repeated_small_block : ClassMemo::Block? = nil
     @high_water = StaticArray(Int32, 4).new(0)
     @list_of_visited = [] of Bool
 
@@ -368,8 +372,42 @@ module Mica::Regex
     # its memoized minimal automaton (`ClassMemo`).
     private def compile_class(set : CodePointSet, next_state : Int32) : Int32
       return emit(Program::StateKind::Fail) if set.empty?
-      return compile_class_from_trie(set, next_state) unless ClassMemo.memoized?(set)
-      instantiate(memo_block(set), next_state)
+      return instantiate(memo_block(set), next_state) if ClassMemo.memoized?(set)
+      return compile_class_from_trie(set, next_state) unless set.same?(@repeated_small_set)
+      if block = @repeated_small_block
+        return instantiate(block, next_state)
+      end
+      first_state = @list_of_states.size
+      first_transition = @list_of_transitions.size
+      entry = compile_class_from_trie(set, next_state)
+      @repeated_small_block = capture_block(first_state, first_transition, entry, next_state)
+      entry
+    end
+
+    # The states and transitions emitted from *first_state* and
+    # *first_transition* on, as a block relative to them whose exit is
+    # *next_state*, charged before it is copied.
+    private def capture_block(first_state : Int32, first_transition : Int32, entry : Int32,
+                              next_state : Int32) : ClassMemo::Block
+      state_count = @list_of_states.size - first_state
+      transition_count = @list_of_transitions.size - first_transition
+      @ledger.charge_array(state_count, sizeof(Program::State), "a repeated class", 0)
+      @ledger.charge_array(transition_count, sizeof(Program::Transition), "a repeated class", 0)
+      list_of_states = Array(Program::State).new(state_count) do |offset|
+        state = @list_of_states[first_state + offset]
+        state.copy_with(next_state: relative_target(state.next_state, first_state, next_state),
+          argument: state.kind.sparse? ? state.argument - first_transition : state.argument)
+      end
+      list_of_transitions = Array(Program::Transition).new(transition_count) do |offset|
+        transition = @list_of_transitions[first_transition + offset]
+        transition.copy_with(target: relative_target(transition.target, first_state, next_state))
+      end
+      ClassMemo::Block.new(list_of_states, list_of_transitions, entry - first_state)
+    end
+
+    private def relative_target(target : Int32, first_state : Int32, next_state : Int32) : Int32
+      return target if target == NONE
+      target == next_state ? ClassMemo::EXIT : target - first_state
     end
 
     # Emits a memoized class block after the current states, its exit
@@ -398,7 +436,8 @@ module Mica::Regex
 
     # Makes room up front for the transitions of every copy of a repeated
     # large class (`\p{L}{50}` copies one block fifty times), so they are
-    # appended without growing the list copy by copy. The room is charged
+    # appended without growing the list copy by copy, and marks a repeated
+    # small class to be copied rather than rebuilt. The room is charged
     # here, before it is allocated, on top of the copies' own charges.
     private def reserve_class_copies(node : Hir::Repetition, maximum : Int32?) : Nil
       child = node.child
@@ -407,8 +446,16 @@ module Mica::Regex
             elsif child.is_a?(Hir::Alternation)
               merged_class(child)
             end
-      return unless set && ClassMemo.memoized?(set)
+      return unless set
       copies = maximum || Math.max(node.minimum, 1)
+      unless ClassMemo.memoized?(set)
+        # A small class repeated is emitted once and copied after that.
+        if copies > 1 && !set.same?(@repeated_small_set)
+          @repeated_small_set = set
+          @repeated_small_block = nil
+        end
+        return
+      end
       added = memo_block(set).list_of_transitions.size.to_i64 * copies
       return if added > Int32::MAX // 2
       @ledger.charge(AllocationLedger.granules(added * sizeof(Program::Transition)), "the class transitions of a repetition", 0)
