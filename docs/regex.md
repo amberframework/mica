@@ -490,8 +490,10 @@ the match only removes matches.
 reads (`c` in `(a|aa)*c`, `H`, `m` and `l` in `\w+\s+Holmes`), the rarest
 first, found once per program in one pass over the NFA (assertions taken
 as passing, so the set never claims too much). Before any engine runs, an
-`Auto` search looks for each with `memchr` from its offset and returns no
-match when one is missing: a ReDoS pattern over a haystack with no
+`Auto` search whose plan has no literal prefilter looks for the rarest
+with `memchr` from its offset and returns no match when it is missing (a
+prefilter already skips to where a match can start, and each extra byte
+would read the haystack again): a ReDoS pattern over a haystack with no
 possible match costs one scan, not a DFA pass. The scan reads in the
 windows the meter allows and charges each byte it reads. A call remembers
 where it found each byte, so an iteration call, whose next search starts

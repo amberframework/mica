@@ -735,16 +735,22 @@ module Mica::Regex
     # after the end of the match before it, which contains the byte, so an
     # iteration call reads each byte at most once per required byte.
     private def required_byte_missing?(bytes : Bytes, byte_index : Int32) : Bool
-      list_of_bytes = if @engine.auto?
-                        @program.list_of_required_bytes
-                      elsif @first_search
-                        @program.required_bytes_for_first_search(bytes.size - byte_index) || return false
-                      else
-                        return false
-                      end
-      list_of_bytes.each_with_index do |byte, index|
+      if @engine.auto?
+        # A literal prefilter already skips to where a match can start, and
+        # each byte checked reads the haystack again, so Auto checks only
+        # the rarest byte, and only without a prefilter.
+        return false if @plan.try(&.prefilter)
+        list_of_bytes = @program.list_of_required_bytes
+        checked = Math.min(list_of_bytes.size, 1)
+      elsif @first_search
+        list_of_bytes = @program.required_bytes_for_first_search(bytes.size - byte_index) || return false
+        checked = list_of_bytes.size
+      else
+        return false
+      end
+      checked.times do |index|
         next if @required_at[index] >= byte_index
-        found = find_byte(bytes, byte, byte_index)
+        found = find_byte(bytes, list_of_bytes.unsafe_fetch(index), byte_index)
         return true if found < 0
         @required_at[index] = found
       end
