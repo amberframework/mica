@@ -149,7 +149,14 @@ Per case and engine:
   `--quick`) fresh `--process-cold` processes per case and engine, each
   doing nothing else, in rounds that alternate the engines; the median is
   reported and every sample is kept in `results.jsonl`
-  (`list_of_process_cold_seconds`);
+  (`list_of_process_cold_seconds`). The runner builds the haystack, then
+  runs a full collection outside the clock, so the window opens with the
+  collector at rest: the garbage the haystack builder leaves is the
+  harness's, and the collection it is owed (about 150 us in any Crystal
+  process) would otherwise land inside the window of whichever engine
+  allocates on the GC heap first. PCRE2 allocates with `malloc`, so it
+  never did; a collection the engine's own allocation causes is still
+  timed;
 - **warm search**: one full iteration of the case's model (rebar's
   `count`, `count-spans`, `count-captures`, `grep`, `grep-captures`, or
   `first-match` for ReDoS) with a compiled pattern;
