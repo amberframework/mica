@@ -149,11 +149,18 @@ module StaticCorpus
     nil
   end
 
+  # The random stream of *source*: an FNV-1a hash of its bytes, the same in
+  # every process (`String#hash` is seeded per process, which made the
+  # haystacks, and so the cases PCRE2 stops at its limits on, vary by run).
+  def self.stream_for(source : String) : UInt64
+    source.each_byte.reduce(0xcbf29ce484222325_u64) { |hash, byte| (hash ^ byte) &* 0x100000001b3_u64 }
+  end
+
   # The haystacks a pattern is searched over: its corpus haystacks, every
   # string of up to `MAX_SHORT_LENGTH` characters of its alphabet, and
   # `RANDOM_HAYSTACKS` random strings of its characters and literal runs.
   def self.haystacks_for(entry : Entry) : Array(String)
-    random = Random::PCG32.new(SEED.to_u64, entry.source.hash)
+    random = Random::PCG32.new(SEED.to_u64, stream_for(entry.source))
     list_of_characters = ['a', 'Z', '0', ' ', '\n', 'é', '_', '-', ':', '.']
     entry.source.each_char do |char|
       list_of_characters << char if char.ascii? && char.printable? && char != '\\'
