@@ -2,15 +2,25 @@ module Mica::Regex
   # A literal accelerator (roadmap 6.2.2): finds the next position at or
   # after a given one where one of a `LiteralSet`'s literals occurs, so the
   # lazy DFA can skip the bytes in between while it sits in its start
-  # state. Three searchers, chosen when the expression is first searched:
+  # state. Four searchers, chosen when the expression is first searched:
   #
   # - **first bytes** (memchr style): the literals start with at most three
-  #   distinct bytes; each is found with `memchr`, which libc vectorizes;
+  #   distinct bytes, none of them common (`common_first_byte?`); each is
+  #   found with `memchr`, which libc vectorizes;
   # - **rare byte**: one literal; its least common byte (by a fixed
   #   frequency rank) is found with `memchr` and the literal is checked
   #   around it. When even that byte is common in text (`COMMON_RANK`),
   #   the searcher looks for a pair instead, the two least common bytes
-  #   at their distance in the literal, eight positions per step;
+  #   at their distance in the literal, and a third, the least common of
+  #   the rest, once the pair proves dense, eight positions per step; when the byte turns out dense
+  #   in the haystack (`b{30}a` over a run of `b`), it switches to a pair
+  #   (`list_of_dense_tests`);
+  # - **packed pairs**: at most three distinct first bytes, one of them
+  #   common (`t` for `(?i)the`, a Cyrillic lead byte), and literals that
+  #   `MAX_PAIR_TESTS` pair tests cover (`PairTest`): each test is two
+  #   bytes at fixed offsets compared up to one bit, so one test covers
+  #   every case of a case-insensitive word, and eight positions are
+  #   tested per step;
   # - **packed** (Teddy style): up to 64 literals; three 256-entry masks,
   #   one per leading byte position, say which literals can have that byte
   #   there, and a position is a candidate when the three masks share a bit.
@@ -28,6 +38,7 @@ module Mica::Regex
       FirstBytes
       RareByte
       Packed
+      PackedPairs
     end
 
     getter kind : Kind
@@ -43,38 +54,92 @@ module Mica::Regex
     getter pair_gap : Int32
     # For `Packed`, how many leading bytes the masks cover (1 to 3).
     getter mask_width : Int32
+    # The pair tests the pair search runs (`PackedPairs`, or `RareByte`
+    # with a pair), else empty.
+    getter list_of_pair_tests : Array(PairTest)
+    # The same tests with a third byte where a test's pair is common
+    # (`PairTest::COMMON_PAIR_WEIGHT`), which a scan switches to once the
+    # pairs prove dense in its haystack (see `PrefilterScan#find_pairs`);
+    # empty when no test has a third byte.
+    getter list_of_narrow_tests : Array(PairTest)
+    # For `RareByte` without a pair, the pair test a scan switches to when
+    # the rare byte turns out dense in the haystack (see
+    # `PrefilterScan#find_rare_byte`); empty when the literal has one
+    # distinct byte.
+    getter list_of_dense_tests : Array(PairTest)
+    # The shortest literal's length (`LiteralSet#minimum_length`).
+    getter minimum_length : Int32
     @masks : Slice(UInt64)
     @literals : Array(Bytes)
     # For each byte, the literals that start with it (bit per literal).
     @starting_with : StaticArray(UInt64, 256)
+    # For each literal of at most eight bytes, its bytes as a little-endian
+    # word and the mask of those bytes (0 for a longer literal), so
+    # `literal_at` compares it with one load (see `literal_fits_at?`).
+    @list_of_words : Slice(UInt64)
+    @list_of_word_masks : Slice(UInt64)
+
+    # The most pair tests `PackedPairs` runs per step.
+    MAX_PAIR_TESTS = 8
 
     def initialize(@literal_set : LiteralSet)
       @literals = @literal_set.list_of_literals
+      @minimum_length = @literal_set.minimum_length
       @starting_with = StaticArray(UInt64, 256).new(0_u64)
       @literals.each_with_index { |literal, index| @starting_with[literal[0]] |= 1_u64 << index }
+      @list_of_words = Slice(UInt64).new(@literals.size, 0_u64)
+      @list_of_word_masks = Slice(UInt64).new(@literals.size, 0_u64)
+      @literals.each_with_index do |literal, index|
+        next if literal.size > 8
+        word = 0_u64
+        literal.each_with_index { |byte, offset| word |= byte.to_u64 << (8 * offset) }
+        @list_of_words[index] = word
+        @list_of_word_masks[index] = literal.size == 8 ? UInt64::MAX : (1_u64 << (8 * literal.size)) &- 1
+      end
       @needle_offset = 0
       @pair_gap = 0
       @mask_width = 0
       @masks = Slice(UInt64).empty
+      @list_of_pair_tests = [] of PairTest
+      @list_of_narrow_tests = [] of PairTest
+      @list_of_dense_tests = [] of PairTest
       first_bytes = @literals.map(&.[0]).uniq!
       if @literals.size == 1
         @kind = Kind::RareByte
         literal = @literals[0]
         @needle_offset = (0...literal.size).min_by { |index| Prefilter.rank(literal[index]) }
         @list_of_needles = [literal[@needle_offset]]
-        if literal.size > 1 && Prefilter.rank(literal[@needle_offset]) >= COMMON_RANK
+        if literal.size > 1
           # The second byte is the least common of the other offsets, a
           # different byte value first (a pair of two values is rarer).
           rare = literal[@needle_offset]
           other = (0...literal.size).reject(@needle_offset).min_by { |index| {literal[index] == rare ? 1 : 0, Prefilter.rank(literal[index])} }
           first, second = {@needle_offset, other}.minmax
-          @needle_offset = first
-          @pair_gap = second - first
-          @list_of_needles = [literal[first], literal[second]]
+          pair = PairTest.new(first, literal[first], 0_u8, second, literal[second], 0_u8)
+          if Prefilter.rank(rare) >= COMMON_RANK
+            @needle_offset = first
+            @pair_gap = second - first
+            @list_of_needles = [literal[first], literal[second]]
+            @list_of_pair_tests = [pair]
+            # Two common bytes (`t` and `h` of `the`) may take a third,
+            # the least common of the rest.
+            if third = (0...literal.size).reject { |index| index == first || index == second }.min_by? { |index| Prefilter.rank(literal[index]) }
+              @list_of_narrow_tests = [PairTest.new(first, literal[first], 0_u8, second, literal[second], 0_u8, third, literal[third], 0_u8)]
+            end
+          elsif literal[other] != rare
+            @list_of_dense_tests = [pair]
+          end
         end
       elsif first_bytes.size <= 3
-        @kind = Kind::FirstBytes
-        @list_of_needles = first_bytes
+        # A common first byte stops `memchr` every few bytes; the pair
+        # tests, when few enough cover the literals, skip on rarer bytes.
+        if first_bytes.any? { |byte| Prefilter.common_first_byte?(byte) } && use_pair_tests
+          @kind = Kind::PackedPairs
+          @list_of_needles = [] of UInt8
+        else
+          @kind = Kind::FirstBytes
+          @list_of_needles = first_bytes
+        end
       else
         @kind = Kind::Packed
         @list_of_needles = [] of UInt8
@@ -87,6 +152,24 @@ module Mica::Regex
       end
     end
 
+    # Sets the pair tests for `PackedPairs` (see `PairTest.cover`) and
+    # returns true, or returns false when they would take more than
+    # `MAX_PAIR_TESTS`.
+    private def use_pair_tests : Bool
+      list_of_tests = PairTest.cover(@literals, MAX_PAIR_TESTS) || return false
+      @list_of_pair_tests = list_of_tests.map(&.without_third)
+      @list_of_narrow_tests = list_of_tests if list_of_tests.any?(&.reads_third?)
+      true
+    end
+
+    # True when *byte* starting the literals makes `memchr` stop too often
+    # for the first-bytes searcher to pay: the space or one of the most
+    # common letters (`COMMON_RANK`), or a non-ASCII byte (a lead byte
+    # starts most characters of a non-Latin text).
+    def self.common_first_byte?(byte : UInt8) : Bool
+      byte >= 0x80 || rank(byte) >= COMMON_RANK
+    end
+
     # Returns the index of the highest-priority literal that occurs at
     # *at*, or -1, trying only the literals whose first byte is the byte at
     # *at* (and, for `Packed`, only those in *candidates*). Charges the
@@ -94,12 +177,21 @@ module Mica::Regex
     def literal_at(haystack : Bytes, at : Int32, meter : SearchMeter, candidates : UInt64 = UInt64::MAX) : Int32
       return -1 if at >= haystack.size
       bits = candidates & @starting_with.unsafe_fetch(haystack.unsafe_fetch(at))
+      # With eight bytes left, a literal of at most eight bytes is compared
+      # as one masked word.
+      whole_word = at + 8 <= haystack.size
+      word = whole_word ? PrefilterScan.word_at(haystack.to_unsafe + at) : 0_u64
       while bits != 0
         index = bits.trailing_zeros_count.to_i32
         bits &= bits - 1
         literal = @literals.unsafe_fetch(index)
         meter.charge(literal.size, at)
-        return index if Prefilter.literal_fits_at?(haystack, at, literal)
+        mask = @list_of_word_masks.unsafe_fetch(index)
+        if whole_word && mask != 0
+          return index if word & mask == @list_of_words.unsafe_fetch(index)
+        elsif Prefilter.literal_fits_at?(haystack, at, literal)
+          return index
+        end
       end
       -1
     end
@@ -110,13 +202,22 @@ module Mica::Regex
     # True when *literal* occurs in *haystack* at *at*. Up to
     # `SHORT_LITERAL` bytes a byte loop beats a `memcmp` call; the first
     # byte is already known to match, and a one-byte literal needs no
-    # compare.
+    # compare. A longer literal (at most `LiteralSet::MAX_LITERAL_BYTES`) is
+    # compared eight bytes at a time, the last word overlapping the one
+    # before it, which also beats the call.
     @[AlwaysInline]
     protected def self.literal_fits_at?(haystack : Bytes, at : Int32, literal : Bytes) : Bool
       size = literal.size
       return false if at + size > haystack.size
       if size > SHORT_LITERAL
-        return LibC.memcmp(haystack.to_unsafe + at + 1, literal.to_unsafe + 1, size - 1) == 0
+        text = haystack.to_unsafe + at
+        bytes = literal.to_unsafe
+        offset = 0
+        while offset < size - 8
+          return false unless PrefilterScan.word_at(text + offset) == PrefilterScan.word_at(bytes + offset)
+          offset += 8
+        end
+        return PrefilterScan.word_at(text + size - 8) == PrefilterScan.word_at(bytes + size - 8)
       end
       index = 1
       while index < size
@@ -146,6 +247,19 @@ module Mica::Regex
       COMMON_BYTES.index(byte.unsafe_chr).try { |index| 255 - index } || 64
     end
 
+    # About how often *byte* occurs in 1,024 bytes of typical text, for
+    # choosing the bytes of a pair test (`PairTest.cover`), which weighs a
+    # pair by the product of its two weights. Unlike `rank`, it puts a
+    # non-ASCII lead byte above the letters: in a non-Latin text every
+    # character starts with one of a few lead bytes, while its continuation
+    # bytes spread over 64 values.
+    def self.weight(byte : UInt8) : Int32
+      return 256 if byte >= 0xC0
+      return 16 if byte >= 0x80
+      index = COMMON_BYTES.byte_index(byte) || return 1
+      Math.max(1, (160 * 0.85 ** index).to_i)
+    end
+
     # The rank from which a rare byte is too common for `memchr` to skip
     # far: the space and the eleven most common letters, each found every
     # few dozen bytes of text.
@@ -154,6 +268,171 @@ module Mica::Regex
     # Bytes in descending order of how often they occur in English text and
     # source code.
     COMMON_BYTES = " etaoinsrhldcumfpgwybvkxjqzETAOINSRHLDCUMFPGWYBVKXJQZ0123456789\n.,;:-_'\"()/=<>{}[]*#\t"
+  end
+
+  # :nodoc:
+  # One test of the pair search (`Prefilter::Kind::PackedPairs`): a
+  # position is a candidate when the byte *first_offset* past it is
+  # *first_value* and the byte *second_offset* past it is *second_value*,
+  # each compared up to one bit (*first_bit*, *second_bit*; 0 compares
+  # exactly). Most case-insensitive literals differ from their other cases
+  # in one bit per byte: 0x20 for an ASCII letter, and for a Cyrillic letter
+  # 0x20 in the continuation byte and 0x01 in the lead byte, so one test
+  # covers every case of a literal. A third byte (*third_offset*, compared
+  # the same way) narrows a pair of common bytes (`t` and `h` of `the`);
+  # without one it repeats the first. The lanes hold each value in all
+  # eight bytes of a word, for the word-at-a-time step.
+  struct PairTest
+    getter first_offset : Int32
+    getter second_offset : Int32
+    getter third_offset : Int32
+    getter first_fold : UInt64
+    getter first_lanes : UInt64
+    getter second_fold : UInt64
+    getter second_lanes : UInt64
+    getter third_fold : UInt64
+    getter third_lanes : UInt64
+    # The farthest byte past a candidate the test reads.
+    getter reach : Int32
+
+    def initialize(@first_offset : Int32, first_value : UInt8, first_bit : UInt8,
+                   @second_offset : Int32, second_value : UInt8, second_bit : UInt8,
+                   @third_offset : Int32 = first_offset, third_value : UInt8 = first_value, third_bit : UInt8 = first_bit)
+      @first_fold = PrefilterScan::LANE_ONES &* first_bit
+      @first_lanes = PrefilterScan::LANE_ONES &* (first_value | first_bit)
+      @second_fold = PrefilterScan::LANE_ONES &* second_bit
+      @second_lanes = PrefilterScan::LANE_ONES &* (second_value | second_bit)
+      @third_fold = PrefilterScan::LANE_ONES &* third_bit
+      @third_lanes = PrefilterScan::LANE_ONES &* (third_value | third_bit)
+      @reach = Math.max(@second_offset, @third_offset)
+    end
+
+    # This test without its third byte.
+    def without_third : PairTest
+      copy = self
+      copy.drop_third
+      copy
+    end
+
+    protected def drop_third : Nil
+      @third_offset = @first_offset
+      @third_fold = @first_fold
+      @third_lanes = @first_lanes
+      @reach = @second_offset
+    end
+
+    # True when the test reads a third byte.
+    def reads_third? : Bool
+      @third_offset != @first_offset
+    end
+
+    # The farthest byte past a candidate that *list_of_tests* read.
+    def self.reach(list_of_tests : Array(PairTest)) : Int32
+      reach = 0
+      list_of_tests.each { |test| reach = Math.max(reach, test.reach) }
+      reach
+    end
+
+    # True when the test holds at *at* (reading no byte past *bytes*).
+    @[AlwaysInline]
+    def holds_at?(bytes : Bytes, at : Int32) : Bool
+      return false if at + @reach >= bytes.size
+      bytes.unsafe_fetch(at + @first_offset) | @first_fold.to_u8! == @first_lanes.to_u8! &&
+        bytes.unsafe_fetch(at + @second_offset) | @second_fold.to_u8! == @second_lanes.to_u8! &&
+        bytes.unsafe_fetch(at + @third_offset) | @third_fold.to_u8! == @third_lanes.to_u8!
+    end
+
+    # The weight product (see `Prefilter.weight`) from which a pair is
+    # common enough to take a third byte: one candidate in 512 positions
+    # if the two bytes were independent, which in text they are not (`th`
+    # starts one position in 45 of English). A third byte costs a load per
+    # step, so only such pairs pay for it.
+    COMMON_PAIR_WEIGHT = 2_048
+
+    # Returns at most *max_tests* tests such that every literal of
+    # *list_of_literals* passes one of them where it starts, or nil.
+    #
+    # Each test is made from the first literal no test covers yet: at each
+    # of its offsets, the literals whose byte there equals it or differs in
+    # one bit (the first such bit seen at that offset) agree with it. The
+    # test takes the two offsets with the most literals agreeing at both per
+    # candidate expected (the product of the offsets' `Prefilter.weight`,
+    # both bytes a bit allows counted), then the farthest apart, and
+    # covers those literals. O(t·(k·l + l²)) for t tests and k literals of
+    # at most l bytes (64 and 32, see `LiteralSet`).
+    def self.cover(list_of_literals : Array(Bytes), max_tests : Int32) : Array(PairTest)?
+      uncovered = list_of_literals.size == 64 ? UInt64::MAX : (1_u64 << list_of_literals.size) &- 1
+      list_of_tests = [] of PairTest
+      while uncovered != 0
+        return nil if list_of_tests.size == max_tests
+        lead = list_of_literals.unsafe_fetch(uncovered.trailing_zeros_count)
+        return nil if lead.size < 2
+        list_of_bits = Array(UInt8).new(lead.size, 0_u8)
+        list_of_agreeing = Array(UInt64).new(lead.size, 0_u64)
+        list_of_weights = Array(Int32).new(lead.size, 0)
+        lead.size.times do |offset|
+          bit = 0_u8
+          agreeing = 0_u64
+          bits = uncovered
+          while bits != 0
+            index = bits.trailing_zeros_count
+            bits &= bits &- 1
+            literal = list_of_literals.unsafe_fetch(index)
+            next if literal.size <= offset
+            difference = literal.unsafe_fetch(offset) ^ lead.unsafe_fetch(offset)
+            if difference != 0
+              next unless difference.popcount == 1
+              bit = difference if bit == 0
+              next unless difference == bit
+            end
+            agreeing |= 1_u64 << index
+          end
+          list_of_bits[offset] = bit
+          list_of_agreeing[offset] = agreeing
+          value = lead.unsafe_fetch(offset)
+          list_of_weights[offset] = bit == 0 ? Prefilter.weight(value) : Prefilter.weight(value) + Prefilter.weight(value ^ bit)
+        end
+        # The best pair has the most literals covered per candidate
+        # expected (covered / weight, compared crosswise in integers),
+        # then the widest gap.
+        best_first = best_second = 0
+        best_covered = 0_i64
+        best_weight = 1_i64
+        (0...lead.size).each do |first|
+          (first + 1...lead.size).each do |second|
+            covered = (list_of_agreeing[first] & list_of_agreeing[second]).popcount.to_i64
+            weight = list_of_weights[first].to_i64 * list_of_weights[second]
+            better = covered * best_weight <=> best_covered * weight
+            if better > 0 || (better == 0 && second - first > best_second - best_first)
+              best_covered = covered
+              best_weight = weight
+              best_first = first
+              best_second = second
+            end
+          end
+        end
+        covered = list_of_agreeing[best_first] & list_of_agreeing[best_second]
+        # A common pair takes the least common third offset where every
+        # literal it covers agrees too.
+        best_third = best_first
+        if best_weight >= COMMON_PAIR_WEIGHT
+          third_weight = Int32::MAX
+          lead.size.times do |third|
+            next if third == best_first || third == best_second
+            next unless list_of_agreeing[third] & covered == covered
+            if list_of_weights[third] < third_weight
+              third_weight = list_of_weights[third]
+              best_third = third
+            end
+          end
+        end
+        list_of_tests << PairTest.new(best_first, lead[best_first], list_of_bits[best_first],
+          best_second, lead[best_second], list_of_bits[best_second],
+          best_third, lead[best_third], list_of_bits[best_third])
+        uncovered &= ~covered
+      end
+      list_of_tests
+    end
   end
 
   # :nodoc:
@@ -169,6 +448,10 @@ module Mica::Regex
   class PrefilterScan
     GUARD_CANDIDATES = 32
     MINIMUM_SKIP     =  8
+    # The pair search takes its narrow tests (`Prefilter#list_of_narrow_tests`)
+    # once `GUARD_CANDIDATES` candidates over a haystack came less than
+    # this many bytes apart on average.
+    NARROW_SKIP = 128
     # The bytes a scan reads between two charges to the meter.
     CHARGE_CHUNK = 4096
     # A byte in every lane of a word, and the high bit of every lane (the
@@ -181,12 +464,24 @@ module Mica::Regex
     getter candidates = 0
     # How many bytes the scan has moved past in all.
     getter skipped = 0_i64
+    # The literal the last verified candidate starts (its index in the
+    # set), or -1.
+    getter last_literal = -1
     @guard_from = 0
     # The positions where each needle was last found (-1: not yet looked;
     # Int32::MAX: absent from there on).
     @found_at : StaticArray(Int32, 3)
     @scanned_from : StaticArray(Int32, 3)
     @packed_from = 0
+    # True once a rare-byte scan switched to its pair (see
+    # `find_rare_byte`).
+    @dense_switched = false
+    # The candidates verified and the bytes moved past over this haystack,
+    # across the calls that kept the scan's positions, and whether the pair
+    # search switched to its narrow tests (see `find_pairs`).
+    @haystack_candidates = 0
+    @haystack_skipped = 0_i64
+    @narrowed = false
 
     # With *verified_only* (the literal search), the scan never stops early:
     # every position it returns starts a literal.
@@ -205,6 +500,10 @@ module Mica::Regex
       @guard_from = 0
       @packed_from = 0
       return if keep_positions
+      @dense_switched = false
+      @haystack_candidates = 0
+      @haystack_skipped = 0_i64
+      @narrowed = false
       @found_at = StaticArray(Int32, 3).new(-1)
       @scanned_from = StaticArray(Int32, 3).new(0)
     end
@@ -221,9 +520,10 @@ module Mica::Regex
     def find(from : Int32, meter : SearchMeter) : Int32
       @guard_from = from
       case @prefilter.kind
-      in .first_bytes? then find_first_bytes(from, meter)
-      in .rare_byte?   then find_rare_byte(from, meter)
-      in .packed?      then find_packed(from, meter)
+      in .first_bytes?  then find_first_bytes(from, meter)
+      in .rare_byte?    then find_rare_byte(from, meter)
+      in .packed?       then find_packed(from, meter)
+      in .packed_pairs? then find_pairs(from, meter, @prefilter.list_of_pair_tests)
       end
     end
 
@@ -232,9 +532,14 @@ module Mica::Regex
     # class description).
     private def accept?(candidate : Int32, meter : SearchMeter, bits : UInt64 = UInt64::MAX) : Bool
       @candidates += 1
-      @skipped += candidate - @guard_from if candidate > @guard_from
+      @haystack_candidates += 1
+      if candidate > @guard_from
+        @skipped += candidate - @guard_from
+        @haystack_skipped += candidate - @guard_from
+      end
       @guard_from = candidate + 1
-      return true if @prefilter.literal_at(@haystack, candidate, meter, bits) >= 0
+      @last_literal = @prefilter.literal_at(@haystack, candidate, meter, bits)
+      return true if @last_literal >= 0
       !@verified_only && ineffective?
     end
 
@@ -252,8 +557,16 @@ module Mica::Regex
       -1
     end
 
+    # The rare-byte search: `memchr` for the rare byte. A rare byte that
+    # turns out dense in this haystack (`GUARD_CANDIDATES` candidates less
+    # than `MINIMUM_SKIP` bytes apart on average, as a run of `b` makes
+    # for `b{30}a`) switches the scan to the pair search with
+    # `Prefilter#list_of_dense_tests` for the rest of the haystack (and
+    # the later calls over it); the guard then
+    # counts the pair search's candidates afresh.
     private def find_rare_byte(from : Int32, meter : SearchMeter) : Int32
-      return find_rare_pair(from, meter) if @prefilter.pair_gap > 0
+      return find_pairs(from, meter, @prefilter.list_of_pair_tests) if @prefilter.pair_gap > 0
+      return find_pairs(from, meter, @prefilter.list_of_dense_tests) if @dense_switched
       offset = @prefilter.needle_offset
       needle = @prefilter.list_of_needles[0]
       at = from
@@ -261,46 +574,95 @@ module Mica::Regex
         position = next_needle(0, needle, at + offset, meter)
         return -1 if position == Int32::MAX
         candidate = position - offset
+        if ineffective? && !@prefilter.list_of_dense_tests.empty?
+          @dense_switched = true
+          @candidates = 0
+          @skipped = 0_i64
+          @guard_from = candidate
+          return find_pairs(candidate, meter, @prefilter.list_of_dense_tests)
+        end
         return candidate if accept?(candidate, meter)
         at = candidate + 1
       end
       -1
     end
 
-    # The pair search: a position is a candidate when the pair's first
-    # byte sits at the needle offset after it and the second byte
-    # `Prefilter#pair_gap` further on. Eight positions are tested at once,
-    # one byte per lane of a 64-bit word: a lane holding the wanted byte
-    # becomes zero after an XOR, and the zero-lane test can also flag a
-    # lane above a real zero, so the lowest flagged lane is a candidate
-    # that `accept?` verifies (a false one is skipped like any candidate
-    # that fails). The meter is charged as in `find_packed`.
-    private def find_rare_pair(from : Int32, meter : SearchMeter) : Int32
-      offset = @prefilter.needle_offset
-      gap = @prefilter.pair_gap
-      first = @prefilter.list_of_needles[0]
-      second = @prefilter.list_of_needles[1]
-      first_lanes = LANE_ONES &* first
-      second_lanes = LANE_ONES &* second
-      last = @haystack.size - @prefilter.literal_size(0)
+    # The pair search over *list_of_tests* (see `PairTest`): a position is a
+    # candidate when one of the tests holds there. Eight positions are
+    # tested at once, one byte per lane of a 64-bit word: a lane holding the
+    # wanted byte (after the test's fold bit is set) becomes zero after an
+    # XOR, and the zero-lane test can also flag a lane above a real zero, so
+    # the lowest flagged lane is a candidate that `accept?` verifies (a false
+    # one is skipped like any candidate that fails). Near the end, where a
+    # word would read past the haystack, each position is tested byte by
+    # byte. The meter is charged as in `find_packed`.
+    private def find_pairs(from : Int32, meter : SearchMeter, list_of_tests : Array(PairTest)) : Int32
+      if list_of_tests.same?(@prefilter.list_of_pair_tests) && !@prefilter.list_of_narrow_tests.empty?
+        @narrowed ||= @haystack_candidates >= GUARD_CANDIDATES &&
+                      @haystack_skipped < @haystack_candidates.to_i64 * NARROW_SKIP
+        list_of_tests = @prefilter.list_of_narrow_tests if @narrowed
+      end
+      if list_of_tests.any?(&.reads_third?)
+        find_pairs_reading_three(from, meter, list_of_tests)
+      else
+        find_pairs_reading_two(from, meter, list_of_tests)
+      end
+    end
+
+    # `find_pairs` made once for tests of two bytes and once for tests
+    # of three, so a step of two-byte tests loads no third word.
+    {% for width, name in {2 => "two", 3 => "three"} %}
+    private def find_pairs_reading_{{name.id}}(from : Int32, meter : SearchMeter, list_of_tests : Array(PairTest)) : Int32
+      last = @haystack.size - @prefilter.minimum_length
+      # The last position whose words all lie inside the haystack.
+      word_last = @haystack.size - 8 - PairTest.reach(list_of_tests)
       at = Math.max(from, 0)
       bytes = @haystack.to_unsafe
+      tests = list_of_tests.to_unsafe
+      test_count = list_of_tests.size
       while at <= last
         stop = at + meter.readable(Math.min(CHARGE_CHUNK, last + 1 - at), at) - 1
         chunk_from = at
         found = -1
-        while at + 7 <= stop
-          lanes = PrefilterScan.zero_lanes(PrefilterScan.word_at(bytes + at + offset) ^ first_lanes) &
-                  PrefilterScan.zero_lanes(PrefilterScan.word_at(bytes + at + offset + gap) ^ second_lanes)
+        word_stop = Math.min(stop - 7, word_last)
+        while at <= word_stop
+          lanes = 0_u64
+          index = 0
+          while index < test_count
+            test = tests[index]
+            test_lanes = PrefilterScan.zero_lanes((PrefilterScan.word_at(bytes + at + test.first_offset) | test.first_fold) ^ test.first_lanes) &
+                         PrefilterScan.zero_lanes((PrefilterScan.word_at(bytes + at + test.second_offset) | test.second_fold) ^ test.second_lanes)
+            {% if width == 3 %}
+              test_lanes &= PrefilterScan.zero_lanes((PrefilterScan.word_at(bytes + at + test.third_offset) | test.third_fold) ^ test.third_lanes)
+            {% end %}
+            lanes |= test_lanes
+            index += 1
+          end
           if lanes != 0
-            found = at + lanes.trailing_zeros_count // 8
-            break
+            # Each flagged lane is a candidate, lowest first; one that
+            # fails verification leaves the scan in this word. Verifying
+            # charges the meter, so the chunk is allowed again after each,
+            # and a shorter allowance hands the rest to the outer loop.
+            while lanes != 0
+              candidate = at + lanes.trailing_zeros_count // 8
+              break if candidate > stop
+              lanes &= lanes &- 1
+              meter.charge(candidate - chunk_from + 1, candidate)
+              return candidate if accept?(candidate, meter)
+              chunk_from = candidate + 1
+              stop = chunk_from + meter.readable(Math.min(CHARGE_CHUNK, last + 1 - chunk_from), chunk_from) - 1
+            end
+            if stop < at + 7
+              at = chunk_from
+              break
+            end
+            word_stop = Math.min(stop - 7, word_last)
           end
           at += 8
         end
         if found < 0
           while at <= stop
-            if bytes[at + offset] == first && bytes[at + offset + gap] == second
+            if list_of_tests.any?(&.holds_at?(@haystack, at))
               found = at
               break
             end
@@ -318,6 +680,7 @@ module Mica::Regex
       meter.charge(@haystack.size - at, at) if at < @haystack.size
       -1
     end
+    {% end %}
 
     # The eight bytes at *pointer* as one little-endian word (an unaligned
     # read).

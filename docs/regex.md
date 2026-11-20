@@ -918,16 +918,22 @@ within the bytes the meter has allowed.
 At compile time `LiteralSet.extract` walks `Hir` for the literals every
 match starts with (at most 64 of at most 32 bytes; small classes and
 case-insensitive letters expand; a large class, an optional start or an
-empty match ends extraction). When the set is the whole pattern (every
+empty match ends extraction). An alternation whose branches come to more
+than 64 is gathered again with each branch cut to an even share of what
+the branches before it left, as prefixes of at least three bytes, so
+`(?i)sherlock|holmes|watson` keeps every case of `she`, `holm` and
+`wats`; one that cannot keep three bytes per branch has no set. When the
+set is the whole pattern (every
 literal exact, no assertion, no anchoring option), the literal search
 alone finds matches, in priority order at the leftmost candidate.
 
-`Prefilter` chooses one of three searchers:
+`Prefilter` chooses one of four searchers:
 
 | Searcher | When | How |
 |---|---|---|
-| Rare byte | one literal | `memchr` for its least common byte by a fixed frequency rank (non-ASCII lead bytes rank as common, continuation bytes as rare), then the literal is compared around it. When that byte is still common (the space or one of the eleven most common letters), it looks for a pair instead: the two least common bytes at their distance in the literal, eight positions per step in one 64-bit word |
-| First bytes | at most three distinct first bytes | `memchr` for each, keeping where each was last found so no byte is read twice |
+| Rare byte | one literal | `memchr` for its least common byte by a fixed frequency rank (non-ASCII lead bytes rank as common, continuation bytes as rare), then the literal is compared around it. When that byte is still common (the space or one of the eleven most common letters), it looks for a pair instead: the two least common bytes at their distance in the literal, eight positions per step in one 64-bit word and the least common of the rest as a third once the pair proves dense (`e` for `the`). When the byte turns out dense in the haystack (32 candidates less than 8 bytes apart on average, as a run of `b` makes for `b{30}a`), the scan switches to that pair for the rest of the haystack |
+| First bytes | at most three distinct first bytes, none of them common (the space, the eleven most common letters, a non-ASCII byte) | `memchr` for each, keeping where each was last found so no byte is read twice |
+| Packed pairs | at most three distinct first bytes, one of them common, and literals that at most 8 pair tests cover | Each test is two bytes at fixed offsets from the start, each compared up to one bit: the ASCII case bit 0x20, or for a Cyrillic letter 0x20 in the continuation byte and 0x01 in the lead byte, so one test covers every case of `(?i)twain` or `(?i)шерлок` (`ſ` and `K`, two and three bytes long, take a test of their own). The tests are chosen per uncovered literal for the most literals per expected candidate, by a fixed per-byte weight; a pair common enough by that weight (`t` and `h` of `(?i)the`) also gets a narrow test with a third byte, the least common of the rest, which the scan switches to once 32 candidates over the haystack came less than 128 bytes apart on average (the switch holds for later calls over the same string); only then does it load three words per test. Eight positions per step in one 64-bit word; a flagged lane that fails verification leaves the scan in its word |
 | Packed (Teddy style) | up to 64 literals | three 256-entry masks, one per leading byte, a bit per literal; a position is a candidate when the masks share a bit, and only those literals are compared |
 
 Every candidate is verified before it is returned. The accelerators follow
@@ -998,7 +1004,7 @@ C x its bound, and growth from x1 to x8 must stay under 8 x 1.25.
 
 | Family | Varies | Bound | C | Checked |
 |---|---|---|---|---|
-| Each prefilter on a candidate-dense haystack: rare byte `ab[0-9]{3}x`, rare pair `ea[0-9]{3}x` over `"eaz"`·k and `eaea` over `"eae"`·k, and first bytes `(?:ab\|ba\|ca)[0-9]` over `"abz"`·k, packed `(?:ab\|bc\|cd\|de\|ef)[0-9]` over `"abzbczcdzdezefz"`·k, the literal search `aaab\|aaac\|aaad` over `"a"`·n | n = 4,000 to 32,000 bytes | m·(n + 1) | 16 | linear growth; the guard turns a dense prefilter off and leaves a sparse one on |
+| Each prefilter on a candidate-dense haystack: rare byte `ab[0-9]{3}x`, rare pair `ea[0-9]{3}x` over `"eaz"`·k and `eaea` over `"eae"`·k, and first bytes `(?:zb\|xb\|qb)[0-9]` over `"zbq"`·k, packed `(?:ab\|bc\|cd\|de\|ef)[0-9]` over `"abzbczcdzdezefz"`·k, the literal search `zzzb\|zzzc\|zzzd` over `"z"`·n, the pair tests `(?i)ea[0-9]{3}x` over `"eAz"`·k and `(?i)eaea` over `"EaE"`·k, the cut alternation `(?i)sherlock\|holmes\|watson` over `"SheHolWat"`·k, and the dense rare byte `b{30}a` over `"b"`·n | n = 4,000 to 32,000 bytes | m·(n + 1) | 16 | linear growth; the guard turns a dense prefilter off and leaves a sparse one on |
 | Cache thrash: `(a\|b)*a(a\|b){20}c` over random `a`/`b` with a 96 KiB cache | n = 8,000 to 64,000 | m·(n + 1) | 8 | the DFA gives up and the Pike VM keeps growth linear |
 | From each start: `[a-q][^u-z]{13}[u-z]` over `"a"`·n on `Engine::EachStart`, where every start reads 14 bytes and none matches | n = 4,000 to 32,000 | m·(n + 1) | 2 | linear growth |
 | Iteration: `\w+` over words, one searcher for the whole scan | n = 5,000 to 40,000 | m·(n + 1) | 4 | linear growth over the whole call |

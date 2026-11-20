@@ -39,9 +39,13 @@ describe "Mica::Regex accelerated search complexity" do
       {"rare byte", "ab[0-9]{3}x", ->(n : Int32) { "abz" * (n // 3) }, Mica::Regex::Prefilter::Kind::RareByte},
       {"rare pair", "ea[0-9]{3}x", ->(n : Int32) { "eaz" * (n // 3) }, Mica::Regex::Prefilter::Kind::RareByte},
       {"pair literal search", "eaea", ->(n : Int32) { "eae" * (n // 3) }, Mica::Regex::Prefilter::Kind::RareByte},
-      {"first bytes", "(?:ab|ba|ca)[0-9]", ->(n : Int32) { "abz" * (n // 3) }, Mica::Regex::Prefilter::Kind::FirstBytes},
+      {"first bytes", "(?:zb|xb|qb)[0-9]", ->(n : Int32) { "zbq" * (n // 3) }, Mica::Regex::Prefilter::Kind::FirstBytes},
       {"packed", "(?:ab|bc|cd|de|ef)[0-9]", ->(n : Int32) { "abzbczcdzdezefz" * (n // 15) }, Mica::Regex::Prefilter::Kind::Packed},
-      {"literal search", "aaab|aaac|aaad", ->(n : Int32) { "a" * n }, Mica::Regex::Prefilter::Kind::FirstBytes},
+      {"literal search", "zzzb|zzzc|zzzd", ->(n : Int32) { "z" * n }, Mica::Regex::Prefilter::Kind::FirstBytes},
+      {"pair tests", "(?i)ea[0-9]{3}x", ->(n : Int32) { "eAz" * (n // 3) }, Mica::Regex::Prefilter::Kind::PackedPairs},
+      {"pair tests literal search", "(?i)eaea", ->(n : Int32) { "EaE" * (n // 3) }, Mica::Regex::Prefilter::Kind::PackedPairs},
+      {"pair tests over shares", "(?i)sherlock|holmes|watson", ->(n : Int32) { "SheHolWat" * (n // 9) }, Mica::Regex::Prefilter::Kind::Packed},
+      {"dense rare byte", "b{30}a", ->(n : Int32) { "b" * n }, Mica::Regex::Prefilter::Kind::RareByte},
     ]
     families.each do |name, source, haystack_of, kind|
       it_satisfies "REGEX-R3-complexity", "the #{name} prefilter stays linear in n with work <= 16·m·(n + 1) (#{source})" do

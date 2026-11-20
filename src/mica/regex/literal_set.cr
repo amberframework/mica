@@ -85,6 +85,9 @@ module Mica::Regex
   # nil means "anything can follow" (no finite set of prefixes).
   class LiteralExtractor
     getter? saw_look : Bool = false
+    # True while an alternation gathers its branches cut to shares (see
+    # `gather_branches`).
+    @cutting = false
 
     def initialize(@meter : Core::WorkMeter)
     end
@@ -163,7 +166,13 @@ module Mica::Regex
         return inexact(result) unless child_sequence
         crossed = cross(result, child_sequence)
         return inexact(result) unless crossed
-        return nil if crossed.size > limit
+        if crossed.size > limit
+          return nil unless @cutting
+          # Cut to its share (see `gather_branches`), the branch keeps the
+          # prefixes so far, once they are `MIN_CUT_BYTES` long; shorter
+          # ones grow past the share.
+          return inexact(result) if result.all? { |entry| entry.bytes.size >= MIN_CUT_BYTES }
+        end
         result = crossed
       end
       result
@@ -192,17 +201,45 @@ module Mica::Regex
       {[LiteralEntry.new(bytes, true)], last}
     end
 
+    # The branches' entries in order. When they come to more than
+    # `LiteralSet::MAX_LITERALS` (a few case-insensitive words, each of
+    # which expands to dozens), they are gathered again with each branch
+    # cut to an even share of what the earlier ones left (see
+    # `gather_branches`).
     private def alternation_sequence(list_of_branches : Array(Hir::Node), depth : Int32) : Array(LiteralEntry)?
-      result = [] of LiteralEntry
-      list_of_branches.each_with_index do |branch, index|
-        # Every later branch adds at least one entry.
-        limit = LiteralSet::MAX_LITERALS - result.size - (list_of_branches.size - 1 - index)
-        branch_sequence = sequence(branch, depth + 1, limit)
-        return nil unless branch_sequence
-        result.concat(branch_sequence)
-        return nil if result.size > LiteralSet::MAX_LITERALS
+      gather_branches(list_of_branches, depth, false) || gather_branches(list_of_branches, depth, true)
+    end
+
+    # The fewest bytes a literal cut to its branch's share keeps: a shorter
+    # prefix starts too many positions to skip anything.
+    MIN_CUT_BYTES = 3
+
+    # Gathers the entries of *list_of_branches*. Each branch may take what
+    # the earlier ones left, less one entry for each later branch; with
+    # *shared*, it takes an even share of that instead, and a concatenation
+    # past its share ends there (its entries become prefixes, see
+    # `concatenation_sequence`). A shared gathering whose prefixes come out
+    # shorter than `MIN_CUT_BYTES` has no set.
+    private def gather_branches(list_of_branches : Array(Hir::Node), depth : Int32, shared : Bool) : Array(LiteralEntry)?
+      return nil if shared && list_of_branches.size > LiteralSet::MAX_LITERALS
+      cutting = @cutting
+      @cutting = shared
+      begin
+        result = [] of LiteralEntry
+        list_of_branches.each_with_index do |branch, index|
+          later = list_of_branches.size - 1 - index
+          limit = shared ? (LiteralSet::MAX_LITERALS - result.size) // (later + 1) : LiteralSet::MAX_LITERALS - result.size - later
+          return nil if shared && limit < 1
+          branch_sequence = sequence(branch, depth + 1, limit)
+          return nil unless branch_sequence
+          return nil if shared && branch_sequence.any? { |entry| !entry.exact? && entry.bytes.size < MIN_CUT_BYTES }
+          result.concat(branch_sequence)
+          return nil if result.size > LiteralSet::MAX_LITERALS
+        end
+        result
+      ensure
+        @cutting = cutting
       end
-      result
     end
 
     # Appends each entry of *right* to each exact entry of *left*, in
