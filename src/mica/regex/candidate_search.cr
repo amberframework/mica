@@ -87,10 +87,16 @@ module Mica::Regex
         return finish
       end
       prefilter = plan.prefilter
+      filter = plan.start_filter
       if prefilter && !plan.literal_search? && prefilter.kind.rare_byte?
         run_at_needles(one_pass, prefilter, bytes, slots, scratch)
-      elsif prefilter.nil? && (filter = plan.start_filter).minimum_bytes > 0
-        run_at_start_bytes(one_pass, filter, bytes, slots, scratch)
+      elsif prefilter.nil? && filter.minimum_bytes > 0
+        run_at_start_bytes(one_pass, filter, bytes, slots, scratch, Int32::MAX)
+      elsif prefilter && filter.minimum_bytes > 0 && prefilter.literal_set.list_of_literals.all?(&.size.== 1)
+        # Literals of one byte each (`[ \t\n]+`) are the start filter\x27s
+        # start bytes: a scan of the start table finds them as the
+        # prefilter would, without the searcher\x27s set-up per call.
+        run_at_start_bytes(one_pass, filter, bytes, slots, scratch, SPARSE_SCAN_BYTES)
       else
         LazyDFA::GAVE_UP
       end
@@ -123,13 +129,28 @@ module Mica::Regex
       LazyDFA::NO_MATCH
     end
 
+    # The most bytes `run_at_start_bytes` reads past its last candidate
+    # when the plan has a prefilter, whose scan skips a long stretch with
+    # no candidate faster than a byte at a time.
+    SPARSE_SCAN_BYTES = 256
+
     # Tries each position whose byte can start a match (`StartFilter`).
+    # Past *sparse_bytes* bytes read since the offset or the last
+    # candidate with no try, it declines (`LazyDFA::GAVE_UP`, counted as a
+    # decline for `SearchPlan#candidate_searches_pay?`) and leaves the rest
+    # to the searcher.
     private def run_at_start_bytes(one_pass : OnePassDFA, filter : StartFilter, bytes : Bytes, slots : Slice(Int64),
-                                   scratch : Slice(Int64)) : Int32
+                                   scratch : Slice(Int64), sparse_bytes : Int32) : Int32
       filter.prepare_second_bytes(@program)
       last = bytes.size - filter.minimum_bytes
       at = @byte_index
+      quiet_until = sparse_bytes == Int32::MAX ? Int32::MAX : at &+ sparse_bytes
       while at <= last
+        if at >= quiet_until
+          @spent += at - @byte_index
+          @plan.note_candidate_decline
+          return LazyDFA::GAVE_UP
+        end
         byte = bytes.unsafe_fetch(at)
         # `last` leaves at least `minimum_bytes` bytes, so `at + 1` is in
         # the haystack whenever `second?` can be false.
@@ -139,6 +160,7 @@ module Mica::Regex
             @spent += at + 1 - @byte_index
             return finish
           end
+          quiet_until = at &+ 1 &+ sparse_bytes unless sparse_bytes == Int32::MAX
         end
         at += 1
       end

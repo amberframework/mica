@@ -156,4 +156,31 @@ describe "Mica::Regex candidate searches" do
     # Linear: four times the bytes, at most about four times the work.
     (bounds[2].to_f / bounds[1]).should be < 4.5
   end
+
+  it "finds runs of a class whose literals are single bytes on the start table, as the two-phase search does" do
+    pattern = planned_expression("[ \\t\\n\\x0b\\x0c\\x0d]+")
+    random = Random.new(20261121)
+    pieces = ["word", " ", "  ", "\t", "\n", "é", "x\r\n"]
+    20.times do
+      haystack = String.build { |io| random.rand(1..120).times { io << pieces.sample(random) } }
+      warm(pattern, haystack)
+      calls(pattern, haystack).should eq(two_phase(pattern, haystack))
+    end
+    haystack = "ab  cd\te"
+    warm(pattern, haystack)
+    answer = candidate_answer(pattern, haystack, 0).should_not be_nil
+    answer[0].should eq(4)
+  end
+
+  it_satisfies "REGEX-R3-complexity", "declines a single-byte literal set past a long stretch with no start, and the searcher answers" do
+    pattern = planned_expression("[ \\t]+")
+    haystack = "a" * (Mica::Regex::CandidateSearch::SPARSE_SCAN_BYTES * 4) + " \t"
+    warm(pattern, haystack)
+    answer = candidate_answer(pattern, haystack, 0).should_not be_nil
+    answer[0].should eq(Mica::Regex::LazyDFA::GAVE_UP)
+    answer[1].should be <= Mica::Regex::CandidateSearch::SPARSE_SCAN_BYTES + 1
+    match = pattern.match_at_byte_index(haystack, 0, limits: LIMITS).should_not be_nil
+    match.byte_begin(0).should eq(Mica::Regex::CandidateSearch::SPARSE_SCAN_BYTES * 4)
+    match.byte_end(0).should eq(haystack.bytesize)
+  end
 end
