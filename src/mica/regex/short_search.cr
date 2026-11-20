@@ -10,12 +10,19 @@ module Mica::Regex
   #   allows a match to start, finds the match (span and groups).
   #
   # Both answer only where the searcher would answer the same without
-  # raising: no timeout is set (one already passed must fail), the offset
-  # is a character boundary inside the haystack, the haystack is valid
-  # UTF-8, and the work they may do (validation, the start filter's scans
-  # and, for `run`, at most `work_bound` steps) fits the call's
+  # raising: any timeout is positive (one already passed must fail), the
+  # offset is a character boundary inside the haystack, the haystack is
+  # valid UTF-8, and the work they may do (validation, the start filter's
+  # scans and, for `run`, at most `work_bound` steps) fits the call's
   # allowance. They check that before they read the haystack. Otherwise
   # they decline and the caller runs the searcher.
+  #
+  # A positive timeout counts from the start of the call, so it has not
+  # passed before the call reads the haystack, and a short search under
+  # one does less work than the meter does before its first clock read
+  # (`Core::WorkMeter::CLOCK_INTERVAL`, checked in `fits?`): the searcher
+  # would read the clock only as the call starts, where no time has
+  # passed, and answer the same.
   struct ShortSearch
     # The longest haystack a short search reads.
     MAX_BYTES = 256
@@ -45,7 +52,10 @@ module Mica::Regex
     # would accept; no other method answers otherwise.
     def applies? : Bool
       bytes = @haystack.to_slice
-      return false if @timeout || bytes.size > MAX_BYTES || @byte_index < 0 || @byte_index > bytes.size
+      return false if bytes.size > MAX_BYTES || @byte_index < 0 || @byte_index > bytes.size
+      if timeout = @timeout
+        return false unless timeout.positive?
+      end
       @byte_index == bytes.size || bytes.unsafe_fetch(@byte_index) & 0xC0 != 0x80
     end
 
@@ -116,7 +126,8 @@ module Mica::Regex
     end
 
     private def anchored?(plan : SearchPlan) : Bool
-      @program.options.anchored? || @options.anchored? || plan.anchored_start?
+      end_anchored = @program.options.end_anchored? || @options.end_anchored?
+      @program.options.anchored? || @options.anchored? || plan.anchored_at_offset?(end_anchored)
     end
 
     # True when validating the haystack and *steps* more operations fit
@@ -126,9 +137,12 @@ module Mica::Regex
     # the allowance is at least the smaller of `work_ceiling` and
     # `base_work`, or of `work_ceiling` and `work_per_byte` times a
     # haystack of at least one byte. Limits too tight for it decline.
+    # Under a timeout the work must also end before the meter's first
+    # clock read (see the type's comment).
     private def fits?(steps : Int32) : Bool
       needed = @haystack.bytesize.to_i64 + steps
       return false if @limits.work_ceiling < needed
+      return false if @timeout && needed >= Core::WorkMeter::CLOCK_INTERVAL
       @limits.base_work >= needed || (@haystack.bytesize > 0 && @limits.work_per_byte >= needed)
     end
 

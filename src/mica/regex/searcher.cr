@@ -387,8 +387,8 @@ module Mica::Regex
       return nil if byte_index > bytes.size
       check_start(bytes, byte_index)
       return nil if required_byte_missing?(bytes, byte_index)
-      anchored = @program.options.anchored? || options.anchored? || anchored_start?
       end_anchored = @program.options.end_anchored? || options.end_anchored?
+      anchored = @program.options.anchored? || options.anchored? || anchored_at_offset?(end_anchored)
       case @engine
       in .pike_vm?
         slots = @capture_slots
@@ -422,8 +422,8 @@ module Mica::Regex
       return false if byte_index > bytes.size
       check_start(bytes, byte_index)
       return false if required_byte_missing?(bytes, byte_index)
-      anchored = @program.options.anchored? || options.anchored? || anchored_start?
       end_anchored = @program.options.end_anchored? || options.end_anchored?
+      anchored = @program.options.anchored? || options.anchored? || anchored_at_offset?(end_anchored)
       if dfa = automaton(end_anchored)
         if literal_search?(anchored)
           return literal_span(bytes, byte_index)
@@ -928,10 +928,10 @@ module Mica::Regex
     # True when the plan proved every match starts at the start of the text,
     # so an unanchored search finds only what an anchored one at its offset
     # finds (nothing past offset 0).
-    private def anchored_start? : Bool
+    private def anchored_at_offset?(end_anchored : Bool) : Bool
       return false unless @engine.automata?
       plan = @plan
-      !!plan && plan.anchored_start?
+      !!plan && plan.anchored_at_offset?(end_anchored)
     end
 
     # The forward lazy DFA when this search may use it, or nil.

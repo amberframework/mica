@@ -68,6 +68,12 @@ module Mica::Regex
     # a run of ASCII bytes there without reading the table.
     @list_of_ascii_loops : Array(Bool)
 
+    # Per state: true when its match path has no assertion, so it holds
+    # wherever the state is reached; `search` then reads a run of bytes
+    # that lead back to the state with no edge work (`.*`) in one loop,
+    # and the match ends where the run does.
+    @list_of_match_loops : Array(Bool)
+
     def initialize(@byte_classes : ByteClasses, @table : Array(Int32), @match_edges : Array(Int32),
                    @list_of_edges : Array(Edge), @list_of_shadows : Array(Bool))
       @class_count = @byte_classes.class_count
@@ -81,6 +87,10 @@ module Mica::Regex
         step
       end
       @list_of_ascii_loops = Array(Bool).new(@match_edges.size) { |state| ascii_loop?(state) }
+      @list_of_match_loops = Array(Bool).new(@match_edges.size) do |state|
+        index = @match_edges[state]
+        index >= 0 && @list_of_edges[index].looks == 0
+      end
     end
 
     private def ascii_loop?(state : Int32) : Bool
@@ -235,10 +245,30 @@ module Mica::Regex
           charged = at
           allowed_end = at + meter.readable(Math.min(Math.min(size, stop) - at, PrefilterScan::CHARGE_CHUNK), at)
         end
+        bound = Math.min(Math.min(size, stop), allowed_end)
+        # A match just recorded here, in a state whose match path always
+        # holds (`@list_of_match_loops`), and a byte that leads back to it
+        # with no edge work (`.*`): each byte of that run ends a match
+        # with the same slots, so the run is read in one loop and the
+        # match ends where it stops. *bound* is past *at*: the meter
+        # allows at least one byte.
+        if found == at && pending_edge >= 0 && @list_of_match_loops.unsafe_fetch(state_of(row))
+          loop_step = steps[row &+ class_of[bytes[at]]]
+          if loop_step >= 0 && loop_step >> 2 == row && loop_step & STEP_TAKES_EDGE == 0
+            at &+= 1
+            if @list_of_ascii_loops.unsafe_fetch(state_of(row)) && at < bound
+              at = Core::ByteScan.skip_ascii(haystack, at, bound)
+            end
+            while at < bound && steps[row &+ class_of[bytes[at]]] == loop_step
+              at &+= 1
+            end
+            found = at
+            next
+          end
+        end
         # The common step (no edge work, no match path ahead) in a tight
         # loop up to the next bound, and short of the last byte, whose
         # position the check above must see: one table load per byte.
-        bound = Math.min(Math.min(size, stop), allowed_end)
         tight_bound = Math.min(bound, size - 1)
         entered = at
         while at < tight_bound

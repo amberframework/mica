@@ -164,26 +164,41 @@ module Mica::Regex
       return id if id < 0
       if generation == @generation
         @transition_table[state * dfa.stride + symbol] = entry_of(id)
-        mark_ascii_loop(dfa, state) if id == state
+        mark_ascii_loop(dfa, state, meter) if id == state
       end
       id
     end
 
     # Flags the entries of *state*'s own row on the ASCII symbols with
-    # `LazyDFA::ASCII_LOOP` once every one of them is built and leads back
-    # to *state*, and *state* is neither a match, dead nor a start state, so
-    # `LazyDFA#find_end` steps over a run of ASCII bytes there without
-    # reading the table. Forward only (the reverse DFA has no ASCII
-    # symbols listed).
-    private def mark_ascii_loop(dfa : LazyDFA, state : Int32) : Nil
-      return if @list_of_marks.unsafe_fetch(state) & (LazyDFA::MARK_MATCH | LazyDFA::MARK_DEAD | LazyDFA::MARK_START) != 0
+    # `LazyDFA::ASCII_LOOP` once every one of them leads back to *state*,
+    # and *state* is neither dead nor a start state, so `LazyDFA#find_end`
+    # steps over a run of ASCII bytes there without reading the table (in a
+    # match state, as `.*` makes, each byte of the run ends a match).
+    # Forward only (the reverse DFA has no ASCII symbols listed).
+    #
+    # The ASCII symbols the search has not met in *state* yet (the control
+    # bytes of English text) are built here when the built ones all lead
+    # back: each costs one `LazyDFA#next_key`, charged to *meter*, and is
+    # recorded only when it leads back too, so no state is added. At most
+    # 128 such keys per state, once per cache generation.
+    private def mark_ascii_loop(dfa : LazyDFA, state : Int32, meter : SearchMeter) : Nil
+      return if @list_of_marks.unsafe_fetch(state) & (LazyDFA::MARK_DEAD | LazyDFA::MARK_START) != 0
       symbols = dfa.list_of_ascii_symbols
       return if symbols.empty?
       row = state * dfa.stride
       symbols.each do |symbol|
-        return unless @transition_table.unsafe_fetch(row + symbol) & LazyDFA::ROW_MASK == row
+        entry = @transition_table.unsafe_fetch(row + symbol)
+        return unless entry < 0 || entry & LazyDFA::ROW_MASK == row
       end
-      symbols.each { |symbol| @transition_table[row + symbol] = row | LazyDFA::ASCII_LOOP }
+      key = @list_of_keys[state]
+      symbols.each do |symbol|
+        next unless @transition_table.unsafe_fetch(row + symbol) < 0
+        next_key = dfa.next_key(key, symbol, @builder, meter)
+        return unless next_key == key
+        @transition_table[row + symbol] = entry_of(state)
+      end
+      entry = entry_of(state) | LazyDFA::ASCII_LOOP
+      symbols.each { |symbol| @transition_table[row + symbol] = entry }
     end
 
     # The table entry for state *id*: its row offset (`id * stride`), with

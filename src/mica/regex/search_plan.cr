@@ -40,6 +40,11 @@ module Mica::Regex
     # the start state passes `\A` before it reads a byte): a search is
     # then anchored at its offset, and the reverse DFA is not needed.
     getter? anchored_start : Bool
+    # True when the empty string matches at every offset (a path from the
+    # start state reaches a match through no byte and no assertion, as in
+    # `.*` or `(a*)`): the leftmost match then starts at the search's
+    # offset (see `anchored_at_offset?`).
+    getter? empty_match_everywhere : Bool
     # The lazily built parts are published through atomics, so a search
     # on another thread that sees one sees it fully built.
     @reverse = Atomic(LazyDFA?).new(nil)
@@ -93,6 +98,17 @@ module Mica::Regex
       @prefilter = literal_set ? Prefilter.new(literal_set) : nil
       @literal_search = !!literal_set.try(&.exact?)
       @anchored_start = SearchPlan.anchored_start?(@program)
+      @empty_match_everywhere = SearchPlan.empty_match_everywhere?(@program)
+    end
+
+    # True when a search from an offset may run anchored there, as the
+    # leftmost match starts there if anywhere: every match starts at the
+    # start of the text (`anchored_start?`), or the empty string matches
+    # at every offset (`empty_match_everywhere?`) and the match need not
+    # end at the end of the text (*end_anchored* false; under it the
+    # empty match at the offset does not count).
+    def anchored_at_offset?(end_anchored : Bool) : Bool
+      @anchored_start || (@empty_match_everywhere && !end_anchored)
     end
 
     # The fewest bytes and the first bytes of a match (see `StartFilter`),
@@ -136,6 +152,23 @@ module Mica::Regex
         end
       end
       true
+    end
+
+    # True when a path from *program*'s start state reaches a match state
+    # through splits and group saves alone: no byte, and no assertion.
+    def self.empty_match_everywhere?(program : Program) : Bool
+      visited = Set(Int32).new
+      list_of_pending = [program.start_state]
+      while index = list_of_pending.pop?
+        next unless visited.add?(index)
+        state = program.state_at(index)
+        case state.kind
+        when .match? then return true
+        when .split? then list_of_pending << state.next_state << state.alternate
+        when .save?  then list_of_pending << state.next_state
+        end
+      end
+      false
     end
 
     # The reverse lazy DFA (built on first use; replaced once by
