@@ -46,6 +46,9 @@ module Mica::Regex
 
     def initialize(@program : Program, @haystack : String, @byte_index : Int32, @options : MatchOptions,
                    @limits : SearchLimits, @timeout : Time::Span?)
+      # The most work `fits?` allows: the ceiling, and under a timeout less
+      # than the meter does before its first clock read.
+      @work_cap = @timeout ? Math.min(@limits.work_ceiling, Core::WorkMeter::CLOCK_INTERVAL - 1) : @limits.work_ceiling
     end
 
     # True when the haystack is short and the offset one the searcher
@@ -131,9 +134,10 @@ module Mica::Regex
       4 * size + 64
     end
 
+    # See `SearchPlan#anchored_at_offset?`, with the common answers first.
     private def anchored?(plan : SearchPlan) : Bool
-      end_anchored = @program.options.end_anchored? || @options.end_anchored?
-      @program.options.anchored? || @options.anchored? || plan.anchored_at_offset?(end_anchored)
+      return true if @program.options.anchored? || @options.anchored? || plan.anchored_start?
+      plan.empty_match_everywhere? && !(@program.options.end_anchored? || @options.end_anchored?)
     end
 
     # True when validating the haystack and *steps* more operations fit
@@ -147,8 +151,7 @@ module Mica::Regex
     # clock read (see the type's comment).
     private def fits?(steps : Int32) : Bool
       needed = @haystack.bytesize.to_i64 + steps
-      return false if @limits.work_ceiling < needed
-      return false if @timeout && needed >= Core::WorkMeter::CLOCK_INTERVAL
+      return false if @work_cap < needed
       @limits.base_work >= needed || (@haystack.bytesize > 0 && @limits.work_per_byte >= needed)
     end
 

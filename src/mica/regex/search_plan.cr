@@ -127,6 +127,7 @@ module Mica::Regex
     # at every offset (`empty_match_everywhere?`) and the match need not
     # end at the end of the text (*end_anchored* false; under it the
     # empty match at the offset does not count).
+    @[AlwaysInline]
     def anchored_at_offset?(end_anchored : Bool) : Bool
       @anchored_start || (@empty_match_everywhere && !end_anchored)
     end

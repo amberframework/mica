@@ -210,6 +210,7 @@ module Mica::Regex
     #
     # With *stop*, a search still undecided when it reaches byte *stop*
     # returns `LazyDFA::GAVE_UP` there.
+    @[AlwaysInline]
     def search(haystack : Bytes, start : Int32, search_start : Int32, slots : Slice(Int64), scratch : Slice(Int64),
                meter : SearchMeter?, stop : Int32 = Int32::MAX) : {Int32, Int32}
       if @any_match_loop
