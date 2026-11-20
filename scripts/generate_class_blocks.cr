@@ -20,7 +20,7 @@ module Mica::Regex
   # The static set (id and whether it is complemented) whose ranges are
   # *bounds*, if any.
   def self.static_set_of(bounds : Array(Int32)) : {Int32, Bool}?
-    Unicode::Tables::SETS.size.times do |set_id|
+    Unicode::Tables::SET_COUNT.times do |set_id|
       static = Unicode.decoded_ranges(set_id).to_a
       return {set_id, false} if static == bounds
       return {set_id, true} if complement_of(static) == bounds

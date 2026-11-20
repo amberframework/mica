@@ -212,19 +212,42 @@ module Mica::Regex
 
     # The fold set of each ASCII code point, unrestricted then restricted
     # (`CaselessRestrict`), or nil for one that matches only itself. Built
-    # once per process on first use and only read afterward.
-    private ASCII_FOLDS = Array(CodePointSet?).new(256) do |index|
-      code_point = index // 2
-      restricted = index.odd?
-      members = [code_point]
+    # once per process and only read afterward: one exactly sized set per
+    # letter, shared by both entries when restriction changes nothing.
+    private ASCII_FOLDS = begin
+      list_of_sets = Array(CodePointSet?).new(256, nil)
+      0x80.times do |code_point|
+        unrestricted = ascii_fold_set(code_point, false)
+        list_of_sets[code_point * 2] = unrestricted
+        next unless unrestricted
+        # Restriction drops only partners outside ASCII.
+        reaches_outside_ascii = unrestricted.list_of_bounds[-1] >= 0x80
+        list_of_sets[code_point * 2 + 1] = reaches_outside_ascii ? ascii_fold_set(code_point, true) : unrestricted
+      end
+      list_of_sets
+    end
+
+    # The fold set of ASCII *code_point* (see `ASCII_FOLDS`), or nil.
+    private def self.ascii_fold_set(code_point : Int32, restricted : Bool) : CodePointSet?
+      members = StaticArray(Int32, 8).new(0)
+      count = 1
+      members[0] = code_point
       Unicode.each_fold_partner(code_point) do |partner|
-        members << partner unless restricted && partner >= 0x80
+        next if restricted && partner >= 0x80
+        members[count] = partner
+        count += 1
       end
-      if members.size == 1
-        nil
-      else
-        CodePointSet.new(members.map { |member| {member, member} })
+      return nil if count == 1
+      sorted = members.to_slice[0, count].sort!
+      bounds = Array(Int32).new(count * 2)
+      sorted.each do |member|
+        if bounds.size > 0 && member == bounds[-1] + 1
+          bounds[-1] = member
+        else
+          bounds << member << member
+        end
       end
+      CodePointSet.from_bounds(bounds)
     end
 
     # Returns the union of *list_of_sets*, charged to *ledger* and *meter*
