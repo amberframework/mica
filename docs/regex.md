@@ -317,7 +317,9 @@ is the value for that call; a `timeout:` that passes raises
 call, before the haystack is validated, and then at work checkpoints, so a
 timeout that has already passed fails any call before it reads the
 haystack, while a running search notices its deadline at the next
-checkpoint. Validation, every scan that reads ahead of an engine (the literal
+checkpoint. A timeout that has already passed is a zero or negative one: a
+positive timeout counts from the clock read that starts the call, so the
+call checks it again only at its checkpoints. Validation, every scan that reads ahead of an engine (the literal
 accelerators, the final-byte skip, the `FirstLine` line feed search), the
 stepping loops of the lazy DFAs (forward, reverse and from each start) and
 of the one-pass DFA, and the character index conversion of `match` and
@@ -471,9 +473,16 @@ starts. A DFA state that loops to itself (`.*`, `[^"]*`, and the start
 state of a pattern without literals) is stepped in a run whose table
 loads do not wait on each other; after a run shorter than 32 bytes the
 forward DFA steps byte by byte for the next 1,024, so the letters of a
-word under `\w+` cost nothing extra. The one-pass DFA steps such states
-the same way. A pattern whose every match starts at `\A` is searched anchored,
-with no reverse DFA. A lazy DFA gives up, and the search runs on the Pike
+word under `\w+` cost nothing extra. A match state that loops to itself
+(`(?s).*`) is stepped the same way unless the search wants the earliest
+match end, and the match ends where the run stops. The one-pass DFA
+steps such states the same way, a looping match state whose match path
+has no assertion included. A pattern whose every match starts at `\A` is
+searched anchored, with no reverse DFA, and so is a pattern whose empty
+match holds at every offset (a path from the start state reaches the
+match through no byte and no assertion, as in `.*` or `(a*)`) when the
+match need not end at the end of the text: the leftmost match then starts
+at the offset. A lazy DFA gives up, and the search runs on the Pike
 VM, when its cache thrashes or when the `CachePool` has no room. Once a DFA gives up in a call, the
 call's later searches go straight to the Pike VM, so the work a thrashing
 cache wastes is spent once per call. An unanchored forward DFA whose
@@ -602,11 +611,16 @@ the match only removes matches.
 reads (`c` in `(a|aa)*c`, `H`, `m` and `l` in `\w+\s+Holmes`), the rarest
 first, found once per program in one pass over the NFA (assertions taken
 as passing, so the set never claims too much). Before any engine runs, an
-`Auto` search whose plan has no literal prefilter looks for the rarest
-with `memchr` from its offset and returns no match when it is missing (a
-prefilter already skips to where a match can start, and each extra byte
-would read the haystack again): a ReDoS pattern over a haystack with no
-possible match costs one scan, not a DFA pass. The scan reads in the
+`Auto` search looks for each of them, rarest first, with `memchr` from
+its offset and returns no match when one is missing: a ReDoS pattern over
+a haystack with no possible match costs a scan, not a DFA pass. The
+rarest byte by English text is not always the missing one (`x` ranks
+rarer than `y` in `(x+x+)+y` over a run of x's), and `memchr` reads many
+bytes per cycle where a DFA reads about one. With a literal prefilter,
+which already skips to where a literal starts, the search looks only for
+the required bytes some prefix literal lacks
+(`SearchPlan#list_of_required_bytes_past_literals`: `y` past the literal
+`xx`). The scan reads in the
 windows the meter allows and charges each byte it reads. A call remembers
 where it found each byte, so an iteration call, whose next search starts
 after a match that contains the byte, reads the haystack at most once
@@ -628,11 +642,15 @@ much as the cost per byte:
   `matches?` over a haystack of at most 256 bytes return no match at once,
   with no lease and no engine, when too few bytes remain or none of them
   can start a match (only the first, when the search is anchored), or the
-  a required byte is missing. They do so only where the searcher would also return no match without raising:
+  a required byte is missing. They do so only where the searcher would also return no match without raising
+  (a positive timeout included: it counts from the start of the call, and
+  these searches do less work than the meter does before its first clock
+  read, `Core::WorkMeter::CLOCK_INTERVAL` operations, so the searcher would
+  read the clock only as the call starts):
   the haystack is valid UTF-8 and its validation and the filter's scans
   (`StartFilter#scan_work`) fit the work allowance, checked before the
   first scan,
-  the offset is a character boundary, and no timeout is set.
+  the offset is a character boundary, and any timeout is positive.
 - **Short haystacks on the one-pass DFA.** Once a one-pass program has had
   a few short searches (`ShortSearch::BUILD_AFTER`, so a pattern searched
   once does not pay to build it), a single search of at most 256 bytes runs
@@ -839,13 +857,19 @@ do, into a `DFACache` leased for the search:
 - **Byte classes** (`ByteClasses`) group bytes no state can tell apart, so
   a state has one transition per class.
 - **ASCII loops.** Once every ASCII byte's transition out of a forward
-  state is built and leads back to it, and the state is neither a match,
-  dead nor a start state (the loop of `(?s:.)*`), the entries of its own
+  state leads back to it, and the state is neither dead nor a start state
+  (the loop of `(?s:.)*`, a match state there), the entries of its own
   row carry a flag, and the search steps over a run of ASCII bytes there
   eight at a time without reading the table, within the bytes the meter
-  has allowed. `(?s)^((.*)()()($))` over 7 MB of source goes from about
-  14 ms to 1 ms. A row offset is a multiple of 8, which leaves the flag
-  its bit.
+  has allowed; in a match state the match ends where the run stops. When
+  a state's transition leads back to it and the ASCII transitions built
+  so far all do, the ones the search has not met there yet (the control
+  bytes English text lacks) are built at once, each charged as its
+  closure is computed, and kept only when they lead back too.
+  `(?s)^((.*)()()($))` over 7 MB of source goes from about 14 ms to
+  1 ms, and `(?s).*` over 595 KB of English from about 3.2 ms to 70 us.
+  A row offset is a multiple of 8, which leaves the flag its bit; the
+  flagged entries keep the match flag of the state.
 - **Cost:** every byte read, every NFA state a new state's closure visits,
   and every state a cache clear discards is charged one operation. A cache
   that would pass `CachePool#max_cache_bytes` is cleared, and no
