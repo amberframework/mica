@@ -114,13 +114,19 @@ module Mica::Regex
     # *state* back to it with no assertion and no slot (`.*`, `[^"]*`): a
     # run there is likely long. A narrow loop (`\s+` between words) ends
     # within a byte or two, where the run costs more than it saves.
+    #
+    # It reads one cell per byte class, not per byte: the DFA is built on a
+    # program's first search, where 256 reads per state cost more than the
+    # search (about 15 us for the 27 states of `(a+)|(b+)|...|(z+)`).
     private def loops_without_edge_work?(state : Int32) : Bool
       row = state * @class_count
-      class_of = @byte_classes.table
-      (0..255).count do |byte|
-        step = @steps[row + class_of[byte]]
-        step >= 0 && step & STEP_TAKES_EDGE == 0 && step >> 2 == row
-      end >= WIDE_LOOP_BYTES
+      looping_bytes = 0
+      @class_count.times do |class_index|
+        step = @steps.unsafe_fetch(row + class_index)
+        next unless step >= 0 && step & STEP_TAKES_EDGE == 0 && step >> 2 == row
+        looping_bytes += @byte_classes.class_size(class_index)
+      end
+      looping_bytes >= WIDE_LOOP_BYTES
     end
 
     # See `loops_without_edge_work?`.
