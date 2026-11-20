@@ -20,25 +20,48 @@ module RegexBench
   #
   #   <runner> [--rebar-haystacks DIR] [--max-samples N] [--min-samples N]
   #            [--phase-seconds S] < case.json
+  #   <runner> [--rebar-haystacks DIR] --process-cold < case.json
+  #   <runner> --page-in
   #   <runner> --describe
+  #
+  # `--process-cold` times only the first compile plus search and writes a
+  # `ProcessColdSample`; `--page-in` touches the runner's own pages and
+  # writes a `PageInSummary` (see `PageInTheRunnerImage`).
   class RunnerProgram
+    enum Mode
+      MeasureTheCase
+      ProcessCold
+      PageIn
+      Describe
+    end
+
     def initialize(@engine : Engine, @list_of_arguments : Array(String), @input : IO, @output : IO)
       @rebar_haystack_directory = ""
       @settings = MeasurementSettings.new
-      @describe_only = false
+      @mode = Mode::MeasureTheCase
     end
 
     def run : Nil
       parse_arguments
-      if @describe_only
+      case @mode
+      in .describe?
         EngineDescription.new(@engine.name, @engine.version, @engine.ready?, @engine.pending_reason).to_json(@output)
-      else
-        benchmark_case = BenchmarkCase.from_json(@input.gets_to_end)
-        MeasureACase.new(@engine, benchmark_case, @settings, @rebar_haystack_directory).perform.to_json(@output)
+      in .page_in?
+        PageInTheRunnerImage.new.perform.to_json(@output)
+      in .process_cold?
+        MeasureTheProcessColdSearch.new(@engine, read_the_case, @rebar_haystack_directory).perform.to_json(@output)
+      in .measure_the_case?
+        MeasureACase.new(@engine, read_the_case, @settings, @rebar_haystack_directory).perform.to_json(@output)
       end
       @output.puts
       @output.flush
     end
+
+    private def read_the_case : BenchmarkCase
+      BenchmarkCase.from_json(@input.gets_to_end)
+    end
+
+    MODE_FLAGS = {"--describe" => Mode::Describe, "--page-in" => Mode::PageIn, "--process-cold" => Mode::ProcessCold}
 
     # Parses `--name value` pairs by hand: stdlib OptionParser matches its
     # flags with Regex, which would link PCRE2 into the Mica runner.
@@ -49,8 +72,8 @@ module RegexBench
       index = 0
       while index < @list_of_arguments.size
         flag = @list_of_arguments[index]
-        if flag == "--describe"
-          @describe_only = true
+        if mode = MODE_FLAGS[flag]?
+          @mode = mode
           index += 1
           next
         end

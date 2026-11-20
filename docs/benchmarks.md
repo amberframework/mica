@@ -45,12 +45,39 @@ ignores it). The harness's own specs:
 
 ```sh
 crystal-alpha spec bench/regex/spec
+# with release runners built (bench/regex/run.sh builds them into bench/bin/regex):
+REGEX_BENCH_RUNNERS=bench/bin/regex crystal-alpha spec bench/regex/spec/first_case_process_cold_spec.cr
 ```
+
+The second command proves that the first case a runner binary meets gets
+the process-cold time it measures standalone: over 9 interleaved rounds it
+pairs a run of rebar's `captures/contiguous-letters` on a never-touched
+copy of the runners with a run on a copy that has run it before, and
+requires the 99% paired-bootstrap interval of their ratio to contain 1. As
+a control it shows that, without the page-in, a never-touched Mica runner
+is still slow on its first case. The samples go to
+`bench/data/regex/spec-runs/<id>/first_case_process_cold.json`.
 
 ## Engines
 
 Each engine is its own program, and every case runs in a fresh process of
 it, one process at a time, so linkage and memory stay separate.
+
+Cases run in an order shuffled by a seed (random unless `--seed N` is
+given, and recorded in `run.json` and the report), and the engines run in
+a shuffled order per case, so no case is always the first one a runner
+binary meets. Each ReDoS family keeps its sizes ascending, so a timeout
+still skips the larger sizes. The report lists cases in corpus order.
+
+Every timed runner process starts right after an untimed `--page-in`
+process of the same binary: it reads one byte of every file-backed page of
+the runner and of each library it loaded from outside the system's shared
+cache, and does no regex work. The first process to touch a page of a
+freshly built binary pays to bring it into the page cache and, on macOS, to
+check it against the code signature; that cost is paid once per binary, and
+before this pass it landed inside the process-cold time of whichever case
+ran first (rebar `captures/contiguous-letters`: Mica 986 us as the first case
+against 84 us once paged in).
 
 | Engine | Program | What it is |
 |---|---|---|
@@ -118,7 +145,11 @@ Per case and engine:
 - **cold first search**: compile plus one search, a new compiled pattern
   each sample, in a process that has already run the case once;
 - **process-cold**: compile plus the first search as the first regex work
-  of a fresh runner process (one process per case and engine), timed once;
+  of a fresh runner process: `--process-cold-samples` (default 5, 3 with
+  `--quick`) fresh `--process-cold` processes per case and engine, each
+  doing nothing else, in rounds that alternate the engines; the median is
+  reported and every sample is kept in `results.jsonl`
+  (`list_of_process_cold_seconds`);
 - **warm search**: one full iteration of the case's model (rebar's
   `count`, `count-spans`, `count-captures`, `grep`, `grep-captures`, or
   `first-match` for ReDoS) with a compiled pattern;

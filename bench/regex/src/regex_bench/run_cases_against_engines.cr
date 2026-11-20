@@ -16,15 +16,23 @@ module RegexBench
     phase_seconds : Float64,
     case_timeout_seconds : Float64,
     redos_timeout_seconds : Float64,
+    process_cold_samples : Int32,
+    case_order_seed : UInt64,
     mica_ref : String,
     mica_commit : String,
     harness_commit : String
 
-  # When the driver is started, then it runs every selected case in a fresh
-  # process of each selected engine, one process at a time, stops a process
-  # that passes its time cap, skips the larger sizes of a ReDoS family once
-  # a smaller one timed out, and appends each `CaseResult` to results.jsonl
-  # beside a run.json describing the machine and toolchain.
+  # When the driver is started, then it runs every selected case, in an
+  # order shuffled by the recorded seed, in a fresh process of each selected
+  # engine (engines in a shuffled order per case), one process at a time,
+  # then takes the case's process-cold samples: rounds of one fresh
+  # `--process-cold` process per engine. Every timed runner process starts
+  # right after an untimed `--page-in` process of the same runner binary,
+  # identical for every engine, so the once-per-binary cost of bringing its
+  # pages in lands on no case. It stops a process that passes its time cap,
+  # skips the larger sizes of a ReDoS family once a smaller one timed out,
+  # and appends each `CaseResult` to results.jsonl beside a run.json
+  # describing the machine and toolchain.
   class RunCasesAgainstEngines
     RUNNER_BINARIES = {
       "pcre2-jit"         => "pcre2_jit_runner",
@@ -35,23 +43,23 @@ module RegexBench
     def initialize(@settings : DriverSettings, @progress : IO)
       @corpus = Corpus.new(@settings.corpus_directory, @settings.data_directory)
       @timed_out_families = Set(Tuple(String, String)).new
+      @random = Random::PCG32.new(@settings.case_order_seed)
     end
 
     def perform : Nil
       Dir.mkdir_p(@settings.output_directory)
       list_of_descriptions = @settings.list_of_engines.map { |engine| describe(engine) }
       record = build_run_record(list_of_descriptions)
-      list_of_cases = selected_cases
-      @progress.puts "#{list_of_cases.size} cases x #{@settings.list_of_engines.size} engines -> #{@settings.output_directory}"
+      list_of_cases = OrderCasesAtRandom.new(selected_cases, @settings.case_order_seed).perform
+      @progress.puts "#{list_of_cases.size} cases x #{@settings.list_of_engines.size} engines, case order seed #{@settings.case_order_seed} -> #{@settings.output_directory}"
 
       File.open(File.join(@settings.output_directory, "results.jsonl"), "w") do |results|
         list_of_cases.each_with_index do |benchmark_case, index|
-          @settings.list_of_engines.each do |engine|
-            case_result = run_one(engine, benchmark_case)
+          run_the_case(benchmark_case).each do |case_result|
             case_result.to_json(results)
             results.puts
             results.flush
-            @progress.puts "[#{index + 1}/#{list_of_cases.size}] #{engine} #{benchmark_case.id}: #{case_result.status} #{summary_of(case_result)}"
+            @progress.puts "[#{index + 1}/#{list_of_cases.size}] #{case_result.engine} #{benchmark_case.id}: #{case_result.status} #{summary_of(case_result)}"
             @progress.flush
           end
         end
@@ -66,6 +74,69 @@ module RegexBench
       end
     end
 
+    # Runs *benchmark_case* in every engine, then adds the process-cold
+    # samples to each result that finished.
+    private def run_the_case(benchmark_case : BenchmarkCase) : Array(CaseResult)
+      list_of_results = @settings.list_of_engines.shuffle(@random).map { |engine| run_one(engine, benchmark_case) }
+      samples_by_engine = take_process_cold_samples(benchmark_case, list_of_results)
+      list_of_results.map do |case_result|
+        list_of_seconds = samples_by_engine[case_result.engine]?
+        if list_of_seconds && !list_of_seconds.empty?
+          case_result.with_process_cold(list_of_seconds)
+        elsif case_result.succeeded?
+          case_result.with_process_cold([case_result.process_first_search_seconds])
+        else
+          case_result
+        end
+      end
+    end
+
+    # Takes `process_cold_samples` rounds; each round runs one fresh
+    # `--process-cold` process per engine, in a shuffled order. An engine
+    # whose first search took longer than the slow-iteration cap keeps its
+    # single in-process sample, as `MeasureACase` does for cold search.
+    private def take_process_cold_samples(benchmark_case : BenchmarkCase,
+                                          list_of_results : Array(CaseResult)) : Hash(String, Array(Float64))
+      slow_seconds = MeasurementSettings.new.slow_iteration_seconds
+      list_of_sampled_engines = list_of_results.select { |case_result|
+        case_result.succeeded? && case_result.process_first_search_seconds < slow_seconds
+      }.map(&.engine)
+      samples_by_engine = Hash(String, Array(Float64)).new { |hash, engine| hash[engine] = [] of Float64 }
+      @settings.process_cold_samples.times do
+        list_of_sampled_engines.shuffle(@random).each do |engine|
+          if seconds = process_cold_seconds(engine, benchmark_case)
+            samples_by_engine[engine] << seconds
+          end
+        end
+      end
+      samples_by_engine
+    end
+
+    private def process_cold_seconds(engine : String, benchmark_case : BenchmarkCase) : Float64?
+      page_in(engine)
+      outcome = RunOneRunnerProcess.new(runner_path(engine), process_cold_arguments, benchmark_case.to_json,
+        timeout_for(benchmark_case)).perform
+      line = outcome.standard_output.lines.last?
+      return if outcome.timed_out? || line.nil?
+      sample = ProcessColdSample.from_json(line)
+      sample.seconds if sample.succeeded?
+    rescue JSON::ParseException
+      nil
+    end
+
+    # Runs the engine's runner once with `--page-in`, untimed: no regex
+    # work, only its own pages brought in (see `PageInTheRunnerImage`).
+    private def page_in(engine : String) : Nil
+      outcome = RunOneRunnerProcess.new(runner_path(engine), ["--page-in"], "", 60.0).perform
+      line = outcome.standard_output.lines.last?
+      raise Error.new("#{engine} runner did not page itself in: #{outcome.standard_error}") unless line
+      begin
+        PageInSummary.from_json(line)
+      rescue JSON::ParseException
+        raise Error.new("#{engine} runner wrote no page-in summary: #{outcome.standard_error}")
+      end
+    end
+
     private def run_one(engine : String, benchmark_case : BenchmarkCase) : CaseResult
       family_key = {engine, benchmark_case.family}
       if benchmark_case.belongs_to_the_redos_set? && @timed_out_families.includes?(family_key)
@@ -73,7 +144,8 @@ module RegexBench
           detail: "a smaller size of this family timed out")
       end
 
-      timeout = benchmark_case.belongs_to_the_redos_set? ? @settings.redos_timeout_seconds : @settings.case_timeout_seconds
+      timeout = timeout_for(benchmark_case)
+      page_in(engine)
       outcome = RunOneRunnerProcess.new(runner_path(engine), runner_arguments, benchmark_case.to_json, timeout).perform
       if outcome.timed_out?
         @timed_out_families << family_key if benchmark_case.belongs_to_the_redos_set?
@@ -109,6 +181,14 @@ module RegexBench
        "--phase-seconds", @settings.phase_seconds.to_s]
     end
 
+    private def timeout_for(benchmark_case : BenchmarkCase) : Float64
+      benchmark_case.belongs_to_the_redos_set? ? @settings.redos_timeout_seconds : @settings.case_timeout_seconds
+    end
+
+    private def process_cold_arguments : Array(String)
+      ["--rebar-haystacks", @corpus.rebar_haystack_directory, "--process-cold"]
+    end
+
     private def describe(engine : String) : EngineDescription
       outcome = RunOneRunnerProcess.new(runner_path(engine), ["--describe"], "", 60.0).perform
       line = outcome.standard_output.lines.last? || raise Error.new("#{engine} runner did not describe itself: #{outcome.standard_error}")
@@ -117,7 +197,8 @@ module RegexBench
 
     private def summary_of(case_result : CaseResult) : String
       return case_result.detail unless case_result.succeeded?
-      "warm #{(case_result.warm_search.median * 1000).round(3)} ms, compile #{(case_result.compile.median * 1_000_000).round(1)} us, count #{case_result.count}"
+      "warm #{(case_result.warm_search.median * 1000).round(3)} ms, compile #{(case_result.compile.median * 1_000_000).round(1)} us, " \
+      "process-cold #{(case_result.process_cold_seconds * 1_000_000).round(1)} us, count #{case_result.count}"
     end
 
     private def build_run_record(list_of_descriptions : Array(EngineDescription)) : RunRecord
@@ -140,7 +221,9 @@ module RegexBench
         phase_seconds: @settings.phase_seconds,
         case_timeout_seconds: @settings.case_timeout_seconds,
         redos_timeout_seconds: @settings.redos_timeout_seconds,
-        engines: list_of_descriptions)
+        engines: list_of_descriptions,
+        case_order_seed: @settings.case_order_seed,
+        process_cold_samples: @settings.process_cold_samples)
     end
 
     private def cpu_name : String

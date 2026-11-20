@@ -7,6 +7,15 @@ module RegexBench
   # `iterations_per_sample` is the batch each sample timed as one and
   # divided by (see `TimeInCalibratedBatches`): 1 when each operation was
   # timed alone.
+  # A ratio with the low and high ends of its confidence interval.
+  record RatioInterval, ratio : Float64, low : Float64, high : Float64 do
+    include JSON::Serializable
+
+    def includes?(value : Float64) : Bool
+      @low <= value <= @high
+    end
+  end
+
   struct Statistics
     include JSON::Serializable
 
@@ -56,6 +65,27 @@ module RegexBench
       covariance = xs.zip(ys).sum { |x, y| (x - mean_x) * (y - mean_y) }
       variance = xs.sum { |x| (x - mean_x) ** 2 }
       variance == 0 ? 0.0 : covariance / variance
+    end
+
+    # Returns the median of the paired ratios numerator[i] / denominator[i]
+    # with a paired bootstrap interval at *confidence*: each resample draws
+    # the pairs again with replacement and takes the median ratio. Pairs
+    # taken side by side cancel drift in the machine's speed. *seed* makes
+    # the interval reproducible.
+    def self.paired_ratio_interval(numerator : Array(Float64), denominator : Array(Float64), *,
+                                   resamples : Int32 = 4000, confidence : Float64 = 0.95,
+                                   seed : UInt64 = 1_u64) : RatioInterval
+      raise ArgumentError.new("paired samples need equal, non-zero counts") if numerator.empty? || numerator.size != denominator.size
+      list_of_pair_ratios = numerator.zip(denominator).map { |top, bottom| top / bottom }
+      random = Random::PCG32.new(seed)
+      list_of_medians = Array(Float64).new(resamples) do
+        resample = Array(Float64).new(list_of_pair_ratios.size) { list_of_pair_ratios.sample(random) }
+        percentile(resample.sort!, 0.5)
+      end
+      list_of_medians.sort!
+      tail = (1.0 - confidence) / 2
+      RatioInterval.new(ratio: percentile(list_of_pair_ratios.sort, 0.5),
+        low: percentile(list_of_medians, tail), high: percentile(list_of_medians, 1.0 - tail))
     end
 
     def has_samples? : Bool
