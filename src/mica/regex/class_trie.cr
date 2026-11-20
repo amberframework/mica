@@ -52,6 +52,16 @@ module Mica::Regex
       end
     end
 
+    # Frees the trie and its lists. Its owner calls this once it is done
+    # with the trie, which nothing else holds and which is never shifted.
+    def release : Nil
+      GC.free(@list_of_nodes.to_unsafe.as(Void*))
+      GC.free(@list_of_nodes.as(Void*))
+      GC.free(@list_of_edges.to_unsafe.as(Void*))
+      GC.free(@list_of_edges.as(Void*))
+      GC.free(self.as(Void*))
+    end
+
     # Returns true when the set had no UTF-8 sequences (surrogates only,
     # `\p{Cs}`): like an empty class, it never matches.
     def empty? : Bool

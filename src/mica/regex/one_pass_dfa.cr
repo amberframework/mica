@@ -41,7 +41,10 @@ module Mica::Regex
     # is not one-pass or is too large.
     def self.build(program : Program, byte_classes : ByteClasses) : OnePassDFA?
       return nil if program.state_count > MAX_STATES || program.slot_count > MAX_SLOTS
-      OnePassBuilder.new(program, byte_classes).build
+      builder = OnePassBuilder.new(program, byte_classes)
+      one_pass = builder.build
+      builder.release
+      one_pass
     end
 
     # The most cells the one-pass table of *program* can have: one row of
@@ -529,18 +532,36 @@ module Mica::Regex
     # match path.
     @list_of_shadows = [] of Bool
     @seen : Array(Int32)
+    # The paths `explore` has still to follow, reused for every DFA state.
+    @stack = [] of Path
 
     # A table of at most this many cells (one row per NFA state, the most
-    # the DFA can have) is allocated once at that size instead of grown
-    # row by row, which would allocate about twice the final table.
+    # the DFA can have) counts as small (see `OnePassDFA.small?`).
     PRESIZED_TABLE_CELLS = 4096
+    # The rows the table starts with room for. Most one-pass DFAs have a few
+    # states where the program has dozens (each row is one NFA state the
+    # DFA could start a state from), so the table grows from here rather
+    # than starting at its largest, which the first search would allocate,
+    # and keep, in full.
+    FIRST_TABLE_ROWS = 4
 
     def initialize(@program : Program, @byte_classes : ByteClasses)
       @dfa_state_of = Array(Int32).new(@program.state_count, -1)
       @seen = Array(Int32).new(@program.state_count, -1)
-      if OnePassDFA.small?(@program, @byte_classes)
-        @table = Array(Int32).new(OnePassDFA.most_cells(@program, @byte_classes).to_i32)
+      rows = Math.min(@program.state_count, FIRST_TABLE_ROWS)
+      @table = Array(Int32).new(rows * @byte_classes.class_count)
+    end
+
+    # Frees the builder and the lists the DFA does not keep, once `build`
+    # is done: the builder alone holds them, and never shifts them.
+    def release : Nil
+      {@dfa_state_of, @seen, @list_of_roots}.each do |list|
+        GC.free(list.to_unsafe.as(Void*))
+        GC.free(list.as(Void*))
       end
+      GC.free(@stack.to_unsafe.as(Void*))
+      GC.free(@stack.as(Void*))
+      GC.free(self.as(Void*))
     end
 
     def build : OnePassDFA?
@@ -550,7 +571,20 @@ module Mica::Regex
         return nil unless explore(index)
         index += 1
       end
-      OnePassDFA.new(@byte_classes, @table, @match_edges, @list_of_edges, @list_of_shadows)
+      OnePassDFA.new(@byte_classes, OnePassBuilder.trimmed(@table), @match_edges, OnePassBuilder.trimmed(@list_of_edges),
+        @list_of_shadows)
+    end
+
+    # *list*, or (when growing it left more than half its room unused) a
+    # copy of exactly its size, the list freed: the DFA keeps it for as long
+    # as the program lives. The builder alone holds the list, and never
+    # shifts it.
+    protected def self.trimmed(list : Array(T)) : Array(T) forall T
+      return list if list.size * 2 >= list.remaining_capacity
+      exact = Array(T).new(list.size)
+      exact.concat(list)
+      GC.free(list.to_unsafe.as(Void*))
+      exact
     end
 
     private def root_of(nfa_state : Int32) : Int32
@@ -559,15 +593,33 @@ module Mica::Regex
       id = @list_of_roots.size
       @list_of_roots << nfa_state
       @dfa_state_of[nfa_state] = id
-      @byte_classes.class_count.times { @table << -1 }
+      add_table_row
       @match_edges << -1
       @list_of_shadows << false
       id
     end
 
+    # Appends a row of empty cells to the table, growing it by half (at
+    # least `FIRST_TABLE_ROWS` rows) rather than doubling it: the table
+    # is kept for as long as the program lives, so its spare room would
+    # stay allocated too. The list it outgrew is freed (the builder alone
+    # holds it, and never shifts it).
+    private def add_table_row : Nil
+      class_count = @byte_classes.class_count
+      if @table.size + class_count > @table.remaining_capacity
+        grown = Array(Int32).new(@table.size + Math.max(FIRST_TABLE_ROWS * class_count, @table.size // 2))
+        grown.concat(@table)
+        GC.free(@table.to_unsafe.as(Void*))
+        @table = grown
+      end
+      class_count.times { @table << -1 }
+    end
+
     private def explore(dfa_state : Int32) : Bool
       class_count = @byte_classes.class_count
-      stack = [Path.new(@list_of_roots[dfa_state], 0_u64, 0_u32)]
+      stack = @stack
+      stack.clear
+      stack << Path.new(@list_of_roots[dfa_state], 0_u64, 0_u32)
       matched = false
       while path = stack.pop?
         current = path.state

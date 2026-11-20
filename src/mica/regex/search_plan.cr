@@ -158,7 +158,7 @@ module Mica::Regex
     # True when every path from *program*'s start state reaches a
     # `StartOfText` assertion before it reads a byte or matches.
     def self.anchored_start?(program : Program) : Bool
-      visited = Set(Int32).new
+      visited = VisitedStates.new(program.state_count)
       list_of_pending = [program.start_state]
       while index = list_of_pending.pop?
         next unless visited.add?(index)
@@ -180,10 +180,36 @@ module Mica::Regex
       true
     end
 
+    # The NFA states a walk from the start state has visited: bits on the
+    # stack for a program of up to `SMALL_STATES` states (no allocation, as
+    # the first search of most programs needs), a set for a larger one.
+    private struct VisitedStates
+      SMALL_STATES = 512
+
+      @bits = StaticArray(UInt64, 8).new(0_u64)
+      @large : Set(Int32)? = nil
+
+      def initialize(state_count : Int32)
+        @large = Set(Int32).new if state_count > SMALL_STATES
+      end
+
+      # Marks *index* visited; false when it already was.
+      def add?(index : Int32) : Bool
+        if large = @large
+          return large.add?(index)
+        end
+        word = index >> 6
+        bit = 1_u64 << (index & 63)
+        return false if @bits[word] & bit != 0
+        @bits[word] |= bit
+        true
+      end
+    end
+
     # True when a path from *program*'s start state reaches a match state
     # through splits and group saves alone: no byte, and no assertion.
     def self.empty_match_everywhere?(program : Program) : Bool
-      visited = Set(Int32).new
+      visited = VisitedStates.new(program.state_count)
       list_of_pending = [program.start_state]
       while index = list_of_pending.pop?
         next unless visited.add?(index)

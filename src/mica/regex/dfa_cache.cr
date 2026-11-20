@@ -48,8 +48,14 @@ module Mica::Regex
     # The fewest states a retry builds before its rate can count as
     # thrashing.
     RETRY_STATES = 32
-    @list_of_keys : Array(Array(Int32))
-    @state_ids : Hash(Array(Int32), Int32)
+    # The keys of the states, one after another, and where each begins
+    # (one entry more than there are states): a state costs no allocation
+    # of its own, only growth of these lists (see `key_of`).
+    @key_store : Array(Int32)
+    @key_starts : Array(Int32)
+    # The states by key: an open-addressing table of state ids (`NO_STATE`
+    # where empty), a power of two in size, never more than half full.
+    @state_slots : Array(Int32)
     @start_states : Array(Int32)
     @builder : DFABuilder
     @bytes_used = 0_i64
@@ -81,7 +87,7 @@ module Mica::Regex
     end
 
     protected def self.fixed_bytes_of(dfa : LazyDFA) : Int64
-      DFABuilder::BYTES_PER_STATE.to_i64 * dfa.node_count + 4_i64 * LazyDFA::START_FLAG_COUNT + 256
+      DFABuilder::BYTES_PER_STATE.to_i64 * dfa.node_count + 4_i64 * dfa.start_slot_count + 256
     end
 
     protected def self.state_bytes_of(dfa : LazyDFA, key_size : Int32) : Int64
@@ -90,12 +96,24 @@ module Mica::Regex
       4_i64 * dfa.stride + 1 + 32 + 4_i64 * key_size + 48 + 8
     end
 
+    # The states a new cache has room for before its lists grow: the two
+    # dead states, a start state or two, and the few states a short
+    # pattern builds on its first search.
+    private FIRST_STATES = 8
+    # The most entries the transition table starts with room for: a DFA
+    # with Unicode word assertions has a stride of a hundred or more.
+    private FIRST_TABLE_ENTRIES = 256
+    # An empty slot of `@state_slots`.
+    private NO_STATE = -1
+
     protected def initialize(@dfa : LazyDFA, @pool : CachePool, @reservation : CacheReservation, @builder : DFABuilder)
-      @transition_table = [] of Int32
-      @list_of_marks = [] of UInt8
-      @list_of_keys = [] of Array(Int32)
-      @state_ids = {} of Array(Int32) => Int32
-      @start_states = Array(Int32).new(LazyDFA::START_FLAG_COUNT, -1)
+      @transition_table = Array(Int32).new(Math.min(FIRST_STATES * @dfa.stride, FIRST_TABLE_ENTRIES))
+      @list_of_marks = Array(UInt8).new(FIRST_STATES)
+      @key_store = Array(Int32).new(FIRST_STATES * 2)
+      @key_starts = Array(Int32).new(FIRST_STATES + 1)
+      @key_starts << 0
+      @state_slots = Array(Int32).new(FIRST_STATES * 2, NO_STATE)
+      @start_states = Array(Int32).new(@dfa.start_slot_count, -1)
       reset_states
     end
 
@@ -146,10 +164,11 @@ module Mica::Regex
     # Returns the start state for *flags*, building it when needed, or
     # `LazyDFA::GAVE_UP`.
     def start_state(dfa : LazyDFA, flags : Int32, meter : SearchMeter) : Int32
-      cached = @start_states.unsafe_fetch(flags)
+      slot = dfa.start_slot(flags)
+      cached = @start_states.unsafe_fetch(slot)
       return cached if cached >= 0
-      id = intern(dfa.start_key(flags), meter)
-      @start_states[flags] = id if id >= 0
+      id = intern(dfa.start_key(flags, @builder), meter)
+      @start_states[slot] = id if id >= 0
       id
     end
 
@@ -157,7 +176,7 @@ module Mica::Regex
     # the next state (or `LazyDFA::GAVE_UP`). Building may clear the cache;
     # the transition is then not recorded, as *state* no longer exists.
     def transition(dfa : LazyDFA, state : Int32, symbol : Int32, meter : SearchMeter) : Int32
-      key = dfa.next_key(@list_of_keys[state], symbol, @builder, meter)
+      key = dfa.next_key(key_of(state), symbol, @builder, meter)
       return LazyDFA::GAVE_UP unless key
       generation = @generation
       id = intern(key, meter)
@@ -190,7 +209,7 @@ module Mica::Regex
         entry = @transition_table.unsafe_fetch(row + symbol)
         return unless entry < 0 || entry & LazyDFA::ROW_MASK == row
       end
-      key = @list_of_keys[state]
+      key = key_of(state)
       symbols.each do |symbol|
         next unless @transition_table.unsafe_fetch(row + symbol) < 0
         next_key = dfa.next_key(key, symbol, @builder, meter)
@@ -213,9 +232,28 @@ module Mica::Regex
       offset
     end
 
-    private def intern(key : Array(Int32), meter : SearchMeter) : Int32
-      if id = @state_ids[key]?
-        return id
+    # The key of state *id*: a view of `@key_store`, valid until the next
+    # state is added.
+    @[AlwaysInline]
+    private def key_of(id : Int32) : Slice(Int32)
+      first = @key_starts.unsafe_fetch(id)
+      Slice.new(@key_store.to_unsafe + first, @key_starts.unsafe_fetch(id + 1) - first)
+    end
+
+    # The number of states the cache holds.
+    private def state_count : Int32
+      @key_starts.size - 1
+    end
+
+    # The id of the state with *key*, adding the state when it is new (or
+    # `LazyDFA::GAVE_UP`). *key* is the builder's key, which a new state
+    # copies.
+    private def intern(key : Slice(Int32), meter : SearchMeter) : Int32
+      mask = @state_slots.size - 1
+      slot = DFACache.key_hash(key) & mask
+      while (id = @state_slots.unsafe_fetch(slot)) != NO_STATE
+        return id if key_of(id) == key
+        slot = (slot + 1) & mask
       end
       cost = state_bytes(key.size)
       if @bytes_used + cost > @pool.max_cache_bytes
@@ -225,13 +263,21 @@ module Mica::Regex
       return LazyDFA::GAVE_UP unless reserve(@bytes_used + cost)
       @widest_key = key.size if key.size > @widest_key
       @wide_states += 1 if key.size > SearchPlan::WIDE_REVERSE_KEY
-      add_state(key.dup, cost)
+      add_state(key, cost)
     end
 
-    private def add_state(key : Array(Int32), cost : Int64) : Int32
-      id = @list_of_keys.size
-      @list_of_keys << key
-      @state_ids[key] = id
+    # A hash of *key* for `@state_slots` (FNV-1a over the entries).
+    protected def self.key_hash(key : Slice(Int32)) : Int32
+      hash = 0x811C9DC5_u32
+      key.each { |value| hash = (hash ^ value.to_u32!) &* 0x01000193_u32 }
+      (hash ^ (hash >> 16)).to_i32! & Int32::MAX
+    end
+
+    private def add_state(key : Slice(Int32), cost : Int64) : Int32
+      id = state_count
+      @key_store.concat(key)
+      @key_starts << @key_store.size
+      place(id)
       # The dead states lead only to the dead state (entry 0 | SPECIAL).
       @transition_table.concat(id <= LazyDFA::DEAD_MATCH ? @dfa.dead_row : @dfa.unbuilt_row)
       mark = 0_u8
@@ -245,6 +291,29 @@ module Mica::Regex
       id
     end
 
+    # Records state *id* in `@state_slots`, doubling the table first when
+    # it would pass half full.
+    private def place(id : Int32) : Nil
+      grow_slots if (id + 1) * 2 > @state_slots.size
+      put_slot(id, @state_slots.size - 1)
+    end
+
+    private def put_slot(id : Int32, mask : Int32) : Nil
+      slot = DFACache.key_hash(key_of(id)) & mask
+      while @state_slots.unsafe_fetch(slot) != NO_STATE
+        slot = (slot + 1) & mask
+      end
+      @state_slots[slot] = id
+    end
+
+    private def grow_slots : Nil
+      size = @state_slots.size * 2
+      @state_slots.fill(NO_STATE)
+      (size - @state_slots.size).times { @state_slots << NO_STATE }
+      # The newest state is placed by the caller.
+      (state_count - 1).times { |id| put_slot(id, size - 1) }
+    end
+
     private def reserve(bytes : Int64) : Bool
       @reservation.cover(bytes, ceiling: @pool.max_cache_bytes)
     end
@@ -254,15 +323,17 @@ module Mica::Regex
     # that finds it so when the search can go on from each start
     # (`hands_over_to`).
     private def clear(meter : SearchMeter) : Bool
-      meter.charge(@list_of_keys.size, 0)
+      meter.charge(state_count, 0)
       @clears += 1
       sparse = @bytes_since_clear < LazyDFA::MINIMUM_BYTES_PER_STATE.to_i64 * @states_since_clear
       @thrashing = true if sparse
       thrashing = sparse && (@clears > LazyDFA::MAX_CLEARS || hands_over?)
       @transition_table.clear
       @list_of_marks.clear
-      @list_of_keys.clear
-      @state_ids.clear
+      @key_store.clear
+      @key_starts.clear
+      @key_starts << 0
+      @state_slots.fill(NO_STATE)
       reset_states
       !thrashing
     end
@@ -277,9 +348,12 @@ module Mica::Regex
       @bytes_used = fixed_bytes
       @bytes_since_clear = 0_i64
       @start_states.fill(-1)
-      if @list_of_keys.empty?
-        add_state(LazyDFA::DEAD_KEY.dup, state_bytes(1))
-        add_state(LazyDFA::DEAD_MATCH_KEY.dup, state_bytes(1))
+      if state_count == 0
+        # Not the builder's key: a clear can run while `intern` holds it.
+        dead = StaticArray[0]
+        add_state(dead.to_slice, state_bytes(1))
+        dead[0] = LazyDFA::MATCH_BEHIND
+        add_state(dead.to_slice, state_bytes(1))
       end
       @states_since_clear = 0
     end
@@ -373,15 +447,16 @@ module Mica::Regex
     end
 
     # The key built so far: the flags, then the targets in the order added.
-    def targets : Array(Int32)
-      @key
+    # It is the builder's own list, valid until the next build.
+    def targets : Slice(Int32)
+      Slice.new(@key.to_unsafe, @key.size)
     end
 
     # The key with its targets sorted in place (reverse states have no
     # priority), with no copy.
-    def sorted_targets : Array(Int32)
+    def sorted_targets : Slice(Int32)
       Slice.new(@key.to_unsafe + 1, @key.size - 1).sort! if @key.size > 2
-      @key
+      targets
     end
   end
 end
