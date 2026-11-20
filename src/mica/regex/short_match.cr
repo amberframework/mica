@@ -30,14 +30,19 @@ module Mica::Regex
     # True for each byte no state of the program reads, so no match holds
     # it (`u` in `[a-q][^u-z]{80}x`); see `outside?`.
     @outside_bytes : StaticArray(Bool, 256)
-    # True when `@outside_bytes` holds any byte and `shortest` is positive,
-    # so `LazyDFA#find_from_each_start` can skip the starts too close
-    # before such a byte.
+    # True when `@outside_bytes` holds any byte and `shortest` is at least
+    # `SKIP_SHORTEST`, so `LazyDFA#find_from_each_start` can skip the starts
+    # too close before such a byte.
     getter? skips_short_stretches : Bool
+
+    # The fewest bytes a match must span for `skips_short_stretches?`. A
+    # start at an outside byte already dies on its first step, so for a
+    # match of a byte or two the look-ahead costs more than it skips.
+    SKIP_SHORTEST = 4
 
     def initialize(@longest : Int32, @list_of_final_bytes : Array(UInt8), @shortest : Int32 = 0,
                    @outside_bytes : StaticArray(Bool, 256) = StaticArray(Bool, 256).new(false))
-      @skips_short_stretches = @shortest > 0 && @outside_bytes.any?
+      @skips_short_stretches = @shortest >= SKIP_SHORTEST && @outside_bytes.any?
     end
 
     # Returns the analysis of *program*, or nil when a match can span more
@@ -56,14 +61,17 @@ module Mica::Regex
 
     # The bytes no state of *program* reads: every byte, less those of each
     # byte-range state and of each transition of a sparse state. A match is
-    # made of the bytes its states read, so it holds none of these.
+    # made of the bytes its states read, so it holds none of these. Each
+    # range is cleared with one `memset`, so a program of many states costs
+    # one call per state.
     def self.outside_bytes(program : Program) : StaticArray(Bool, 256)
       outside = StaticArray(Bool, 256).new(true)
+      table = outside.to_unsafe
       program.each_distinct_state do |state, _|
-        (state.low..state.high).each { |byte| outside[byte] = false } if state.kind.byte_range?
+        (table + state.low).clear(state.high.to_i32 - state.low.to_i32 + 1) if state.kind.byte_range?
       end
       program.each_transition_range do |low, high|
-        (low..high).each { |byte| outside[byte] = false }
+        (table + low).clear(high.to_i32 - low.to_i32 + 1)
       end
       outside
     end

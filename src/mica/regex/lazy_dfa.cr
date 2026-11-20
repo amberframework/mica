@@ -489,6 +489,7 @@ module Mica::Regex
       shortest = short_match.shortest
       next_outside = -1
       clear_to = start
+      tried = false
       while origin <= size
         if unpaid >= allowed || meter.operations != allowed_at
           allowed, allowed_at = settle(cache, meter, unpaid, origin, Math.min(size + 1 - origin, CHUNK_BYTES))
@@ -519,8 +520,11 @@ module Mica::Regex
         # at or before the next of them; when fewer than `shortest` bytes
         # lie between, no start from here through that byte has a match.
         # It is looked for only up to `shortest` bytes past `origin`, so a
-        # long stretch is read once however many searches start in it.
-        if skips_short_stretches && origin < size
+        # long stretch is read once however many searches start in it, and
+        # only once a try of this search has failed, so a search whose
+        # first try matches (`\p{L}{100}` in a long run of letters) reads
+        # nothing twice.
+        if skips_short_stretches && tried && origin < size
           if next_outside < origin
             stop = Math.min(size.to_i64, origin.to_i64 + shortest).to_i32
             next_outside = next_outside_byte(haystack, short_match, Math.max(origin, clear_to), stop, meter)
@@ -598,6 +602,7 @@ module Mica::Regex
           cache.note_bytes(unpaid)
           return {origin, last_end}
         end
+        tried = true
         origin += 1
       end
       meter.charge(unpaid, size)
