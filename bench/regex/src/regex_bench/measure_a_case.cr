@@ -49,6 +49,7 @@ module RegexBench
     end
 
     private def measure(haystack : String) : CaseResult
+      ProcessCold.leave_the_collector_at_rest
       started = Time.instant
       compiled = compile
       compiled.find(haystack, 0, true, false)

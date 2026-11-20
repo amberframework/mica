@@ -14,6 +14,24 @@ private class LiteralEngine < RegexBench::Engine
   end
 end
 
+# Records the bytes allocated since the last collection when it compiles.
+private class GarbageReadingEngine < RegexBench::Engine
+  class_property bytes_since_collection_at_compile = 0_u64
+
+  def name : String
+    "garbage-reading"
+  end
+
+  def version : String
+    "spec"
+  end
+
+  def compile(pattern : String, case_insensitive : Bool, policy : RegexBench::SearchPolicy) : RegexBench::CompiledPattern
+    GarbageReadingEngine.bytes_since_collection_at_compile = GC.prof_stats.bytes_since_gc
+    literal_pattern(pattern)
+  end
+end
+
 private def benchmark_case(id : String, *, corpus : String = "rebar", family : String = "",
                            size_units : Int64 = 0_i64) : RegexBench::BenchmarkCase
   RegexBench::BenchmarkCase.new(id: id, corpus: corpus, group: "#{corpus}/spec", subgroup: "#{corpus}/spec",
@@ -88,6 +106,18 @@ describe RegexBench::RunnerProgram do
       sample = RegexBench::ProcessColdSample.from_json(run_the_program(["--process-cold"], benchmark_case("rebar/one").to_json))
       sample.succeeded?.should be_true
       sample.seconds.should be > 0
+    end
+
+    it "opens the process-cold window with the collector at rest" do
+      GC.disable
+      garbage = 0
+      4096.times { garbage &+= Bytes.new(256).size }
+      GC.enable
+      GC.prof_stats.bytes_since_gc.should be >= (garbage // 2).to_u64
+      output = IO::Memory.new
+      RegexBench::RunnerProgram.new(GarbageReadingEngine.new, ["--process-cold"], IO::Memory.new(benchmark_case("rebar/one").to_json), output).run
+      RegexBench::ProcessColdSample.from_json(output.to_s).succeeded?.should be_true
+      GarbageReadingEngine.bytes_since_collection_at_compile.should be < 64_u64 * 1024
     end
   end
 end
