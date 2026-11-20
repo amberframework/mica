@@ -357,10 +357,19 @@ pattern's NFA state count, the formula the runtime engine uses, and every
 chunk of at most 4,096 bytes is allowed by the meter before it is read.
 The deadline is read when a call starts and at every 65,536-operation
 checkpoint. Validating the haystack costs one operation per byte, as on the
-runtime engine. `each_span` spends one allowance across the whole call.
+runtime engine, and runs in the windows the meter allows, so a deadline
+stops it: under a 1 ms deadline a static search of 256 MiB of `é` raises
+within the runtime engine's bound
+(`spec/regex/static_validation_deadline_spec.cr`). `each_span` spends one
+allowance across the whole call.
 Every DFA state is built at compile time, so a static search runs in
-O(n) with no cache to thrash; the capture pass (one-pass DFA, else a Pike
-VM over the match span alone) is O(m·c·L) as on the runtime engine.
+O(n) with no cache to thrash; the capture pass (one-pass DFA, else the
+bounded backtracker, else a Pike VM over the match span alone) is
+O(m·c·L) as on the runtime engine. A path that can do more work than
+the DFAs alone (the candidate search, the required-byte scans, the
+backtracker) runs only when the allowance left covers its most work, so
+it never raises `max_work` where the DFAs would finish.
+A
 
 **How it works.** The macro runs `src/mica/regex/static/emit_static_pattern.cr`
 (Crystal's `run`), which compiles the pattern with the runtime compiler
@@ -375,10 +384,34 @@ match or accelerated one, and writes the tables as `Slice.literal`s:
 - a state that loops on all but a few bytes is skipped with `memchr` (one
   exit byte) or 8 bytes at a time (up to three ASCII exit bytes, or all
   non-ASCII bytes), forward and backward;
+- a state's main successor (the one most byte values lead to) is numbered
+  right after it, so a chain such as `[0-9a-f]{8}-` is read with loads
+  that do not wait on each other, and a state that loops to itself
+  (`.*`, `\d+`) keeps its row through the run;
+- a pattern with prefix literals gets the runtime engine's prefilter
+  (`StaticPrefilter`: the rare-byte, pair and packed searches; literals
+  that start with at most three bytes need none, as the DFA's start
+  state skips to them). The forward DFA runs anchored at each verified
+  candidate, so the first anchored match is the leftmost one and there is
+  no reverse scan; an exact literal set needs no DFA at all. Failed tries
+  that read more than the haystack hand the search to the DFAs, so a call
+  stays linear;
+- without a prefilter, a search first looks for the ASCII bytes every
+  match contains (`StartFilter#list_of_required_bytes`) with `memchr`,
+  unless the forward DFA's start states already skip that fast, and a
+  haystack shorter than any match is rejected outright;
 - a pattern with groups also gets its one-pass DFA and its NFA (`UInt8` or
-  `UInt16` state numbers) for a Pike VM whose scratch is a
+  `UInt16` state numbers, with each `Sparse` state's target per byte
+  class) for a bounded backtracker and a Pike VM, whose scratch is a
   `StaticArray(Int32, N)` on the caller's stack, N computed for the
-  pattern.
+  pattern. The backtracker (RE2's BitState) marks visited (state,
+  position) pairs in a 16 Ki-bit bitset with a 1,024-job stack, follows
+  greedy byte loops and byte-state starts without a dispatch per byte,
+  and charges its visits when it ends. Run from the lowest start the
+  match can have, it finds the start with the groups, so `search_groups`
+  needs no reverse scan; on a haystack of at most 4,096 (state, position)
+  pairs it searches outright. A span too long for the bitset, or a search
+  that needs more jobs, goes to the Pike VM.
 
 The search code lives in `StaticMatcher(F, R, N)`, one per combination of
 forward, reverse and NFA widths, shared by every pattern with those
@@ -422,7 +455,11 @@ span, must agree with the runtime engine and with PCRE2 (through Crystal's
 `Regex`), on `search_groups`, `search_span`, `each_span` and `matches?`,
 and the static searches must allocate 0 bytes.
 `spec/regex/static_pattern_spec.cr` covers the API, the widths, the
-fallback, the limits and the compile error.
+fallback, the limits and the compile error;
+`spec/regex/static_search_paths_spec.cr` checks the prefilter and
+backtracker paths against the runtime engine at every offset and over
+spans past the bitset, holds a run of failing candidates to a linear
+budget, and checks that both charge their work and allocate nothing.
 
 **Cost and speed** (S1 evidence, 2026-11-19, Apple M1 Max, `--release`):
 
