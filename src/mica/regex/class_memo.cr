@@ -147,6 +147,9 @@ module Mica::Regex
     # byte of at least 0xC2.
     private ASCII_END = 0x80
 
+    # The most ranges a set can have within ASCII (128 code points).
+    private MAX_ASCII_RANGES = 64
+
     # Returns the block of a set whose members past ASCII are exactly those of
     # a prebuilt set (or its complement), as `(?i)[\w+\-.]` and `[^\W_]` are
     # `\w`'s, else nil. The block is the prebuilt one with the entry's ASCII
@@ -158,8 +161,15 @@ module Mica::Regex
     private def self.ascii_variant_block?(bounds : Array(Int32), ledger : AllocationLedger,
                                           meter : Core::WorkMeter) : Block?
       return nil if bounds.empty? || bounds[-1] < ASCII_END
+      # Ranges that reach past ASCII: the set must have as many as the
+      # prebuilt set, which has between `range_count - MAX_ASCII_RANGES` and
+      # `range_count`. Checked first, so a set that is no variant (`[^']`,
+      # which a process-cold first compile meets) is turned away without
+      # reading the static tables: their first read costs page faults.
+      ranges_past_ascii = range_count_past_ascii(bounds)
       Prebuilt::LIST_OF_ENTRIES.each do |prebuilt|
-        set_id, negated, _range_count, entry, state_count, transition_count, offset = prebuilt
+        set_id, negated, range_count, entry, state_count, transition_count, offset = prebuilt
+        next unless range_count - MAX_ASCII_RANGES <= ranges_past_ascii <= range_count
         next unless same_past_ascii?(bounds, set_id, negated, meter)
         list_of_states, list_of_transitions = decode_prebuilt(state_count, transition_count, offset, ledger, meter,
           spare_transitions: ascii_range_count(bounds))
@@ -240,6 +250,15 @@ module Mica::Regex
       return false if count < 2
       list_of_states[entry] = state.copy_with(alternate: count)
       true
+    end
+
+    # The ranges of *bounds* that reach past ASCII.
+    private def self.range_count_past_ascii(bounds : Array(Int32)) : Int32
+      index = 0
+      while index < bounds.size && bounds[index + 1] < ASCII_END
+        index += 2
+      end
+      (bounds.size - index) // 2
     end
 
     # The ranges of *bounds* that start in ASCII.
