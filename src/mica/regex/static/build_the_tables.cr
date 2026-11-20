@@ -545,7 +545,7 @@ module Mica::Regex::Static
     end
 
     # *list_of_tests* as `StaticPrefilter::WORDS_PER_TEST` words each.
-    private def words_of(list_of_tests : Array(PairTest)) : Array(UInt64)
+    private def words_of(list_of_tests : Indexable(PairTest)) : Array(UInt64)
       list_of_tests.flat_map do |test|
         [test.first_offset.to_u64, test.second_offset.to_u64, test.third_offset.to_u64, test.first_fold, test.first_lanes,
          test.second_fold, test.second_lanes, test.third_fold, test.third_lanes]

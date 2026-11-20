@@ -287,6 +287,19 @@ module Mica::Regex
     # The start `find_at_candidates` returns when the search continues on
     # the forward and reverse DFAs from the position it returns.
     RESUME = -2
+    # What `find_end` returns when it reached its *stop* undecided.
+    UNDECIDED = -4
+    # The most bytes one anchored try at a candidate or start byte reads.
+    # A try still undecided there (a long match, or a long failure such
+    # as `(a|aa)*b` over a run of a's, where every try reads to the end)
+    # hands the search to the DFAs from that candidate, so the tries cost
+    # the call at most this many bytes more than the DFAs alone.
+    TRY_REACH = 256
+    # The bytes failed tries may read beyond twice the bytes the search
+    # has moved past before it hands the search to the DFAs: tries that
+    # fail far from their start, close together (`(a|aa)*b` over a short
+    # run of a's), cost less on the DFAs, which read each byte once.
+    FAILED_TRY_ROOM = 64_i64
     # The bytes failed anchored tries may read beyond the bytes the search
     # covers before the search continues on the DFAs (room for
     # `CandidateSearch::MAX_TRIES` short tries near the end of the
@@ -378,10 +391,13 @@ module Mica::Regex
         return {RESUME, character_start(bytes, candidate)} if literal < 0
         return {candidate, candidate + prefilter.literal_size(literal)} if prefilter.exact?
         before = meter.operations
-        finish = find_end(bytes, candidate, true, earliest, meter)
+        finish = find_end(bytes, candidate, true, earliest, meter, try_stop(candidate))
         return {candidate, finish} if finish >= 0
+        return {RESUME, character_start(bytes, candidate)} if finish == UNDECIDED
         failed += meter.operations - before
-        return {RESUME, character_start(bytes, candidate)} if failed > failed_cap || scan.ineffective?
+        if failed > failed_cap || tries_fail_far?(failed, candidate - byte_offset) || scan.ineffective?
+          return {RESUME, character_start(bytes, candidate)}
+        end
         at = candidate + 1
       end
     end
@@ -421,20 +437,40 @@ module Mica::Regex
         end
         meter.charge(candidate - at + 1, at)
         before = meter.operations
-        finish = find_end(bytes, candidate, true, earliest, meter)
+        finish = find_end(bytes, candidate, true, earliest, meter, try_stop(candidate))
         return {candidate, finish} if finish >= 0
+        return {RESUME, candidate} if finish == UNDECIDED
         failed += meter.operations - before
-        return {RESUME, candidate} if failed > failed_cap
+        return {RESUME, candidate} if failed > failed_cap || tries_fail_far?(failed, candidate - byte_offset)
         at = candidate + 1
       end
       {NO_MATCH, NO_MATCH}
     end
 
+    # Where a try at *candidate* stops undecided (see `TRY_REACH`).
+    @[AlwaysInline]
+    private def try_stop(candidate : Int32) : Int32
+      candidate > Int32::MAX - TRY_REACH ? Int32::MAX : candidate + TRY_REACH
+    end
+
+    # True when the failed tries have read *failed* bytes, more than
+    # twice the *covered* bytes the search moved past (plus
+    # `FAILED_TRY_ROOM`).
+    @[AlwaysInline]
+    private def tries_fail_far?(failed : Int64, covered : Int32) : Bool
+      failed > 2_i64 * covered + FAILED_TRY_ROOM
+    end
+
     # Searches forward from *start* for the end of the leftmost-first
-    # match (`LazyDFA#find_end` over a complete table).
-    private def find_end(bytes : Bytes, start : Int32, anchored : Bool, earliest : Bool, meter : StaticMeter) : Int32
+    # match (`LazyDFA#find_end` over a complete table). With *stop* before
+    # the end of the text, a search that reads to *stop* undecided returns
+    # `UNDECIDED`.
+    private def find_end(bytes : Bytes, start : Int32, anchored : Bool, earliest : Bool, meter : StaticMeter,
+                         stop : Int32 = Int32::MAX) : Int32
       size = bytes.size
       limit = @final_lf && size > start && bytes.unsafe_fetch(size - 1) == Look::LINE_FEED ? size - 1 : size
+      text_limit = limit
+      limit = stop if stop < limit
       direction = @forward
       shift = direction.shift
       table = direction.table.to_unsafe
@@ -513,6 +549,7 @@ module Mica::Regex
         end
         meter.charge(at - chunk_start, at)
       end
+      return UNDECIDED if limit < text_limit
       if at == size - 1 && limit == size - 1
         meter.charge(1, at)
         current = table[current.unsafe_shl(shift) &+ direction.edge_symbol &+ 1].to_i32

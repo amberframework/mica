@@ -46,17 +46,23 @@ module Mica::Regex::Static
       reverse_type = type_for(tables.reverse.largest_entry)
       nfa = tables.nfa
       nfa_type = nfa ? type_for(nfa.largest_entry) : "UInt8"
+      # The byte classes are one literal that the pattern and each
+      # direction reading them share (a direction over UTF-8 decoder
+      # states has its own column map): three copies would be three
+      # stretches of read-only data, and the first search of a process
+      # would fault in the page of each.
+      @output << "begin\n  pattern_classes = "
+      write_slice("UInt8", tables.list_of_classes)
+      @output << "\n"
       @output << "::Mica::Regex::StaticPattern(" << forward_type << ", " << reverse_type << ", " << nfa_type << ", "
       @output << tables.scratch_words << ").new(::Mica::Regex::StaticMatcher(" << forward_type << ", " << reverse_type
       @output << ", " << nfa_type << ").new(\n"
       @output << "  source: " << tables.source.inspect << ",\n"
       @output << "  options: ::Mica::Regex::CompileOptions.new(" << tables.options.value << "_u32),\n"
-      @output << "  classes: "
-      write_slice("UInt8", tables.list_of_classes)
-      @output << ",\n  forward: "
-      write_direction(forward_type, tables.forward)
+      @output << "  classes: pattern_classes,\n  forward: "
+      write_direction(forward_type, tables.forward, tables.list_of_classes)
       @output << ",\n  reverse: "
-      write_direction(reverse_type, tables.reverse)
+      write_direction(reverse_type, tables.reverse, tables.list_of_classes)
       @output << ",\n  program: "
       write_program(nfa_type, nfa)
       @output << ",\n  one_pass: "
@@ -69,10 +75,10 @@ module Mica::Regex::Static
       @output << ",\n  required_bytes: "
       write_slice("UInt8", tables.list_of_required_bytes)
       @output << ", minimum_bytes: " << tables.minimum_bytes << ", start_scan: " << tables.start_scan
-      @output << "))\n"
+      @output << "))\nend\n"
     end
 
-    private def write_direction(type : String, tables : DirectionTables) : Nil
+    private def write_direction(type : String, tables : DirectionTables, list_of_classes : Array(Int32)) : Nil
       @output << "::Mica::Regex::StaticDirection(" << type << ").new(shift: " << tables.shift
       @output << ", relevant_flags: " << tables.relevant_flags << ", context_mask: " << tables.context_mask
       @output << ", special_limit: " << tables.special_limit << ", accel_limit: " << tables.accel_limit << ",\n    table: "
@@ -82,7 +88,11 @@ module Mica::Regex::Static
       @output << ",\n    accel_bytes: "
       write_slice("Int32", tables.list_of_accel_bytes)
       @output << ",\n    classes: "
-      write_slice("UInt8", tables.list_of_columns)
+      if tables.list_of_columns == list_of_classes
+        @output << "pattern_classes"
+      else
+        write_slice("UInt8", tables.list_of_columns)
+      end
       @output << ", edge_symbol: " << tables.edge_symbol << ", word_offset: " << tables.word_offset << ')'
     end
 

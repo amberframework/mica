@@ -417,6 +417,13 @@ match or accelerated one, and writes the tables as `Slice.literal`s:
   literals are one byte each (`,` in `,\s*`) becomes such a scan, as the
   byte found needs no check. Failed tries that read more than the
   haystack hand the search to the DFAs, as with a prefilter;
+- on both kinds of candidate, one try reads at most 256 bytes
+  (`StaticMatcher::TRY_REACH`): a try still undecided there (a long
+  match, or a failure that reads far, as `(a|aa)*b` over a run of a's
+  makes every try do) hands the search to the DFAs from that candidate,
+  and so do failed tries that have read more than twice the bytes the
+  search moved past (plus 64), so tries that each read to the end of a
+  run cost the call at most one more pass;
 - without a prefilter, a search first looks for the ASCII bytes every
   match contains (`StartFilter#list_of_required_bytes`) with `memchr`,
   unless the forward DFA's start states already skip that fast, and a

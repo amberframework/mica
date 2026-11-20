@@ -17,7 +17,9 @@ private ALTERNATING  = Mica::Regex.static("((?:ab|a)*)(c)")
 private WORDY_NUMBER = Mica::Regex.static("([a-z]+)-(\\d+)")
 private COMMA_SPACES = Mica::Regex.static(",\\s*")
 private TWO_STARTS   = Mica::Regex.static("[ab]\\d{3}")
-private WORDS_HOLMES = Mica::Regex.static("\\w+\\s+Holmes")
+private WORDS_HOLMES = Mica::Regex.static("w+s+Holmes")
+private ALT_RUN      = Mica::Regex.static("(?:a|aa)*[bc]")
+private QUOTED       = Mica::Regex.static(%q{"[^"]*"})
 private LIMITS       = Mica::Regex::SearchLimits::TRUSTED_INPUT
 
 private def runtime(source : String, options = Mica::Regex::CompileOptions::None) : Mica::Regex::Expression
@@ -157,6 +159,29 @@ describe "Mica::Regex.static search paths" do
       TWO_STARTS.search_span(haystack, limits: per_byte(8)).should be_nil
       TWO_STARTS.matches?(haystack, limits: per_byte(8)).should be_false
       TWO_STARTS.search_span(haystack + "b123", limits: per_byte(8)).should eq(Mica::Regex::Span.new(90_000, 90_004))
+    end
+
+    it "hands a try still undecided after TRY_REACH bytes to the DFAs, with the same answers" do
+      {ALT_RUN => "(?:a|aa)*[bc]", QUOTED => %q{"[^"]*"}}.each do |pattern, source|
+        expression = runtime(source)
+        {"a" * 1_000, "a" * 1_000 + "c", "a" * 20 + "b", %q{x "} + "y" * 1_000 + %q{" z},
+         %q{"} + "é" * 300, %q{"short" "} + "q" * 600 + %q{"}}.each do |haystack|
+          {0, 1, 5}.each do |offset|
+            next if offset > haystack.bytesize || (offset < haystack.bytesize && haystack.byte_at(offset) & 0xC0 == 0x80)
+            expected = expression.search_span(haystack, offset, limits: LIMITS)
+            {source, offset, pattern.search_span(haystack, offset, limits: LIMITS)}.should eq({source, offset, expected})
+            pattern.matches?(haystack, offset, limits: LIMITS).should eq(!expected.nil?)
+          end
+        end
+      end
+    end
+
+    it "stays linear when every try fails far from its start" do
+      # Each "a" starts a try that reads to the end of the run: the first
+      # try stops at TRY_REACH bytes and the DFAs read the run once.
+      haystack = "a" * 90_000
+      ALT_RUN.search_span(haystack, limits: per_byte(6)).should be_nil
+      ALT_RUN.search_span(haystack + "b", limits: per_byte(6)).should eq(Mica::Regex::Span.new(0, 90_001))
     end
 
     it "allocates nothing" do
