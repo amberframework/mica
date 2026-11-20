@@ -69,10 +69,13 @@ module Mica::Regex
     @list_of_ascii_loops : Array(Bool)
 
     # Per state: true when its match path has no assertion, so it holds
-    # wherever the state is reached; `search` then reads a run of bytes
+    # wherever the state is reached, and some byte leads back to it with no
+    # edge work; `search` then reads a run of bytes
     # that lead back to the state with no edge work (`.*`) in one loop,
     # and the match ends where the run does.
     @list_of_match_loops : Array(Bool)
+    # True when some state is a match loop (see `search`).
+    @any_match_loop : Bool
 
     def initialize(@byte_classes : ByteClasses, @table : Array(Int32), @match_edges : Array(Int32),
                    @list_of_edges : Array(Edge), @list_of_shadows : Array(Bool))
@@ -89,7 +92,18 @@ module Mica::Regex
       @list_of_ascii_loops = Array(Bool).new(@match_edges.size) { |state| ascii_loop?(state) }
       @list_of_match_loops = Array(Bool).new(@match_edges.size) do |state|
         index = @match_edges[state]
-        index >= 0 && @list_of_edges[index].looks == 0
+        index >= 0 && @list_of_edges[index].looks == 0 && loops_without_edge_work?(state)
+      end
+      @any_match_loop = @list_of_match_loops.any?
+    end
+
+    # True when some byte leads from *state* back to it with no assertion
+    # and no slot.
+    private def loops_without_edge_work?(state : Int32) : Bool
+      row = state * @class_count
+      (0...@class_count).any? do |class_index|
+        step = @steps[row + class_index]
+        step >= 0 && step & STEP_TAKES_EDGE == 0 && step >> 2 == row
       end
     end
 
@@ -198,6 +212,25 @@ module Mica::Regex
     # returns `LazyDFA::GAVE_UP` there.
     def search(haystack : Bytes, start : Int32, search_start : Int32, slots : Slice(Int64), scratch : Slice(Int64),
                meter : SearchMeter?, stop : Int32 = Int32::MAX) : {Int32, Int32}
+      if @any_match_loop
+        search_with_match_loops(haystack, start, search_start, slots, scratch, meter, stop)
+      else
+        search_without_match_loops(haystack, start, search_start, slots, scratch, meter, stop)
+      end
+    end
+
+    # The two loops of `search`, made from one body: the search loop of a
+    # pattern that runs it is tight enough that a branch it never takes
+    # still slows it, so the match-loop run (see `@list_of_match_loops`) is
+    # compiled only into the loop of the DFAs that have a looping match
+    # state.
+    {% for match_loops in [true, false] %}
+      private def search_{{ (match_loops ? "with" : "without").id }}_match_loops(haystack : Bytes, start : Int32,
+                                                                                 search_start : Int32,
+                                                                                 slots : Slice(Int64),
+                                                                                 scratch : Slice(Int64),
+                                                                                 meter : SearchMeter?,
+                                                                                 stop : Int32) : {Int32, Int32}
       # Slot counts are small: plain loops beat the `memset` and `memcpy`
       # calls of `fill` and `copy_from`.
       scratch.size.times { |index| scratch.unsafe_put(index, PikeVM::UNSET) }
@@ -231,6 +264,20 @@ module Mica::Regex
             pending_edge = edge_index
             found = at
             undecided = false
+            # In a state whose match path always holds
+            # (`@list_of_match_loops`), a run of bytes that lead back to it
+            # with no edge work (`.*`) ends a match at each byte with the
+            # same slots: the run is read in one loop, within the bytes the
+            # meter allowed, and the match ends where it stops.
+            {% if match_loops %}
+            if @list_of_match_loops.unsafe_fetch(state_of(row)) && at < allowed_end && at < stop && at < size
+              run_end = match_loop_end(haystack, row, at, Math.min(Math.min(size, stop), allowed_end))
+              if run_end > at
+                found = at = run_end
+                next
+              end
+            end
+            {% end %}
           elsif @list_of_shadows.unsafe_fetch(state_of(row))
             undecided = true
           end
@@ -246,26 +293,6 @@ module Mica::Regex
           allowed_end = at + meter.readable(Math.min(Math.min(size, stop) - at, PrefilterScan::CHARGE_CHUNK), at)
         end
         bound = Math.min(Math.min(size, stop), allowed_end)
-        # A match just recorded here, in a state whose match path always
-        # holds (`@list_of_match_loops`), and a byte that leads back to it
-        # with no edge work (`.*`): each byte of that run ends a match
-        # with the same slots, so the run is read in one loop and the
-        # match ends where it stops. *bound* is past *at*: the meter
-        # allows at least one byte.
-        if found == at && pending_edge >= 0 && @list_of_match_loops.unsafe_fetch(state_of(row))
-          loop_step = steps[row &+ class_of[bytes[at]]]
-          if loop_step >= 0 && loop_step >> 2 == row && loop_step & STEP_TAKES_EDGE == 0
-            at &+= 1
-            if @list_of_ascii_loops.unsafe_fetch(state_of(row)) && at < bound
-              at = Core::ByteScan.skip_ascii(haystack, at, bound)
-            end
-            while at < bound && steps[row &+ class_of[bytes[at]]] == loop_step
-              at &+= 1
-            end
-            found = at
-            next
-          end
-        end
         # The common step (no edge work, no match path ahead) in a tight
         # loop up to the next bound, and short of the last byte, whose
         # position the check above must see: one table load per byte.
@@ -311,6 +338,28 @@ module Mica::Regex
       record_match(edges[pending_edge], found, scratch, slots) if pending_edge >= 0
       meter.try(&.charge(at - charged + 1, charged))
       {undecided ? LazyDFA::GAVE_UP : found, at - start}
+    end
+    {% end %}
+
+    # Where a run from *at* of bytes that lead back to the state at *row*
+    # with no edge work stops, before *run_end*; *at* itself when the byte
+    # there leaves the state (see `search`). Kept out of the search loop,
+    # which it would slow for patterns that never reach it.
+    @[NoInline]
+    private def match_loop_end(haystack : Bytes, row : Int32, at : Int32, run_end : Int32) : Int32
+      steps = @steps.to_unsafe
+      class_of = @byte_classes.table
+      bytes = haystack.to_unsafe
+      loop_step = steps[row &+ class_of[bytes[at]]]
+      return at unless loop_step >= 0 && loop_step >> 2 == row && loop_step & STEP_TAKES_EDGE == 0
+      at &+= 1
+      if @list_of_ascii_loops.unsafe_fetch(state_of(row)) && at < run_end
+        at = Core::ByteScan.skip_ascii(haystack, at, run_end)
+      end
+      while at < run_end && steps[row &+ class_of[bytes[at]]] == loop_step
+        at &+= 1
+      end
+      at
     end
 
     # Writes the match that *edge* completes at *at* into *slots*: the

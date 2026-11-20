@@ -989,23 +989,37 @@ module Mica::Regex
     # iteration call reads each byte at most once per required byte.
     private def required_byte_missing?(bytes : Bytes, byte_index : Int32) : Bool
       if @engine.auto? && (plan = @plan)
-        # Auto checks every required byte (at most
-        # `StartFilter::MAX_REQUIRED_BYTES`), rarest first: `memchr` reads
-        # many bytes per cycle where the DFA reads about one, and the rarest
-        # byte by English text is not always the absent one (`x` ranks rarer
-        # than `y` in `(x+x+)+y` over a run of x's). With a literal
-        # prefilter, which already skips to where a literal starts, only the
-        # bytes some literal lacks (`y` there, past the literal `xx`).
-        list_of_bytes = plan.prefilter ? plan.list_of_required_bytes_past_literals : @program.list_of_required_bytes
+        # Auto checks the rarest required byte at every search, as a
+        # haystack may lack it past an earlier match. It looks for the
+        # others (at most `StartFilter::MAX_REQUIRED_BYTES` in all) once per
+        # haystack, when its first search starts: the rarest byte by
+        # English text is not always the absent one (`x` ranks rarer than
+        # `y` in `(x+x+)+y` over a run of x's), and `memchr` reads many
+        # bytes per cycle where a DFA reads about one, while an iteration
+        # whose searches each looked again would pay a call per match. With
+        # a literal prefilter, which already skips to where a literal
+        # starts, it looks once per haystack for the bytes some literal
+        # lacks (`y` past the literal `xx`) and for no other.
+        if plan.prefilter
+          list_of_bytes = plan.list_of_required_bytes_past_literals
+          every_search = 0
+        else
+          list_of_bytes = @program.list_of_required_bytes
+          every_search = 1
+        end
         checked = list_of_bytes.size
       elsif @first_search
         list_of_bytes = @program.required_bytes_for_first_search(bytes.size - byte_index, @meter, byte_index) || return false
-        checked = list_of_bytes.size
+        checked = every_search = list_of_bytes.size
       else
         return false
       end
       checked.times do |index|
-        next if @required_at[index] >= byte_index
+        found_at = @required_at[index]
+        next if found_at >= byte_index
+        # The others once per haystack, and only past a short span, where a
+        # scan costs about what the engine would.
+        next if index >= every_search && (found_at >= 0 || bytes.size - byte_index <= ShortSearch::MAX_BYTES)
         found = find_byte(bytes, list_of_bytes.unsafe_fetch(index), byte_index)
         return true if found < 0
         @required_at[index] = found

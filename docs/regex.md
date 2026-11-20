@@ -611,16 +611,19 @@ the match only removes matches.
 reads (`c` in `(a|aa)*c`, `H`, `m` and `l` in `\w+\s+Holmes`), the rarest
 first, found once per program in one pass over the NFA (assertions taken
 as passing, so the set never claims too much). Before any engine runs, an
-`Auto` search looks for each of them, rarest first, with `memchr` from
-its offset and returns no match when one is missing: a ReDoS pattern over
-a haystack with no possible match costs a scan, not a DFA pass. The
-rarest byte by English text is not always the missing one (`x` ranks
-rarer than `y` in `(x+x+)+y` over a run of x's), and `memchr` reads many
-bytes per cycle where a DFA reads about one. With a literal prefilter,
-which already skips to where a literal starts, the search looks only for
-the required bytes some prefix literal lacks
-(`SearchPlan#list_of_required_bytes_past_literals`: `y` past the literal
-`xx`). The scan reads in the
+`Auto` search looks for the rarest with `memchr` from its offset, and for
+the others once per haystack, as its first search there starts (past
+256 bytes from its offset, where a scan is cheaper than the engine), and
+returns no match when one is missing: a ReDoS pattern over a haystack with
+no possible match costs a scan, not a DFA pass. The rarest byte by English
+text is not always the missing one (`x` ranks rarer than `y` in
+`(x+x+)+y` over a run of x's), and `memchr` reads many bytes per cycle
+where a DFA reads about one; looking for the others again at every search
+of an iteration would cost a call per match. With a literal prefilter,
+which already skips to where a literal starts, the search looks once per
+haystack for the required bytes some prefix literal lacks, and for no
+other (`SearchPlan#list_of_required_bytes_past_literals`: `y` past the
+literal `xx`). The scan reads in the
 windows the meter allows and charges each byte it reads. A call remembers
 where it found each byte, so an iteration call, whose next search starts
 after a match that contains the byte, reads the haystack at most once
@@ -668,7 +671,8 @@ much as the cost per byte:
   rank above the match, so the one-pass DFA decides alone.
   An unanchored short search finds each start with `memchr` when every
   match starts with one byte, and declines after `ShortSearch::MAX_TRIES`
-  (8) failed tries; once a program has had `MAX_DECLINES` (16) such
+  (8) failed tries, or once its failed tries read past `4n + 64` steps;
+  once a program has had `MAX_DECLINES` (16) such
   declines, its unanchored searches go straight to the searcher, whose DFA
   reads a haystack with no match nearby faster. The plan remembers the
   last haystack a short search validated, so iterating over one haystack

@@ -111,7 +111,13 @@ module Mica::Regex
           return finish unless finish == LazyDFA::NO_MATCH
           spent += scanned + 1
           tries += 1
-          return LazyDFA::GAVE_UP if spent > bound
+          # Tries that read past the bound decline as running out of tries
+          # does, so a pattern whose failed tries read far (`\s+$` over a
+          # run of spaces) stops trying after `MAX_DECLINES` such calls.
+          if spent > bound
+            plan.note_short_decline
+            return LazyDFA::GAVE_UP
+          end
         end
         start += 1
       end
