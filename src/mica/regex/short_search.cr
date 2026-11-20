@@ -44,6 +44,12 @@ module Mica::Regex
     # validate again.
     @screened = false
 
+    # True once `rejects?` found the haystack valid and every required byte
+    # (`StartFilter#list_of_required_bytes`) at or after the offset, so a
+    # searcher that runs this call next need not look for them again (see
+    # `Searcher#note_required_bytes_present`).
+    getter? screened : Bool
+
     def initialize(@program : Program, @haystack : String, @byte_index : Int32, @options : MatchOptions,
                    @limits : SearchLimits, @timeout : Time::Span?)
       # The most work `fits?` allows: the ceiling, and under a timeout less

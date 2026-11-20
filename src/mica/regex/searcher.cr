@@ -1002,6 +1002,16 @@ module Mica::Regex
       false
     end
 
+    # Records that every required byte (`StartFilter#list_of_required_bytes`,
+    # of which the bytes `required_byte_missing?` looks for are a part)
+    # occurs at or after *byte_index*, as a short search of this call found
+    # (`ShortSearch#screened?`), so a search from *byte_index* does not
+    # scan for them again. Each is recorded as found at *byte_index*, the
+    # earliest it can be, so a later search from past it scans as before.
+    def note_required_bytes_present(byte_index : Int32) : Nil
+      @required_at.fill(byte_index)
+    end
+
     # The first position of *byte* at or after *from*, or -1, charging the
     # bytes read.
     private def find_byte(bytes : Bytes, byte : UInt8, from : Int32) : Int32

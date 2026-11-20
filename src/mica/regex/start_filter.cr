@@ -67,7 +67,47 @@ module Mica::Regex
       return false if @minimum_bytes == 0
       last = from if anchored
       return true if next_start(haystack, from, last) < 0
+      return !holds_required_words?(haystack, from) if haystack.size - from <= SHORT_SCAN_BYTES
       @list_of_required_bytes.any? { |byte| !StartFilter.holds_byte?(haystack, from, byte) }
+    end
+
+    # The longest span from *from* `holds_required_words?` reads in place
+    # of a `memchr` per required byte.
+    SHORT_SCAN_BYTES = 64
+
+    # True when *haystack* from *from* (at most `SHORT_SCAN_BYTES` bytes
+    # on) holds every required byte. A span of eight bytes or more is read
+    # a word at a time, the last word where the span ends (overlapping the
+    # one before), and a word holds a byte when the word XOR the byte in
+    # every lane has a zero lane (`(v - 0x01..) & ~v & 0x80..`, exact for
+    # "some lane is zero"). Over a one-line haystack this costs a few
+    # cycles per required byte, where a `memchr` call per byte costs more
+    # than the scan. Reads no byte before *from*.
+    private def holds_required_words?(haystack : Bytes, from : Int32) : Bool
+      remaining = haystack.size - from
+      pointer = haystack.to_unsafe + from
+      @list_of_required_bytes.each do |byte|
+        if remaining < 8
+          return false unless (0...remaining).any? { |index| pointer[index] == byte }
+          next
+        end
+        lanes = 0x0101010101010101_u64 &* byte
+        found = StartFilter.zero_lanes((pointer + remaining - 8).as(UInt64*).value ^ lanes)
+        index = 0
+        while index + 8 < remaining
+          found |= StartFilter.zero_lanes((pointer + index).as(UInt64*).value ^ lanes)
+          index += 8
+        end
+        return false if found == 0
+      end
+      true
+    end
+
+    # The high bit of each lane of *word* that is zero, and possibly of
+    # lanes above one (nonzero exactly when some lane is zero).
+    @[AlwaysInline]
+    protected def self.zero_lanes(word : UInt64) : UInt64
+      (word &- 0x0101010101010101_u64) & ~word & 0x8080808080808080_u64
     end
 
     # True when *haystack* holds *byte* at *from* or after (`memchr`).

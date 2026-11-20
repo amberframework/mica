@@ -25,7 +25,24 @@ module Mica::Regex
     # `MAX_FINAL_BYTES` (or the program can match the empty string).
     getter list_of_final_bytes : Array(UInt8)
 
-    def initialize(@longest : Int32, @list_of_final_bytes : Array(UInt8))
+    # The fewest bytes a match spans (`StartFilter.shortest_match`).
+    getter shortest : Int32
+    # True for each byte no state of the program reads, so no match holds
+    # it (`u` in `[a-q][^u-z]{80}x`); see `outside?`.
+    @outside_bytes : StaticArray(Bool, 256)
+    # True when `@outside_bytes` holds any byte and `shortest` is at least
+    # `SKIP_SHORTEST`, so `LazyDFA#find_from_each_start` can skip the starts
+    # too close before such a byte.
+    getter? skips_short_stretches : Bool
+
+    # The fewest bytes a match must span for `skips_short_stretches?`. A
+    # start at an outside byte already dies on its first step, so for a
+    # match of a byte or two the look-ahead costs more than it skips.
+    SKIP_SHORTEST = 4
+
+    def initialize(@longest : Int32, @list_of_final_bytes : Array(UInt8), @shortest : Int32 = 0,
+                   @outside_bytes : StaticArray(Bool, 256) = StaticArray(Bool, 256).new(false))
+      @skips_short_stretches = @shortest >= SKIP_SHORTEST && @outside_bytes.any?
     end
 
     # Returns the analysis of *program*, or nil when a match can span more
@@ -33,7 +50,30 @@ module Mica::Regex
     def self.analyze(program : Program) : ShortMatch?
       longest = longest_match(program)
       return nil unless longest
-      new(longest, final_bytes(program))
+      new(longest, final_bytes(program), StartFilter.shortest_match(program), outside_bytes(program))
+    end
+
+    # True when no match holds *byte*.
+    @[AlwaysInline]
+    def outside?(byte : UInt8) : Bool
+      @outside_bytes.unsafe_fetch(byte)
+    end
+
+    # The bytes no state of *program* reads: every byte, less those of each
+    # byte-range state and of each transition of a sparse state. A match is
+    # made of the bytes its states read, so it holds none of these. Each
+    # range is cleared with one `memset`, so a program of many states costs
+    # one call per state.
+    def self.outside_bytes(program : Program) : StaticArray(Bool, 256)
+      outside = StaticArray(Bool, 256).new(true)
+      table = outside.to_unsafe
+      program.each_distinct_state do |state, _|
+        (table + state.low).clear(state.high.to_i32 - state.low.to_i32 + 1) if state.kind.byte_range?
+      end
+      program.each_transition_range do |low, high|
+        (table + low).clear(high.to_i32 - low.to_i32 + 1)
+      end
+      outside
     end
 
     # Returns the most bytes a match of *program* can span, or nil when a

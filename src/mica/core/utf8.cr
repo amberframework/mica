@@ -164,6 +164,7 @@ module Mica::Core
     def self.first_invalid_offset(bytes : Bytes) : Int32?
       size = bytes.size
       pointer = bytes.to_unsafe
+      return nil if short_ascii?(pointer, size)
       # The ASCII prefix, 32 bytes, then eight, then one at a time: a
       # haystack that is all ASCII (the common case) never reaches the DFA.
       index = 0
@@ -187,6 +188,36 @@ module Mica::Core
       end
       valid ? nil : first_invalid_from(bytes, start)
     end
+
+    # True when *pointer*[0...size] is ASCII and at most `SHORT_ASCII_BYTES`
+    # long, tested with one branch: the words are OR-ed together, the last
+    # one read where it ends with the text (overlapping the one before), and
+    # text under eight bytes is read as two overlapping four-byte words or
+    # byte by byte. A one-line haystack (a grep model's line, a form field)
+    # is validated in a few cycles, where the loops below mispredict their
+    # exits on every length. False otherwise, also for longer text.
+    @[AlwaysInline]
+    private def self.short_ascii?(pointer : UInt8*, size : Int32) : Bool
+      return false if size > SHORT_ASCII_BYTES
+      if size >= 8
+        bits = (pointer + size - 8).as(UInt64*).value
+        index = 0
+        while index + 8 < size
+          bits |= (pointer + index).as(UInt64*).value
+          index += 8
+        end
+        bits & ASCII_MASK == 0
+      elsif size >= 4
+        ((pointer.as(UInt32*).value | (pointer + size - 4).as(UInt32*).value) & 0x80808080_u32) == 0
+      else
+        bits = 0_u8
+        size.times { |at| bits |= pointer[at] }
+        bits < 0x80
+      end
+    end
+
+    # The longest text `short_ascii?` tests.
+    private SHORT_ASCII_BYTES = 64
 
     # Text at least this long past its ASCII prefix is validated as two
     # streams (see `first_invalid_offset`).

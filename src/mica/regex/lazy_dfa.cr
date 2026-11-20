@@ -510,6 +510,14 @@ module Mica::Regex
       # it is searched, `Int32::MAX` when there is none.
       final_at = StaticArray(Int32, ShortMatch::MAX_FINAL_BYTES).new(-1)
       next_final = -1
+      # The next position at or after `origin` of a byte no match holds
+      # (`ShortMatch#outside?`), or -1 when none was found yet; the bytes
+      # before `clear_to` (from where it was last looked for) hold none.
+      skips_short_stretches = short_match.skips_short_stretches?
+      shortest = short_match.shortest
+      next_outside = -1
+      clear_to = start
+      tried = false
       while origin <= size
         if unpaid >= allowed || meter.operations != allowed_at
           allowed, allowed_at = settle(cache, meter, unpaid, origin, Math.min(size + 1 - origin, CHUNK_BYTES))
@@ -533,6 +541,25 @@ module Mica::Regex
           first_possible = next_final - longest + 1
           if origin < first_possible
             origin = first_possible
+            next
+          end
+        end
+        # A match holds no outside byte, so one that starts at `origin` ends
+        # at or before the next of them; when fewer than `shortest` bytes
+        # lie between, no start from here through that byte has a match.
+        # It is looked for only up to `shortest` bytes past `origin`, so a
+        # long stretch is read once however many searches start in it, and
+        # only once a try of this search has failed, so a search whose
+        # first try matches (`\p{L}{100}` in a long run of letters) reads
+        # nothing twice.
+        if skips_short_stretches && tried && origin < size
+          if next_outside < origin
+            stop = Math.min(size.to_i64, origin.to_i64 + shortest).to_i32
+            next_outside = next_outside_byte(haystack, short_match, Math.max(origin, clear_to), stop, meter)
+            clear_to = Math.max(clear_to, stop) if next_outside < 0
+          end
+          if next_outside >= origin
+            origin = next_outside + 1
             next
           end
         end
@@ -603,6 +630,7 @@ module Mica::Regex
           cache.note_bytes(unpaid)
           return {origin, last_end}
         end
+        tried = true
         origin += 1
       end
       meter.charge(unpaid, size)
@@ -638,6 +666,28 @@ module Mica::Regex
         at = stop
       end
       Int32::MAX
+    end
+
+    # The first position from *from* up to *limit* holding a byte no match
+    # holds (`ShortMatch#outside?`), or -1; charges the bytes read, in
+    # windows of at most 4096 bytes that the meter allows before each is
+    # read (`SearchMeter#readable`).
+    private def next_outside_byte(haystack : Bytes, short_match : ShortMatch, from : Int32, limit : Int32,
+                                  meter : SearchMeter) : Int32
+      at = from
+      while at < limit
+        stop = at + meter.readable(Math.min(limit - at, 4096), at)
+        window_start = at
+        while at < stop
+          if short_match.outside?(haystack.unsafe_fetch(at))
+            meter.charge(at + 1 - window_start, at)
+            return at
+          end
+          at += 1
+        end
+        meter.charge(stop - window_start, stop)
+      end
+      -1
     end
 
     # Reads the end of the haystack (the line feed that ends it, then the
