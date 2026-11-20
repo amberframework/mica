@@ -92,6 +92,37 @@ describe "Mica::Regex short matches" do
       end
     end
 
+    it_satisfies "REGEX-R3-short-match", "skips the starts too close before a byte no match holds, finding what the two-phase search finds" do
+      analysis = short_match("[a-q][^u-z]{20}[x\\xE0-\\xFF]").should_not be_nil
+      analysis.shortest.should eq(22)
+      analysis.skips_short_stretches?.should be_true
+      analysis.outside?('u'.ord.to_u8).should be_true
+      analysis.outside?('x'.ord.to_u8).should be_false
+      analysis.outside?('a'.ord.to_u8).should be_false
+      short_match("a?b{0,3}").should_not(be_nil).skips_short_stretches?.should be_false
+      ["[a-q][^u-z]{20}[x\\xE0-\\xFF]", "[a-q][^u-z]{5}x", "\\b[a-h]{2,9}\\b", "(?i)[a-e][^vy]{3,12}"].each do |source|
+        program = Mica::Regex::Expression.new(source, compile_limits: Mica::Regex::CompileLimits::TRUSTED_PATTERN).program
+        pool = Mica::Regex::CachePool.new
+        haystack = english_like(20_000) + "abcdefghijklmnopqrstàáx"
+        expected = spans_by_call(program, haystack, Mica::Regex::Engine::TwoPhase, pool)
+        spans_by_call(program, haystack, Mica::Regex::Engine::EachStart, pool).should eq(expected)
+      end
+    end
+
+    it_satisfies "REGEX-R3-complexity", "reads each byte about once from each start when bytes no match holds cut every stretch short" do
+      program = SearchComplexity.program("[a-q][^u-z]{80}[x\\xE0-\\xFF]")
+      measurements = SearchComplexity::SIZES.map do |scale|
+        haystack = "abcdefghu" * (500 * scale)
+        searcher = Mica::Regex::Searcher.new(program, haystack, SearchComplexity::WIDE, nil, Mica::Regex::Engine::EachStart)
+        searcher.find(0, Mica::Regex::MatchOptions::None, false).should be_nil
+        searcher.finish
+        # Validation reads each byte once, the outside-byte scan once more.
+        searcher.meter.operations.should be <= 2_i64 * haystack.bytesize + 64
+        SearchComplexity::Measurement.new(scale, searcher.meter.operations, 2_i64 * (haystack.bytesize + 1))
+      end
+      SearchComplexity.check("from each start past outside bytes", measurements, 1.1, false).should eq([] of String)
+    end
+
     it_satisfies "REGEX-R3-complexity", "from each start stays linear in n with work <= 2·m·(n + 1) when every start reads its longest" do
       # Every start reads 14 bytes and dies on the 15th, no match ever
       # completes, and the final bytes (u-z) are too many to skip by.
