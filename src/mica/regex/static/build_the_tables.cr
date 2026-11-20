@@ -96,6 +96,7 @@ module Mica::Regex::Static
     one_pass : OnePassTables?,
     prefilter : PrefilterTables?,
     list_of_required_bytes : Array(Int32),
+    minimum_bytes : Int32,
     unicode_words : Bool,
     final_lf : Bool,
     anchored_start : Bool,
@@ -173,7 +174,7 @@ module Mica::Regex::Static
       anchored_start = SearchPlan.anchored_start?(program)
       PatternTables.new(source: @source, options: @options, list_of_classes: list_of_classes, forward: forward,
         reverse: reverse, nfa: nfa, one_pass: one_pass, prefilter: anchored_start ? nil : prefilter_of(program),
-        list_of_required_bytes: StartFilter.new(program).list_of_required_bytes.map(&.to_i32),
+        list_of_required_bytes: required_bytes_of(program, forward), minimum_bytes: StartFilter.new(program).minimum_bytes,
         unicode_words: forward_dfa.unicode_words?, final_lf: forward_dfa.final_lf?,
         anchored_start: anchored_start, program_state_count: program.state_count,
         slot_count: program.slot_count, scratch_words: scratch_words)
@@ -282,6 +283,17 @@ module Mica::Regex::Static
       DirectionTables.new(shift: shift, state_count: state_count, list_of_entries: entries, list_of_starts: starts,
         relevant_flags: relevant, context_mask: context_mask, special_limit: special_limit, accel_limit: accel_limit,
         list_of_accel_bytes: accel_bytes)
+    end
+
+    # The bytes every match contains (`StartFilter#list_of_required_bytes`),
+    # which a search looks for before it runs the DFAs; none when the
+    # forward DFA's unanchored start states are all accelerated: those
+    # already skip to where a match can start as fast as the look would.
+    private def required_bytes_of(program : Program, forward : DirectionTables) : Array(Int32)
+      starts = forward.list_of_starts
+      unanchored = (0...starts.size).step(2).map { |index| starts[index] }
+      return [] of Int32 if unanchored.all? { |id| forward.special_limit <= id < forward.accel_limit }
+      StartFilter.new(program).list_of_required_bytes.map(&.to_i32)
     end
 
     # *list_of_ids* reordered so a state's main successor (the one most

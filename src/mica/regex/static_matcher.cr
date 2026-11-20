@@ -69,6 +69,8 @@ module Mica::Regex
     @one_pass : StaticOnePass
     @prefilter : StaticPrefilter
     @required_bytes : Slice(UInt8)
+    # The fewest bytes a match spans (`StartFilter#minimum_bytes`).
+    @minimum_bytes : Int32
     @unicode_words : Bool
     @final_lf : Bool
     @anchored_start : Bool
@@ -82,7 +84,7 @@ module Mica::Regex
                    @forward : StaticDirection(F), @reverse : StaticDirection(R), @program : StaticProgram(N),
                    @one_pass : StaticOnePass, @unicode_words : Bool, @final_lf : Bool, @anchored_start : Bool,
                    @budget_states : Int32, @slot_count : Int32, @prefilter : StaticPrefilter = StaticPrefilter.none,
-                   @required_bytes : Slice(UInt8) = Slice(UInt8).empty)
+                   @required_bytes : Slice(UInt8) = Slice(UInt8).empty, @minimum_bytes : Int32 = 0)
       class_count = @classes.max.to_i32 + 1
       @edge_symbol = class_count
       @word_offset = class_count + 2
@@ -132,6 +134,14 @@ module Mica::Regex
       counters = uninitialized StaticArray(Int64, 3)
       meter = open(counters.to_unsafe, haystack, limits, deadline, validate)
       bytes = haystack.to_slice
+      if direct_backtrack?(bytes, byte_offset)
+        return false if required_byte_missing?(bytes, byte_offset, meter)
+        # A short haystack: the backtracker searches it outright, and its
+        # first match in priority order is the leftmost-first match.
+        answer = backtrack_pass(bytes, byte_offset, bytes.size, byte_offset, meter, scratch + @slot_count,
+          @anchored_start, false)
+        return answer == BACKTRACK_MATCHED unless answer == BACKTRACK_DECLINED
+      end
       start, finish, lower_bound = find_ends(bytes, byte_offset, meter)
       return false if finish < 0
       if @slot_count > 2
@@ -139,14 +149,15 @@ module Mica::Regex
         # left open is read by the backtracker from the lowest start on: it
         # finds the start and the groups in one pass, with no reverse scan.
         if start == UNKNOWN_START && !@one_pass.present? &&
-           backtrack_pass(bytes, lower_bound, finish, byte_offset, meter, scratch + @slot_count, false)
+           backtrack_pass(bytes, lower_bound, finish, byte_offset, meter, scratch + @slot_count, false, true) == BACKTRACK_MATCHED
           return true
         end
         start = start_by_reverse(bytes, finish, lower_bound, meter) if start == UNKNOWN_START
         read_by_one_pass = @one_pass.present? &&
                            @one_pass.captures(bytes, start, finish, byte_offset, @classes.to_unsafe, scratch,
                              @slot_count, meter)
-        unless read_by_one_pass || backtrack_pass(bytes, start, finish, byte_offset, meter, scratch + @slot_count, true)
+        unless read_by_one_pass ||
+               backtrack_pass(bytes, start, finish, byte_offset, meter, scratch + @slot_count, true, true) == BACKTRACK_MATCHED
           capture_pass(bytes, start, finish, byte_offset, meter, scratch + @slot_count)
         end
       else
@@ -155,6 +166,22 @@ module Mica::Regex
         scratch[1] = finish
       end
       true
+    end
+
+    # The most (state, position) pairs a haystack may take for
+    # `search_groups` to search it with the backtracker alone.
+    DIRECT_BACKTRACK_BITS = 4_096
+
+    # True when `search_groups` searches *bytes* from *byte_offset* with
+    # the backtracker alone: the pattern has groups, is not anchored at its
+    # start (the DFA ends such a search within a few bytes when nothing
+    # matches) and has neither a one-pass DFA nor a prefilter, and the
+    # haystack left is short enough
+    # (`DIRECT_BACKTRACK_BITS`).
+    private def direct_backtrack?(bytes : Bytes, byte_offset : Int32) : Bool
+      return false if @slot_count <= 2 || @one_pass.present? || @prefilter.present? || @anchored_start
+      return false unless start_allowed?(bytes, byte_offset)
+      @program.size.to_i64 * (bytes.size - byte_offset + 1) <= DIRECT_BACKTRACK_BITS
     end
 
     # Yields each leftmost-first match of *haystack* in turn, stepping over
@@ -201,7 +228,8 @@ module Mica::Regex
       if byte_offset < bytes.size && bytes.unsafe_fetch(byte_offset) & 0xC0 == 0x80
         raise ArgumentError.new("Byte index #{byte_offset} is inside a UTF-8 character")
       end
-      true
+      # Fewer bytes are left than any match spans.
+      byte_offset <= bytes.size - @minimum_bytes
     end
 
     private def find_span(bytes : Bytes, byte_offset : Int32, meter : StaticMeter) : Span?
@@ -558,12 +586,12 @@ module Mica::Regex
     # then the job stack, two words a job: a state and a position, or a
     # slot to restore (`-(slot + 1)`) and its value.
     private def backtrack_pass(bytes : Bytes, from : Int32, finish : Int32, search_start : Int32, meter : StaticMeter,
-                               scratch : Pointer(Int32), anchored : Bool) : Bool
+                               scratch : Pointer(Int32), anchored : Bool, exact_end : Bool) : Int32
       program = @program
       slots = @slot_count
       columns = finish - from + 1
       bits = program.size.to_i64 * columns
-      return false if bits > StaticScratch::BACKTRACK_BITS || meter.room < 2 * bits + 2
+      return BACKTRACK_DECLINED if bits > StaticScratch::BACKTRACK_BITS || meter.room < 2 * bits + 2
       thread_slots = scratch
       visited = (scratch + slots).as(Pointer(UInt32))
       visited.clear(((bits + 31) // 32).to_i32)
@@ -648,7 +676,7 @@ module Mica::Regex
             when .split?
               if depth >= job_limit
                 meter.charge(work, at)
-                return false
+                return BACKTRACK_DECLINED
               end
               alternate = program.alternates.unsafe_fetch(current).to_i32
               body = program.next_states.unsafe_fetch(current).to_i32
@@ -693,7 +721,7 @@ module Mica::Regex
               if slot < slots
                 if depth >= job_limit
                   meter.charge(work, at)
-                  return false
+                  return BACKTRACK_DECLINED
                 end
                 work += 1
                 jobs[depth] = -(slot + 1)
@@ -711,9 +739,9 @@ module Mica::Regex
               # found that end); anything else is left to the Pike VM, which
               # checks it.
               meter.charge(work, at)
-              return false unless at == finish && thread_slots[0] == origin
+              return BACKTRACK_DECLINED if exact_end && !(at == finish && thread_slots[0] == origin)
               (scratch - slots).copy_from(thread_slots, slots)
-              return true
+              return BACKTRACK_MATCHED
             else
               break
             end
@@ -727,8 +755,14 @@ module Mica::Regex
         break if origin > finish
       end
       meter.charge(work, finish)
-      false
+      exact_end ? BACKTRACK_DECLINED : BACKTRACK_NO_MATCH
     end
+
+    # `backtrack_pass`'s answers: the groups are written, nothing matches,
+    # or the pass declined and wrote nothing.
+    private BACKTRACK_MATCHED  =  1
+    private BACKTRACK_NO_MATCH =  0
+    private BACKTRACK_DECLINED = -1
 
     # Added to a state number in the backtracker's job stack, a job of
     # starts: explore that state at each position from the first to the

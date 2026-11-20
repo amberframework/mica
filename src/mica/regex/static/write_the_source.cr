@@ -68,6 +68,7 @@ module Mica::Regex::Static
       write_prefilter(tables.prefilter)
       @output << ",\n  required_bytes: "
       write_slice("UInt8", tables.list_of_required_bytes)
+      @output << ", minimum_bytes: " << tables.minimum_bytes
       @output << "))\n"
     end
 
