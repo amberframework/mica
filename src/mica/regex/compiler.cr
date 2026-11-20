@@ -53,7 +53,10 @@ module Mica::Regex
     # *estimate*, under *limits*.
     def self.compile(pattern : Hir::Pattern, estimate : Int64, limits : CompileLimits, ledger : AllocationLedger,
                      meter : Core::WorkMeter) : Program
-      new(pattern, estimate, limits, ledger, meter).compile
+      compiler = new(pattern, estimate, limits, ledger, meter)
+      program = compiler.compile
+      compiler.release
+      program
     end
 
     @list_of_states : Array(Program::State)
@@ -92,8 +95,15 @@ module Mica::Regex
     # them, `@list_of_states` does not hold them.
     @list_of_runs = [] of Program::ClassRun
     @run_states = 0
-    # The room `@list_of_states` was allocated with.
+    # The most states `@list_of_states` may hold: the preflight's bound,
+    # charged to the ledger, less the runs found ahead.
     @physical_capacity : Int32
+    # The room `@list_of_states` has now. It starts at the whole bound or
+    # at `FIRST_STATE_ROOM` (see there), and doubles as the compiler
+    # emits, up to `@physical_capacity`: the
+    # bound counts every class at its largest and every optional copy of
+    # a counted repetition, so a program often needs a small part of it.
+    @state_room : Int32
     # The states of the runs `transitions_bound` found ahead (see
     # `class_run`).
     @run_states_ahead = 0_i64
@@ -116,7 +126,8 @@ module Mica::Regex
       # bound, charged again, only when a run found ahead is emitted as
       # states after all (see `check_state_room`).
       @physical_capacity = Math.max(capacity - Math.min(@run_states_ahead, capacity.to_i64).to_i32, 1)
-      @list_of_states = Array(Program::State).new(@physical_capacity)
+      @state_room = @physical_capacity <= WHOLE_ROOM_STATES ? @physical_capacity : FIRST_STATE_ROOM
+      @list_of_states = Array(Program::State).new(@state_room)
       if PRESIZED_TRANSITIONS <= transition_bound <= @limits.max_program_states
         @ledger.charge_array(transition_bound, sizeof(Program::Transition), "the program transitions", 0)
         @list_of_transitions = Array(Program::Transition).new(transition_bound.to_i32)
@@ -133,6 +144,13 @@ module Mica::Regex
       @ledger.charge_array(0, sizeof(Int32), "the class trie", 0)
       @list_of_trie_states = [] of Int32
     end
+
+    # The states the state list starts with room for when the bound is
+    # larger than `WHOLE_ROOM_STATES` (see `@state_room`); a list bound to
+    # at most that many states gets its whole room at once, which costs
+    # less than growing it.
+    private FIRST_STATE_ROOM  =   64
+    private WHOLE_ROOM_STATES = 2048
 
     # A program bound to have at least this many transitions gets its
     # transition list allocated once, at the bound, rather than grown.
@@ -233,6 +251,8 @@ module Mica::Regex
       literal_set = LiteralSet.extract(@pattern, @meter)
       charge_literal_set(literal_set) if literal_set
       @ledger.charge_object(instance_sizeof(Program), "the program", 0)
+      trim_states
+      trim_transitions
       Program.new(@list_of_states, @list_of_transitions, start, @pattern.capture_count, group_names,
         @pattern.options, @limits.max_pike_bytes - workspace_charge, @pattern.source_end, literal_set,
         @list_of_class_blocks, @list_of_shared_tables, @list_of_runs, @list_of_entry_targets)
@@ -829,6 +849,7 @@ module Mica::Regex
       return if @list_of_transitions.remaining_capacity - size >= added
       grown = Array(Program::Transition).new(Math.max(size + added, size * 2))
       grown.concat(@list_of_transitions)
+      GC.free(@list_of_transitions.to_unsafe.as(Void*))
       @list_of_transitions = grown
     end
 
@@ -955,10 +976,71 @@ module Mica::Regex
       bound = @estimate.clamp(1_i64, @limits.max_program_states).to_i32
       return if @physical_capacity >= bound
       @ledger.charge_array(bound, sizeof(Program::State), "the program states", 0)
-      grown = Array(Program::State).new(bound)
-      grown.concat(@list_of_states)
-      @list_of_states = grown
       @physical_capacity = bound
+    end
+
+    # Gives `@list_of_states` room for *needed* states: twice its room, at
+    # least *needed*, at most the charged bound. The list it outgrew is
+    # freed (the compiler alone holds it, and never shifts it).
+    private def make_state_room(needed : Int32) : Nil
+      room = Math.min(Math.max(@state_room * 2, needed), @physical_capacity)
+      grown = Array(Program::State).new(room)
+      grown.concat(@list_of_states)
+      GC.free(@list_of_states.to_unsafe.as(Void*))
+      @list_of_states = grown
+      @state_room = room
+    end
+
+    # Moves the states into a list of exactly their number and frees the
+    # list they were emitted into, which was allocated at the preflight's
+    # bound (every class counted at its largest, every literal as a byte
+    # state): its spare room would otherwise stay allocated, and count
+    # toward the collector's next collection, for as long as the program
+    # lives. The compiler alone holds the list, and never shifts it.
+    private def trim_states : Nil
+      states = @list_of_states
+      spare = @state_room - states.size
+      return if spare < TRIM_MIN_SPARE_STATES || spare < states.size // 4
+      exact = Array(Program::State).new(states.size)
+      exact.concat(states)
+      GC.free(states.to_unsafe.as(Void*))
+      @list_of_states = exact
+      @state_room = states.size
+    end
+
+    # The same for the transitions, whose list a large program allocates
+    # at the bound `transitions_bound` finds (see `initialize`).
+    private def trim_transitions : Nil
+      transitions = @list_of_transitions
+      return if transitions.size * 2 >= transitions.remaining_capacity
+      exact = Array(Program::Transition).new(transitions.size)
+      exact.concat(transitions)
+      GC.free(transitions.to_unsafe.as(Void*))
+      @list_of_transitions = exact
+    end
+
+    # Spare room in the state list below this many states (1 KiB), or below
+    # a quarter of the states, is kept: copying the list costs more than
+    # the room.
+    private TRIM_MIN_SPARE_STATES = 64
+
+    # Frees the compiler and the scratch lists the program does not keep
+    # (its stacks, its class trie, the trie's states and the visited
+    # marks), once the program is built: they would otherwise count toward
+    # the collector's next collection until it ran. The compiler is not
+    # used again; it alone holds these lists, and never shifts them.
+    protected def release : Nil
+      free_list(@list_of_tasks)
+      free_list(@list_of_values)
+      free_list(@list_of_trie_states)
+      free_list(@list_of_visited)
+      @class_trie.release
+      GC.free(self.as(Void*))
+    end
+
+    private def free_list(list : Array) : Nil
+      GC.free(list.to_unsafe.as(Void*))
+      GC.free(list.as(Void*))
     end
 
     # True when *node*, compiled once, will make a run (`class_run`) of its
@@ -1021,6 +1103,7 @@ module Mica::Regex
     private def check_state_room(added : Int32, written : Bool = true) : Nil
       count = state_total.to_i64 + added
       grow_to_bound if written && @list_of_states.size.to_i64 + added > @physical_capacity
+      make_state_room(@list_of_states.size + added) if written && @list_of_states.size + added > @state_room
       limit = @limits.max_program_states
       if count > limit
         raise CompileLimitError.new("max_program_states", limit, "A program of #{count} states", Core::Position.new(0_i64))
