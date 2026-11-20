@@ -113,6 +113,17 @@ describe "Mica::Regex round 9 case work" do
       end
     end
 
+    it "keeps the required-byte check for an anchored program (^...$)" do
+      program = program_of("^[a-z]+@[a-z]+$")
+      haystack = "a" * 100_000 + "!"
+      searcher = Mica::Regex::Searcher.new(program, haystack, UNLIMITED, nil, Mica::Regex::Engine::Auto)
+      searcher.find(0, Mica::Regex::MatchOptions::None, false).should be_nil
+      # No engine ran: the haystack lacks the `@` every match reads.
+      searcher.last_path.should eq(Mica::Regex::Searcher::Path::None)
+      searcher.finish
+      {"ab@cd", "ab@cd\n", "ab@cd!", "@cd", "ab@"}.each { |text| same_as_pike_vm("^[a-z]+@[a-z]+$", text) }
+    end
+
     it "reads the end of a long haystack only" do
       program = program_of("[ -~]*ABCDEFGHIJKLMNOPQRSTUVWXYZ$")
       haystack = ("abcdefghij\n" * 100_000) + "tail ABCDEFGHIJKLMNOPQRSTUVWXYZ"

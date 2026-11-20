@@ -368,9 +368,9 @@ module Mica::Regex
       bytes = @haystack.to_slice
       return nil if byte_index > bytes.size
       check_start(bytes, byte_index)
-      return nil if required_byte_missing?(bytes, byte_index)
       end_anchored = @program.options.end_anchored? || options.end_anchored?
       anchored = @program.options.anchored? || options.anchored? || anchored_at_offset?(end_anchored)
+      return nil if required_byte_missing?(bytes, byte_index, from_text_end?(anchored, end_anchored))
       case @engine
       in .pike_vm?
         slots = @capture_slots
@@ -403,7 +403,7 @@ module Mica::Regex
       bytes = @haystack.to_slice
       return false if byte_index > bytes.size
       check_start(bytes, byte_index)
-      return false if required_byte_missing?(bytes, byte_index)
+      return false if required_byte_missing?(bytes, byte_index, false)
       end_anchored = @program.options.end_anchored? || options.end_anchored?
       anchored = @program.options.anchored? || options.anchored? || anchored_at_offset?(end_anchored)
       if dfa = automaton(end_anchored)
@@ -470,9 +470,8 @@ module Mica::Regex
     # when nothing matches, or nil when the search should take the other
     # paths (it does not apply, or a DFA gave up).
     private def find_from_text_end(bytes : Bytes, byte_index : Int32, anchored : Bool, end_anchored : Bool) : Bool?
-      return nil if anchored || end_anchored || !@engine.auto? || @dfa_gave_up || @program.options.first_line?
+      return nil unless from_text_end?(anchored, end_anchored)
       plan = @plan || return nil
-      return nil unless plan.ends_at_text_end?
       forward = plan.forward || return nil
       reverse = plan.reverse || return nil
       lease = @lease || return nil
@@ -494,6 +493,15 @@ module Mica::Regex
       @span_slots[1] = finish.to_i64
       @last_path = Path::LazyDFA
       true
+    end
+
+    # True when `find_from_text_end` applies to a search with these anchors:
+    # an unanchored `Auto` search of a program whose every match ends at the
+    # end of the text.
+    private def from_text_end?(anchored : Bool, end_anchored : Bool) : Bool
+      return false if anchored || end_anchored || !@engine.auto? || @dfa_gave_up || @program.options.first_line?
+      plan = @plan
+      !!plan && plan.ends_at_text_end?
     end
 
     # True when this search should run anchored at the positions where a
@@ -1048,12 +1056,14 @@ module Mica::Regex
     # or before that position does not scan again; a later search starts
     # after the end of the match before it, which contains the byte, so an
     # iteration call reads each byte at most once per required byte.
-    private def required_byte_missing?(bytes : Bytes, byte_index : Int32) : Bool
+    #
+    # A search that runs from the end of the text (*from_text_end*, see
+    # `find_from_text_end`) skips the check: it reads less than a `memchr`
+    # for a byte that only the last line holds. An anchored search of such a
+    # program (`^...$`) keeps it, as it reads forward from its start.
+    private def required_byte_missing?(bytes : Bytes, byte_index : Int32, from_text_end : Bool) : Bool
       if @engine.auto? && (plan = @plan)
-        # A program whose matches all end at the end of the text is searched
-        # from there (`find_from_text_end`), which reads less than a
-        # `memchr` for a byte that only the last line holds.
-        return false if plan.ends_at_text_end?
+        return false if from_text_end
         # Auto checks the rarest required byte at every search, as a
         # haystack may lack it past an earlier match. It looks for the
         # others (at most `StartFilter::MAX_REQUIRED_BYTES` in all) once per
