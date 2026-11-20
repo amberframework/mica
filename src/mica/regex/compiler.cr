@@ -99,8 +99,8 @@ module Mica::Regex
     # charged to the ledger, less the runs found ahead.
     @physical_capacity : Int32
     # The room `@list_of_states` has now. It starts at the whole bound or
-    # at `FIRST_STATE_ROOM` (see there)
-    # and doubles as the compiler emits, up to `@physical_capacity`: the
+    # at `FIRST_STATE_ROOM` (see there), and doubles as the compiler
+    # emits, up to `@physical_capacity`: the
     # bound counts every class at its largest and every optional copy of
     # a counted repetition, so a program often needs a small part of it.
     @state_room : Int32
