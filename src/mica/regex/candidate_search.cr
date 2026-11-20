@@ -80,7 +80,8 @@ module Mica::Regex
       plan = @plan
       bytes = @haystack.to_slice
       from = @byte_index
-      if @program.options.anchored? || @options.anchored? || plan.anchored_start?
+      # `one_pass` declined every end-anchored search.
+      if @program.options.anchored? || @options.anchored? || plan.anchored_at_offset?(false)
         finish, scanned = one_pass.search(bytes, from, from, slots, scratch, nil)
         @spent = scanned.to_i64 + 1
         return finish
