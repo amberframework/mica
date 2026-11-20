@@ -11,7 +11,7 @@ module Mica::Regex
     getter class_count : Int32
     @class_of : StaticArray(UInt8, 256)
     # The first byte of each class, in order (the first `class_count`).
-    @representatives : StaticArray(UInt8, 256)
+    @list_of_representatives : StaticArray(UInt8, 256)
 
     def initialize(program : Program)
       boundaries = StaticArray(Bool, 257).new(false)
@@ -23,12 +23,12 @@ module Mica::Regex
         ByteClasses.mark(pointerof(boundaries), {{range[0]}}, {{range[1]}})
       {% end %}
       @class_of = StaticArray(UInt8, 256).new(0_u8)
-      @representatives = StaticArray(UInt8, 256).new(0_u8)
+      @list_of_representatives = StaticArray(UInt8, 256).new(0_u8)
       current = 0
       (1..255).each do |byte|
         if boundaries[byte]
           current += 1
-          @representatives[current] = byte.to_u8
+          @list_of_representatives[current] = byte.to_u8
         end
         @class_of[byte] = current.to_u8
       end
@@ -49,15 +49,15 @@ module Mica::Regex
 
     # Returns the first byte of class *class_index*.
     def representative(class_index : Int32) : UInt8
-      @representatives[class_index]
+      @list_of_representatives[class_index]
     end
 
     # Returns the number of byte values in class *class_index* (a class is
     # a run of consecutive bytes, from its representative to the next
     # class's).
     def class_size(class_index : Int32) : Int32
-      next_start = class_index + 1 < @class_count ? @representatives[class_index + 1].to_i32 : 256
-      next_start - @representatives[class_index].to_i32
+      next_start = class_index + 1 < @class_count ? @list_of_representatives[class_index + 1].to_i32 : 256
+      next_start - @list_of_representatives[class_index].to_i32
     end
 
     # :nodoc:
