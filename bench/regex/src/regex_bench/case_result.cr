@@ -35,8 +35,16 @@ module RegexBench
     getter compile : Statistics = Statistics.new
     # Compile plus the first search, a new compiled pattern each sample.
     getter cold_first_search : Statistics = Statistics.new
-    # The very first compile plus first search in a fresh process.
+    # The very first compile plus first search in the process that took the
+    # other measurements.
     getter process_first_search_seconds : Float64 = 0.0
+    # Compile plus the first search as the first regex work of a fresh
+    # runner process, one sample per process, each process started right
+    # after an untimed page-in of the runner (see `PageInTheRunnerImage`).
+    # Empty in runs recorded before these samples existed.
+    getter process_cold : Statistics = Statistics.new
+    # The process-cold samples themselves, in the order they were taken.
+    getter list_of_process_cold_seconds : Array(Float64) = [] of Float64
     # One full iteration of the model with an already compiled pattern.
     getter warm_search : Statistics = Statistics.new
     # Seconds until the engine stopped, for "limit" results.
@@ -79,6 +87,23 @@ module RegexBench
     def search_seconds : Float64
       stopped_on_a_limit? ? @seconds_until_limit : @warm_search.median
     end
+
+    # The process-cold median in seconds: the median of the fresh-process
+    # samples, or the single in-process sample of an older run.
+    def process_cold_seconds : Float64
+      @process_cold.has_samples? ? @process_cold.median : @process_first_search_seconds
+    end
+
+    # Returns a copy carrying *list_of_seconds* as its process-cold samples.
+    def with_process_cold(list_of_seconds : Array(Float64)) : self
+      copy = dup
+      copy.process_cold = Statistics.of(list_of_seconds)
+      copy.list_of_process_cold_seconds = list_of_seconds
+      copy
+    end
+
+    protected setter process_cold : Statistics
+    protected setter list_of_process_cold_seconds : Array(Float64)
 
     # Bytes the engine added on top of the loaded haystack.
     def engine_rss_bytes : Int64

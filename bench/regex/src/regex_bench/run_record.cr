@@ -25,11 +25,16 @@ module RegexBench
     getter case_timeout_seconds : Float64
     getter redos_timeout_seconds : Float64
     getter engines : Array(EngineDescription)
+    # The seed that shuffled the case order (see `OrderCasesAtRandom`); 0 in
+    # runs recorded before the order was shuffled.
+    getter case_order_seed : UInt64 = 0
+    # Fresh runner processes per case and engine for process-cold.
+    getter process_cold_samples : Int32 = 0
 
     def initialize(*, @started_at, @operating_system, @cpu, @logical_cpu_count, @memory_bytes, @crystal_version,
                    @harness_commit, @mica_ref, @mica_commit, @rebar_commit, @rebar_tarball_sha256,
                    @list_of_corpora, @max_samples, @min_samples, @phase_seconds, @case_timeout_seconds,
-                   @redos_timeout_seconds, @engines)
+                   @redos_timeout_seconds, @engines, @case_order_seed = 0_u64, @process_cold_samples = 0)
     end
 
     # Returns a copy stamped with the finish time.

@@ -71,7 +71,7 @@ module RegexBench
         primary_ratio: eligible ? ratio(engine_result.primary_median, baseline.primary_median) : 0.0,
         compile_ratio: eligible ? ratio(engine_result.compile.median, baseline.compile.median) : 0.0,
         cold_ratio: eligible ? ratio(engine_result.cold_first_search.median, baseline.cold_first_search.median) : 0.0,
-        process_cold_ratio: eligible ? ratio(engine_result.process_first_search_seconds, baseline.process_first_search_seconds) : 0.0,
+        process_cold_ratio: eligible ? ratio(engine_result.process_cold_seconds, baseline.process_cold_seconds) : 0.0,
         engine_seconds: metric_seconds(engine_result), baseline_seconds: metric_seconds(baseline),
         baseline_primary_median_seconds: baseline.primary_median,
         engine_primary_median_seconds: engine_result.primary_median,
@@ -84,7 +84,7 @@ module RegexBench
 
     private def metric_seconds(case_result : CaseResult) : MetricSeconds
       MetricSeconds.new(warm: case_result.primary_median, compile: case_result.compile.median,
-        cold: case_result.cold_first_search.median, process_cold: case_result.process_first_search_seconds)
+        cold: case_result.cold_first_search.median, process_cold: case_result.process_cold_seconds)
     end
 
     private def primary_statistics(case_result : CaseResult) : Statistics

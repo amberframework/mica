@@ -6,6 +6,7 @@
 #   bench/regex/run.sh --mica-ref origin/feature/regex-r2
 #   bench/regex/run.sh --engines pcre2-jit,pcre2-interpreter --out DIR
 #   bench/regex/run.sh --quick                          # smaller sizes, fewer samples
+#   bench/regex/run.sh --seed 42                        # replay a recorded case order
 #   bench/regex/run.sh -- --only redos/                 # anything after -- goes to the driver
 #   bench/regex/run.sh --engines pcre2-jit,mica,mica-static   # with Mica::Regex.static
 #
@@ -24,6 +25,7 @@ ENGINES="pcre2-jit,pcre2-interpreter,mica"
 CORPORA="rebar,amber,redos"
 TITLE="Mica::Regex vs PCRE2 benchmark"
 QUICK=""
+SEED=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --mica-ref) MICA_REF=$2; shift 2 ;;
@@ -31,7 +33,8 @@ while [ $# -gt 0 ]; do
     --engines) ENGINES=$2; shift 2 ;;
     --corpora) CORPORA=$2; shift 2 ;;
     --title) TITLE=$2; shift 2 ;;
-    --quick) QUICK="--max-amber-bytes 1048576 --max-samples 5 --phase-seconds 0.3"; shift ;;
+    --quick) QUICK="--max-amber-bytes 1048576 --max-samples 5 --phase-seconds 0.3 --process-cold-samples 3"; shift ;;
+    --seed) SEED="--seed $2"; shift 2 ;;
     --) shift; break ;;
     *) echo "unknown option $1 (see the header of bench/regex/run.sh)" >&2; exit 2 ;;
   esac
@@ -79,6 +82,6 @@ fi
 # shellcheck disable=SC2086
 "$BIN/run_cases" --runners "$BIN" --out "$OUT" --data "$ROOT/bench/data/regex" \
   --engines "$ENGINES" --corpora "$CORPORA" --mica-ref "$MICA_REF" --mica-commit "$MICA_COMMIT" \
-  --harness-commit "$(git rev-parse HEAD)" $QUICK "$@"
+  --harness-commit "$(git rev-parse HEAD)" $QUICK $SEED "$@"
 "$BIN/write_report" --run "$OUT" --title "$TITLE"
 echo "report: $OUT/REPORT.md"

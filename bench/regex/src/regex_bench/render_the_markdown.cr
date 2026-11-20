@@ -108,7 +108,7 @@ module RegexBench
       io << "Ratio to `" << @document.baseline_engine << "` over each group's eligible cases (both engines finished and their counts agree). "
       io << "Warm search is the model's primary metric (compile time for rebar's `compile` model). "
       io << "Cold first search is compile plus one search in a process that has already run the case; process-cold is compile plus "
-      io << "the first search as the first regex work of a fresh runner process. Beside each ratio: the geometric means of the "
+      io << "the first search as the first regex work of a fresh runner process (median of its fresh-process samples). Beside each ratio: the geometric means of the "
       io << "engine's and the baseline's medians.\n\n"
       io << "| Engine | Group | Cases | Eligible | Warm search | Compile | Cold first search | Process-cold | Slower cases |\n"
       io << "|---|---|---|---|---|---|---|---|---|\n"
@@ -205,8 +205,13 @@ module RegexBench
     private def write_method(io : IO) : Nil
       run = @document.run
       io << "## Method\n\n"
-      io << "- Each engine runs every case in its own process (separate linkage and memory); processes run one at a time.\n"
-      io << "- Per case: the process-cold first compile + search is timed once; one full iteration verifies the count; "
+      io << "- Each engine runs every case in its own process (separate linkage and memory); processes run one at a time. "
+      io << "Cases run in an order shuffled by seed " << run.case_order_seed << " (replay it with `--seed`), engines in a shuffled order per case.\n"
+      io << "- Every timed runner process starts right after an untimed `--page-in` process of the same binary, identical for every "
+      io << "engine and doing no regex work, so the once-per-binary cost of bringing its pages in falls on no case.\n"
+      io << "- Process-cold: compile + first search as the first regex work of a fresh runner process, " << run.process_cold_samples
+      io << " fresh processes per case and engine (rounds alternate the engines); the median is reported.\n"
+      io << "- Per case: one full iteration verifies the count; "
       io << "then compile, cold first search (compile + one search, a new pattern each sample) and warm search are sampled.\n"
       io << "- Every timed cold and warm search gets its own String, equal to the haystack but a separate object, as a web app "
       io << "gets a new String per request; the copies for a batch are made before its clock starts, for every engine alike.\n"

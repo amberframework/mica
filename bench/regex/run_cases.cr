@@ -21,6 +21,8 @@ redos_timeout_seconds = 10.0
 mica_ref = "working tree"
 mica_commit = "unknown"
 harness_commit = "unknown"
+process_cold_samples = 5
+case_order_seed = Random::Secure.rand(UInt64)
 
 OptionParser.parse do |parser|
   parser.banner = "usage: run_cases [options]"
@@ -37,6 +39,8 @@ OptionParser.parse do |parser|
   parser.on("--phase-seconds S", "Seconds a measurement may take once it has its minimum samples") { |value| phase_seconds = value.to_f }
   parser.on("--case-timeout S", "Process cap for a throughput case") { |value| case_timeout_seconds = value.to_f }
   parser.on("--redos-timeout S", "Process cap for a ReDoS case") { |value| redos_timeout_seconds = value.to_f }
+  parser.on("--process-cold-samples N", "Fresh processes per case and engine for process-cold (default 5)") { |value| process_cold_samples = value.to_i }
+  parser.on("--seed N", "Seed of the shuffled case order (default: random, recorded in run.json)") { |value| case_order_seed = value.to_u64 }
   parser.on("--mica-ref REF", "Label of the Mica ref measured") { |value| mica_ref = value }
   parser.on("--mica-commit SHA", "Commit of the Mica ref measured") { |value| mica_commit = value }
   parser.on("--harness-commit SHA", "Commit of this harness") { |value| harness_commit = value }
@@ -52,5 +56,6 @@ settings = RegexBench::DriverSettings.new(
   list_of_corpora: list_of_corpora, case_filter: case_filter, list_of_case_ids: list_of_case_ids, max_amber_bytes: max_amber_bytes,
   max_samples: max_samples, min_samples: min_samples, phase_seconds: phase_seconds,
   case_timeout_seconds: case_timeout_seconds, redos_timeout_seconds: redos_timeout_seconds,
+  process_cold_samples: process_cold_samples, case_order_seed: case_order_seed,
   mica_ref: mica_ref, mica_commit: mica_commit, harness_commit: harness_commit)
 RegexBench::RunCasesAgainstEngines.new(settings, STDERR).perform
