@@ -77,6 +77,10 @@ module Mica::Regex
     @budget_states : Int32
     @word_offset : Int32
     @edge_symbol : Int32
+    # Where the forward start states of a search from the start of the
+    # text sit in `StaticDirection#starts` (the unanchored one, then the
+    # anchored one).
+    @text_start_index : Int32
     # The words of stack scratch `search_groups` needs.
     getter scratch_words : Int32
 
@@ -89,6 +93,7 @@ module Mica::Regex
       @edge_symbol = class_count
       @word_offset = class_count + 2
       @scratch_words = @slot_count > 2 ? StaticScratch.words_for(@program.size, @slot_count) : @slot_count
+      @text_start_index = @forward.start_index(LazyDFA::TEXT_EDGE) * 2
     end
 
     # The number of capturing groups (group 0 not included).
@@ -379,9 +384,12 @@ module Mica::Regex
       accel_limit = direction.accel_limit
       words = @unicode_words
       word_offset = @word_offset
-      flags = anchored ? LazyDFA::START_PENDING : LazyDFA::UNANCHORED
-      flags |= start == 0 ? LazyDFA::TEXT_EDGE : symbol_flags(bytes, start - 1)
-      current = direction.starts.unsafe_fetch(direction.start_index(flags) * 2 + (anchored ? 1 : 0)).to_i32
+      starts_at = if start == 0
+                    @text_start_index
+                  else
+                    direction.start_index(symbol_flags(bytes, start - 1)) * 2
+                  end
+      current = direction.starts.unsafe_fetch(starts_at + (anchored ? 1 : 0)).to_i32
       last_end = NO_MATCH
       at = start
       wide_start = wide_end = 0
