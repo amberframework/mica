@@ -1,14 +1,31 @@
 module Mica::Regex
   # :nodoc:
   # The layout of a static capture pass's stack scratch (see
-  # `StaticMatcher#capture_pass`), shared by the build-time table writer
-  # and the matcher.
+  # `StaticMatcher#backtrack_pass` and `StaticMatcher#capture_pass`),
+  # shared by the build-time table writer and the matcher. The two passes
+  # take turns in the same words: the backtracker runs first, and the Pike
+  # VM only when it declines.
   module StaticScratch
+    # The most (state, position) pairs the backtracker's visited bitset
+    # holds: 16 Ki bits, 2 KiB.
+    BACKTRACK_BITS = 16_384
+    # The most jobs the backtracker's stack holds (two words each, 8 KiB);
+    # a search that needs more leaves the groups to the Pike VM.
+    BACKTRACK_JOBS = 1_024
+
     # The 32-bit words of scratch for *state_count* NFA states and
-    # *slot_count* slots: the groups found, two slot tables, two sparse
-    # sets, the closure stack and one slot vector.
+    # *slot_count* slots: the groups found, then the larger of the Pike VM's
+    # part (two slot tables, two sparse sets, the closure stack and one
+    # slot vector) and the backtracker's (one slot vector, the visited
+    # bitset and the job stack).
     def self.words_for(state_count : Int32, slot_count : Int32) : Int32
-      2 * state_count * slot_count + 6 * state_count + 2 * slot_count
+      pike = 2 * state_count * slot_count + 6 * state_count + slot_count
+      slot_count + Math.max(pike, backtrack_words(slot_count))
+    end
+
+    # The words of the backtracker's part for *slot_count* slots.
+    def self.backtrack_words(slot_count : Int32) : Int32
+      slot_count + BACKTRACK_BITS // 32 + 2 * BACKTRACK_JOBS
     end
   end
 
@@ -51,6 +68,7 @@ module Mica::Regex
     @program : StaticProgram(N)
     @one_pass : StaticOnePass
     @prefilter : StaticPrefilter
+    @required_bytes : Slice(UInt8)
     @unicode_words : Bool
     @final_lf : Bool
     @anchored_start : Bool
@@ -63,7 +81,8 @@ module Mica::Regex
     def initialize(*, @source : String, @options : CompileOptions, @classes : Slice(UInt8),
                    @forward : StaticDirection(F), @reverse : StaticDirection(R), @program : StaticProgram(N),
                    @one_pass : StaticOnePass, @unicode_words : Bool, @final_lf : Bool, @anchored_start : Bool,
-                   @budget_states : Int32, @slot_count : Int32, @prefilter : StaticPrefilter = StaticPrefilter.none)
+                   @budget_states : Int32, @slot_count : Int32, @prefilter : StaticPrefilter = StaticPrefilter.none,
+                   @required_bytes : Slice(UInt8) = Slice(UInt8).empty)
       class_count = @classes.max.to_i32 + 1
       @edge_symbol = class_count
       @word_offset = class_count + 2
@@ -83,6 +102,7 @@ module Mica::Regex
       meter = open(counters.to_unsafe, haystack, limits, deadline, validate)
       bytes = haystack.to_slice
       return false unless start_allowed?(bytes, byte_offset)
+      return false if required_byte_missing?(bytes, byte_offset, meter)
       if candidate_search?(bytes, byte_offset, meter)
         start, resume = find_at_candidates(bytes, byte_offset, true, meter)
         return start >= 0 unless start == RESUME
@@ -112,16 +132,27 @@ module Mica::Regex
       counters = uninitialized StaticArray(Int64, 3)
       meter = open(counters.to_unsafe, haystack, limits, deadline, validate)
       bytes = haystack.to_slice
-      span = find_span(bytes, byte_offset, meter)
-      return false unless span
+      start, finish, lower_bound = find_ends(bytes, byte_offset, meter)
+      return false if finish < 0
       if @slot_count > 2
+        # Without a one-pass DFA, a match whose start the forward search
+        # left open is read by the backtracker from the lowest start on: it
+        # finds the start and the groups in one pass, with no reverse scan.
+        if start == UNKNOWN_START && !@one_pass.present? &&
+           backtrack_pass(bytes, lower_bound, finish, byte_offset, meter, scratch + @slot_count, false)
+          return true
+        end
+        start = start_by_reverse(bytes, finish, lower_bound, meter) if start == UNKNOWN_START
         read_by_one_pass = @one_pass.present? &&
-                           @one_pass.captures(bytes, span.byte_begin, span.byte_end, byte_offset, @classes.to_unsafe,
-                             scratch, @slot_count, meter)
-        capture_pass(bytes, span.byte_begin, span.byte_end, byte_offset, meter, scratch + @slot_count) unless read_by_one_pass
+                           @one_pass.captures(bytes, start, finish, byte_offset, @classes.to_unsafe, scratch,
+                             @slot_count, meter)
+        unless read_by_one_pass || backtrack_pass(bytes, start, finish, byte_offset, meter, scratch + @slot_count, true)
+          capture_pass(bytes, start, finish, byte_offset, meter, scratch + @slot_count)
+        end
       else
-        scratch[0] = span.byte_begin
-        scratch[1] = span.byte_end
+        start = start_by_reverse(bytes, finish, lower_bound, meter) if start == UNKNOWN_START
+        scratch[0] = start
+        scratch[1] = finish
       end
       true
     end
@@ -174,18 +205,41 @@ module Mica::Regex
     end
 
     private def find_span(bytes : Bytes, byte_offset : Int32, meter : StaticMeter) : Span?
-      return nil unless start_allowed?(bytes, byte_offset)
+      start, finish, lower_bound = find_ends(bytes, byte_offset, meter)
+      return nil if finish < 0
+      start = start_by_reverse(bytes, finish, lower_bound, meter) if start == UNKNOWN_START
+      Span.new(start, finish)
+    end
+
+    # The start `find_ends` returns when only the reverse DFA can tell it.
+    UNKNOWN_START = -3
+
+    # The end of the leftmost-first match at or after *byte_offset*, and
+    # its start when the search knows it without the reverse DFA (anchored,
+    # or found at a prefilter candidate), else `UNKNOWN_START`; the end is
+    # `NO_MATCH` when nothing matches. The third value is the lowest
+    # position the match can start at.
+    private def find_ends(bytes : Bytes, byte_offset : Int32, meter : StaticMeter) : {Int32, Int32, Int32}
+      return {NO_MATCH, NO_MATCH, byte_offset} unless start_allowed?(bytes, byte_offset)
+      return {NO_MATCH, NO_MATCH, byte_offset} if required_byte_missing?(bytes, byte_offset, meter)
       if candidate_search?(bytes, byte_offset, meter)
         start, finish = find_at_candidates(bytes, byte_offset, false, meter)
-        return start >= 0 ? Span.new(start, finish) : nil unless start == RESUME
+        unless start == RESUME
+          return start >= 0 ? {start, finish, byte_offset} : {NO_MATCH, NO_MATCH, byte_offset}
+        end
         byte_offset = finish
       end
       anchored = @anchored_start
       finish = find_end(bytes, byte_offset, anchored, false, meter)
-      return nil if finish < 0
-      start = anchored ? byte_offset : find_start(bytes, finish, byte_offset, meter)
+      return {NO_MATCH, NO_MATCH, byte_offset} if finish < 0
+      {anchored ? byte_offset : UNKNOWN_START, finish, byte_offset}
+    end
+
+    # The start of the match ending at *finish*, from the reverse DFA.
+    private def start_by_reverse(bytes : Bytes, finish : Int32, lower_bound : Int32, meter : StaticMeter) : Int32
+      start = find_start(bytes, finish, lower_bound, meter)
       raise Mica::Error.new("internal error: the reverse DFA found no start for #{finish}") if start < 0
-      Span.new(start, finish)
+      start
     end
 
     # The start `find_at_candidates` returns when the search continues on
@@ -201,6 +255,42 @@ module Mica::Regex
     # bytes again (plus `FAILED_TRY_SLACK`), and a search that continues on
     # the DFAs reads them twice more.
     CANDIDATE_WORK_PER_BYTE = 4_i64
+
+    # True when a byte every match contains (`StartFilter#list_of_required_bytes`,
+    # ASCII, rarest first) is missing from the haystack at or after
+    # *byte_offset*, so no match starts there: found with `memchr` in the
+    # windows the meter allows, one operation per byte read, as on the
+    # runtime engine. A pattern anchored at its start, or one with a
+    # prefilter (which finds where a literal starts), does not look, nor
+    # does a search whose allowance does not cover the scans as well as
+    # the DFAs' most work.
+    private def required_byte_missing?(bytes : Bytes, byte_offset : Int32, meter : StaticMeter) : Bool
+      required = @required_bytes
+      return false if required.empty? || @anchored_start || @prefilter.present?
+      remaining = (bytes.size - byte_offset + 1).to_i64
+      return false if meter.room < (required.size + 2) * remaining
+      required.each do |byte|
+        return true unless holds_byte?(bytes, byte_offset, byte, meter)
+      end
+      false
+    end
+
+    # True when *bytes* holds *byte* at or after *from*.
+    private def holds_byte?(bytes : Bytes, from : Int32, byte : UInt8, meter : StaticMeter) : Bool
+      at = from
+      pointer = bytes.to_unsafe
+      while at < bytes.size
+        window = meter.readable(bytes.size - at, at)
+        found = LibC.memchr(pointer + at, byte.to_i32, window)
+        unless found.null?
+          meter.charge((found.as(UInt8*) - (pointer + at)).to_i32 + 1, at)
+          return true
+        end
+        meter.charge(window, at)
+        at += window
+      end
+      false
+    end
 
     # True when the search runs anchored at each prefilter candidate (see
     # `find_at_candidates`): the pattern has a prefilter, is not anchored
@@ -280,7 +370,7 @@ module Mica::Regex
             wide_start, wide_end, wide_word = LazyDFA.wide_char(bytes, at) unless wide_start <= at < wide_end
             symbol &+= word_offset if wide_word
           end
-          entry = table[(current << shift) &+ symbol]
+          entry = table[current.unsafe_shl(shift) &+ symbol]
           at &+= 1
           if entry == current && at >= runs_from && !words &&
              (entry >= accel_limit || (!earliest && DEAD_LIMIT <= entry < special_limit))
@@ -292,11 +382,22 @@ module Mica::Regex
             # leaving this loop than it saves, so after one the search steps
             # byte by byte for `LazyDFA::RUN_BACKOFF` bytes.
             run_start = at
-            row = current << shift
+            row = current.unsafe_shl(shift)
             while at < chunk_end && table[row &+ classes[bytes.unsafe_fetch(at)]] == entry
               at &+= 1
             end
             runs_from = at + LazyDFA::RUN_BACKOFF if at - run_start < LazyDFA::SHORT_RUN
+          elsif entry.to_i32 == current &+ 1 && entry >= accel_limit && !words
+            # A chain of states numbered one after another (see
+            # `Static::BuildTheTables#in_chains`), as `[0-9a-f]{8}` reads:
+            # the next state is known before its load returns, so the
+            # loads of the chain no longer wait on each other.
+            chained = entry.to_i32
+            while at < chunk_end && table[chained.unsafe_shl(shift) &+ classes[bytes.unsafe_fetch(at)]].to_i32 == chained &+ 1
+              chained &+= 1
+              at &+= 1
+            end
+            entry = F.new!(chained)
           end
           current = entry.to_i32
           next if current >= accel_limit
@@ -319,7 +420,7 @@ module Mica::Regex
       end
       if at == size - 1 && limit == size - 1
         meter.charge(1, at)
-        current = table[(current << shift) &+ @edge_symbol &+ 1].to_i32
+        current = table[current.unsafe_shl(shift) &+ @edge_symbol &+ 1].to_i32
         at += 1
         if current < special_limit
           if current >= DEAD_LIMIT || current == DEAD_MATCH
@@ -329,7 +430,7 @@ module Mica::Regex
           return last_end if current < DEAD_LIMIT
         end
       end
-      current = table[(current << shift) &+ @edge_symbol].to_i32
+      current = table[current.unsafe_shl(shift) &+ @edge_symbol].to_i32
       last_end = size if current < special_limit && current != DEAD
       last_end
     end
@@ -361,6 +462,9 @@ module Mica::Regex
       at = finish
       wide_start = wide_end = 0
       wide_word = false
+      # Where self-loop runs may start again, going down (see
+      # `LazyDFA::RUN_BACKOFF`).
+      runs_below = Int32::MAX
       while at > lower_bound
         chunk_end = at - meter.readable(Math.min(at - lower_bound, CHUNK_BYTES), at)
         chunk_start = at
@@ -371,8 +475,30 @@ module Mica::Regex
             wide_start, wide_end, wide_word = LazyDFA.wide_char(bytes, at - 1) unless wide_start <= at - 1 < wide_end
             symbol &+= word_offset if wide_word
           end
-          current = table[(current << shift) &+ symbol].to_i32
+          entry = table[current.unsafe_shl(shift) &+ symbol]
           at &-= 1
+          if entry == current && at <= runs_below && !words &&
+             (entry >= accel_limit || DEAD_LIMIT <= entry < special_limit)
+            # A self-loop run, as in `find_end`: in a match state each
+            # byte of the run starts a match, and the last one read the
+            # leftmost.
+            run_start = at
+            row = current.unsafe_shl(shift)
+            while at > chunk_end && table[row &+ classes[bytes.unsafe_fetch(at - 1)]] == entry
+              at &-= 1
+            end
+            runs_below = at - LazyDFA::RUN_BACKOFF if run_start - at < LazyDFA::SHORT_RUN
+          elsif entry.to_i32 == current &+ 1 && entry >= accel_limit && !words
+            # A chain of states numbered one after another, as in
+            # `find_end`.
+            chained = entry.to_i32
+            while at > chunk_end && table[chained.unsafe_shl(shift) &+ classes[bytes.unsafe_fetch(at - 1)]].to_i32 == chained &+ 1
+              chained &+= 1
+              at &-= 1
+            end
+            entry = R.new!(chained)
+          end
+          current = entry.to_i32
           next if current >= accel_limit
           if current >= special_limit
             at = StaticByteScan.backward(bytes, at, chunk_end, direction.accel_bytes.unsafe_fetch(current - special_limit))
@@ -387,7 +513,7 @@ module Mica::Regex
         meter.charge(chunk_start - at, at)
       end
       symbol = lower_bound > 0 ? symbol_at(bytes, lower_bound - 1) : @edge_symbol
-      current = table[(current << shift) &+ symbol].to_i32
+      current = table[current.unsafe_shl(shift) &+ symbol].to_i32
       last_start = lower_bound if current < special_limit && current != DEAD
       last_start
     end
@@ -412,6 +538,216 @@ module Mica::Regex
       symbol = @classes.unsafe_fetch(byte).to_i32
       symbol += @word_offset if @unicode_words && byte >= 0x80 && LazyDFA.wide_char(bytes, at)[2]
       symbol
+    end
+
+    # Reads the groups of the match *start*...*finish* with a bounded
+    # backtracker (RE2's BitState, as `BoundedBacktracker`): a depth-first
+    # search over the span alone in leftmost-first priority order that
+    # marks each (state, position) pair it visits in a bitset and never
+    # visits one twice, so it makes at most states × (span + 1) visits.
+    # Writes the groups to the first `slot_count` words before *scratch*
+    # and returns true; returns false, having written nothing there, when
+    # the bitset or the job stack (`StaticScratch`) is too small for the
+    # span, and the Pike VM reads the groups instead. Each visit and each
+    # slot undo is charged one operation, as on the runtime engine, all at
+    # once when the pass ends: it runs only when the allowance left covers
+    # its most work (a visit per pair and an undo per visit), and that is
+    # at most `BACKTRACK_BITS` visits, so the deadline is read no later.
+    #
+    # The scratch: one slot vector, the bitset (`BACKTRACK_BITS` bits),
+    # then the job stack, two words a job: a state and a position, or a
+    # slot to restore (`-(slot + 1)`) and its value.
+    private def backtrack_pass(bytes : Bytes, from : Int32, finish : Int32, search_start : Int32, meter : StaticMeter,
+                               scratch : Pointer(Int32), anchored : Bool) : Bool
+      program = @program
+      slots = @slot_count
+      columns = finish - from + 1
+      bits = program.size.to_i64 * columns
+      return false if bits > StaticScratch::BACKTRACK_BITS || meter.room < 2 * bits + 2
+      thread_slots = scratch
+      visited = (scratch + slots).as(Pointer(UInt32))
+      visited.clear(((bits + 31) // 32).to_i32)
+      jobs = scratch + slots + StaticScratch::BACKTRACK_BITS // 32
+      job_limit = 2 * StaticScratch::BACKTRACK_JOBS
+      slots.times { |index| thread_slots[index] = -1 }
+      kinds = program.kinds
+      classes = @classes.to_unsafe
+      # The visits and undos made, charged when the pass ends.
+      work = 0
+      # Unanchored, each character start from *from* on is tried in turn
+      # with the same bitset (a pair that failed from one start fails from
+      # every later one), and the first that matches is the match's start.
+      origin = from
+      while true
+        jobs[0] = program.start_state
+        jobs[1] = origin
+        depth = 2
+        while depth > 0
+          depth -= 2
+          current = jobs[depth]
+          at = jobs[depth + 1]
+          if current < 0
+            thread_slots[-(current + 1)] = at
+            next
+          end
+          if current >= BACKTRACK_STARTS
+            # A job of starts (see the `Split` case): the last first, the
+            # rest left on the stack.
+            current -= BACKTRACK_STARTS
+            first = from + (at & 0xFFFF)
+            last = from + (at >> 16)
+            if Program::StateKind.new(kinds.unsafe_fetch(current)).byte_range?
+              # A byte state: the starts whose byte it does not take are
+              # visited here, last first, as the general loop would visit
+              # them, and the first it takes continues past its byte.
+              low = program.lows.unsafe_fetch(current)
+              high = program.highs.unsafe_fetch(current)
+              taken = -1
+              while last >= first
+                position = last
+                last -= 1
+                next unless first_backtrack_visit?(visited, current, position - from, columns)
+                work += 1
+                next unless position < finish && low <= bytes.unsafe_fetch(position) <= high
+                taken = position
+                break
+              end
+              if last >= first
+                jobs[depth] = current + BACKTRACK_STARTS
+                jobs[depth + 1] = ((last - from) << 16) | (first - from)
+                depth += 2
+              end
+              next if taken < 0
+              current = program.next_states.unsafe_fetch(current).to_i32
+              at = taken + 1
+            else
+              if last > first
+                jobs[depth + 1] = ((last - 1 - from) << 16) | (first - from)
+                depth += 2
+              end
+              at = last
+            end
+          end
+          while true
+            break unless first_backtrack_visit?(visited, current, at - from, columns)
+            work += 1
+            kind = Program::StateKind.new(kinds.unsafe_fetch(current))
+            case kind
+            when .byte_range?
+              break unless at < finish
+              byte = bytes.unsafe_fetch(at)
+              break unless program.lows.unsafe_fetch(current) <= byte <= program.highs.unsafe_fetch(current)
+              current = program.next_states.unsafe_fetch(current).to_i32
+              at += 1
+            when .sparse?
+              break unless at < finish
+              target = program.sparse_step(current, bytes.unsafe_fetch(at), classes)
+              break if target < 0
+              current = target
+              at += 1
+            when .split?
+              if depth >= job_limit
+                meter.charge(work, at)
+                return false
+              end
+              alternate = program.alternates.unsafe_fetch(current).to_i32
+              body = program.next_states.unsafe_fetch(current).to_i32
+              body_kind = Program::StateKind.new(kinds.unsafe_fetch(body))
+              unless body_kind.byte_range? || body_kind.sparse?
+                jobs[depth] = alternate
+                jobs[depth + 1] = at
+                depth += 2
+                current = body
+                next
+              end
+              # A greedy loop over a byte state (`.*`, `\d+`): while the
+              # byte read leads back to this split, step it here, marking
+              # and counting the pairs the general loop would, and push the
+              # alternate of every position passed as one job of starts.
+              first = at
+              target = -1
+              while at < finish && first_backtrack_visit?(visited, body, at - from, columns)
+                work += 1
+                byte = bytes.unsafe_fetch(at)
+                target = if body_kind.sparse?
+                           program.sparse_step(body, byte, classes)
+                         elsif program.lows.unsafe_fetch(body) <= byte <= program.highs.unsafe_fetch(body)
+                           program.next_states.unsafe_fetch(body).to_i32
+                         else
+                           -1
+                         end
+                break unless target == current
+                target = -1
+                break unless first_backtrack_visit?(visited, current, at + 1 - from, columns)
+                work += 1
+                at += 1
+              end
+              jobs[depth] = alternate + BACKTRACK_STARTS
+              jobs[depth + 1] = ((at - from) << 16) | (first - from)
+              depth += 2
+              break if target < 0
+              current = target
+              at += 1
+            when .save?
+              slot = program.arguments.unsafe_fetch(current).to_i32
+              if slot < slots
+                if depth >= job_limit
+                  meter.charge(work, at)
+                  return false
+                end
+                work += 1
+                jobs[depth] = -(slot + 1)
+                jobs[depth + 1] = thread_slots[slot]
+                depth += 2
+                thread_slots[slot] = at
+              end
+              current = program.next_states.unsafe_fetch(current).to_i32
+            when .look?
+              look = Program::LookKind.new(program.arguments.unsafe_fetch(current).to_i32)
+              break unless Look.holds?(look, bytes, at, search_start)
+              current = program.next_states.unsafe_fetch(current).to_i32
+            when .match?
+              # The first match in priority order ends at *finish* (the DFAs
+              # found that end); anything else is left to the Pike VM, which
+              # checks it.
+              meter.charge(work, at)
+              return false unless at == finish && thread_slots[0] == origin
+              (scratch - slots).copy_from(thread_slots, slots)
+              return true
+            else
+              break
+            end
+          end
+        end
+        break if anchored
+        origin += 1
+        while origin < finish && bytes.unsafe_fetch(origin) & 0xC0 == 0x80
+          origin += 1
+        end
+        break if origin > finish
+      end
+      meter.charge(work, finish)
+      false
+    end
+
+    # Added to a state number in the backtracker's job stack, a job of
+    # starts: explore that state at each position from the first to the
+    # last, the last first, as the jobs one `Split` per position would be
+    # taken. The job's position word holds the first position (from the
+    # span's start) in its low 16 bits and the last in the bits above; a
+    # span the bitset holds is under 2^14 bytes.
+    private BACKTRACK_STARTS = 1 << 30
+
+    # Marks the pair (*state*, *column*) visited and returns true, or
+    # returns false when it was visited before.
+    @[AlwaysInline]
+    private def first_backtrack_visit?(visited : Pointer(UInt32), state : Int32, column : Int32, columns : Int32) : Bool
+      bit = state &* columns &+ column
+      word = visited + (bit >> 5)
+      mask = 1_u32 << (bit & 31)
+      return false if word.value & mask != 0
+      word.value |= mask
+      true
     end
 
     # Runs the Pike VM anchored at *start* over the span alone (bytes below
@@ -465,7 +801,7 @@ module Mica::Regex
             target = program.next_states.unsafe_fetch(state).to_i32
           when .sparse?
             next if at >= finish
-            target = program.sparse_target(state, bytes.unsafe_fetch(at))
+            target = program.sparse_step(state, bytes.unsafe_fetch(at), @classes.to_unsafe)
           end
           next if target < 0
           meter.charge(slots, at)

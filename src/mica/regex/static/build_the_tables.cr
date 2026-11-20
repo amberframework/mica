@@ -39,11 +39,13 @@ module Mica::Regex::Static
     list_of_sparse_lows : Array(Int32),
     list_of_sparse_highs : Array(Int32),
     list_of_sparse_targets : Array(Int32),
+    list_of_class_targets : Array(Int32),
+    class_count : Int32,
     start_state : Int32 do
     # The largest state number or list index the program holds, which
     # picks its integer width.
     def largest_entry : Int32
-      {list_of_next_states, list_of_alternates, list_of_arguments, list_of_sparse_targets}.max_of { |list| list.max? || 0 }
+      {list_of_next_states, list_of_alternates, list_of_arguments, list_of_sparse_targets, list_of_class_targets}.max_of { |list| list.max? || 0 }
     end
   end
 
@@ -93,6 +95,7 @@ module Mica::Regex::Static
     nfa : NfaTables?,
     one_pass : OnePassTables?,
     prefilter : PrefilterTables?,
+    list_of_required_bytes : Array(Int32),
     unicode_words : Bool,
     final_lf : Bool,
     anchored_start : Bool,
@@ -160,7 +163,7 @@ module Mica::Regex::Static
         if scratch_words > MAX_SCRATCH_WORDS
           return refuse("its capture pass needs #{scratch_words * 4} bytes of stack, over #{MAX_SCRATCH_WORDS * 4}")
         end
-        nfa = flatten(program)
+        nfa = flatten(program, byte_classes)
         if BuildTheTables.width_of(nfa.largest_entry) > 2
           return refuse("its capture program needs state numbers over #{UInt16::MAX}")
         end
@@ -170,6 +173,7 @@ module Mica::Regex::Static
       anchored_start = SearchPlan.anchored_start?(program)
       PatternTables.new(source: @source, options: @options, list_of_classes: list_of_classes, forward: forward,
         reverse: reverse, nfa: nfa, one_pass: one_pass, prefilter: anchored_start ? nil : prefilter_of(program),
+        list_of_required_bytes: StartFilter.new(program).list_of_required_bytes.map(&.to_i32),
         unicode_words: forward_dfa.unicode_words?, final_lf: forward_dfa.final_lf?,
         anchored_start: anchored_start, program_state_count: program.state_count,
         slot_count: program.slot_count, scratch_words: scratch_words)
@@ -259,6 +263,7 @@ module Mica::Regex::Static
           rest_ids << id
         end
       end
+      rest_ids = in_chains(rest_ids, transitions, symbols, byte_classes)
       order = [LazyDFA::DEAD, LazyDFA::DEAD_MATCH] + match_ids + accel_ids + rest_ids
       new_id = Array(Int32).new(state_count, 0)
       order.each_with_index { |id, index| new_id[id] = index }
@@ -277,6 +282,39 @@ module Mica::Regex::Static
       DirectionTables.new(shift: shift, state_count: state_count, list_of_entries: entries, list_of_starts: starts,
         relevant_flags: relevant, context_mask: context_mask, special_limit: special_limit, accel_limit: accel_limit,
         list_of_accel_bytes: accel_bytes)
+    end
+
+    # *list_of_ids* reordered so a state's main successor (the one most
+    # byte values lead to, past the dead states and itself) comes right
+    # after it where it can: `[0-9a-f]{8}-` becomes states numbered one
+    # after another, and the search loop follows such a chain with loads
+    # that do not wait on each other (see `StaticMatcher#find_end`).
+    private def in_chains(list_of_ids : Array(Int32), transitions : Array(Int32), symbols : Int32,
+                          byte_classes : ByteClasses) : Array(Int32)
+      members = list_of_ids.to_set
+      placed = Set(Int32).new
+      ordered = [] of Int32
+      list_of_ids.each do |id|
+        current = id
+        while members.includes?(current) && placed.add?(current)
+          ordered << current
+          current = main_successor(current, transitions, symbols, byte_classes)
+        end
+      end
+      ordered
+    end
+
+    # The successor of state *id* the most byte values lead to, past the
+    # dead states and *id* itself, or -1.
+    private def main_successor(id : Int32, transitions : Array(Int32), symbols : Int32, byte_classes : ByteClasses) : Int32
+      bytes_by_target = Hash(Int32, Int32).new(0)
+      byte_classes.class_count.times do |class_index|
+        target = transitions[id * symbols + class_index]
+        next if target <= LazyDFA::DEAD_MATCH || target == id
+        bytes_by_target[target] += byte_classes.class_size(class_index)
+      end
+      best = bytes_by_target.max_by? { |target, count| {count, -target} }
+      best ? best[0] : -1
     end
 
     # The acceleration of state *id* (see `StaticByteScan`): the one byte
@@ -356,7 +394,36 @@ module Mica::Regex::Static
       end
     end
 
-    private def flatten(program : Program) : NfaTables
+    # The most entries `class_targets_of` writes (64 Ki).
+    MAX_CLASS_TARGETS = 65_536
+
+    # The target of each `Sparse` state for each byte class, row by state
+    # (`program.state_count` rows of `class_count` entries; the state count
+    # stands for no target), so the capture passes step a `Sparse` state
+    # with one load in place of a binary search; empty when the table
+    # would pass `MAX_CLASS_TARGETS` entries. Every byte of a class has the
+    # same target: the classes split the bytes at every range bound of the
+    # program.
+    private def class_targets_of(program : Program, byte_classes : ByteClasses) : Array(Int32)
+      class_count = byte_classes.class_count
+      return [] of Int32 if program.state_count.to_i64 * class_count > MAX_CLASS_TARGETS
+      representatives = Array(Int32).new(class_count, -1)
+      256.times do |byte|
+        class_index = byte_classes.class_of(byte.to_u8)
+        representatives[class_index] = byte if representatives[class_index] < 0
+      end
+      list_of_targets = Array(Int32).new(program.state_count * class_count, program.state_count)
+      program.list_of_states.each_with_index do |state, index|
+        next unless state.kind.sparse?
+        class_count.times do |class_index|
+          target = program.sparse_target(index, state, representatives[class_index].to_u8)
+          list_of_targets[index * class_count + class_index] = target if target >= 0
+        end
+      end
+      list_of_targets
+    end
+
+    private def flatten(program : Program, byte_classes : ByteClasses) : NfaTables
       kinds = [] of Int32
       lows = [] of Int32
       highs = [] of Int32
@@ -385,9 +452,12 @@ module Mica::Regex::Static
           alternates << Math.max(state.alternate, 0)
         end
       end
+      class_count = byte_classes.class_count
+      list_of_class_targets = class_targets_of(program, byte_classes)
       NfaTables.new(list_of_kinds: kinds, list_of_lows: lows, list_of_highs: highs, list_of_next_states: nexts,
         list_of_alternates: alternates, list_of_arguments: arguments, list_of_sparse_lows: sparse_lows,
-        list_of_sparse_highs: sparse_highs, list_of_sparse_targets: sparse_targets, start_state: program.start_state)
+        list_of_sparse_highs: sparse_highs, list_of_sparse_targets: sparse_targets, list_of_class_targets: list_of_class_targets,
+        class_count: class_count, start_state: program.start_state)
     end
   end
 end

@@ -66,6 +66,8 @@ module Mica::Regex::Static
       @output << "  budget_states: " << tables.program_state_count << ", slot_count: " << tables.slot_count << ",\n"
       @output << "  prefilter: "
       write_prefilter(tables.prefilter)
+      @output << ",\n  required_bytes: "
+      write_slice("UInt8", tables.list_of_required_bytes)
       @output << "))\n"
     end
 
@@ -104,6 +106,8 @@ module Mica::Regex::Static
       write_slice("UInt8", nfa.list_of_sparse_highs)
       @output << ",\n    sparse_targets: "
       write_slice(type, nfa.list_of_sparse_targets)
+      @output << ",\n    class_count: " << nfa.class_count << ", class_targets: "
+      write_slice(type, nfa.list_of_class_targets)
       @output << ')'
     end
 

@@ -54,10 +54,14 @@ module Mica::Regex
     getter sparse_lows : Slice(UInt8)
     getter sparse_highs : Slice(UInt8)
     getter sparse_targets : Slice(T)
+    # See `Static::BuildTheTables#class_targets_of`.
+    getter class_count : Int32
+    getter class_targets : Slice(T)
 
     def initialize(*, @start_state : Int32, @kinds : Slice(UInt8), @lows : Slice(UInt8), @highs : Slice(UInt8),
                    @next_states : Slice(T), @alternates : Slice(T), @arguments : Slice(T),
-                   @sparse_lows : Slice(UInt8), @sparse_highs : Slice(UInt8), @sparse_targets : Slice(T))
+                   @sparse_lows : Slice(UInt8), @sparse_highs : Slice(UInt8), @sparse_targets : Slice(T),
+                   @class_count : Int32 = 0, @class_targets : Slice(T) = Slice(T).empty)
     end
 
     # The program of a pattern without groups: its capture pass never runs.
@@ -70,6 +74,17 @@ module Mica::Regex
     # The number of states.
     def size : Int32
       @kinds.size
+    end
+
+    # The target of Sparse state *state* on *byte* (of class
+    # `classes[byte]`), or -1: one load from `class_targets` when the
+    # program has it, else `sparse_target`.
+    @[AlwaysInline]
+    def sparse_step(state : Int32, byte : UInt8, classes : Pointer(UInt8)) : Int32
+      targets = @class_targets
+      return sparse_target(state, byte) if targets.empty?
+      target = targets.unsafe_fetch(state * @class_count + classes[byte]).to_i32
+      target == size ? -1 : target
     end
 
     # The target of Sparse state *state* on *byte*, or -1 (binary search

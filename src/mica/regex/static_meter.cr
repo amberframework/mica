@@ -12,13 +12,24 @@ module Mica::Regex
                    @timeout : Time::Span?)
       @started = @timeout ? Time.instant : nil
       @counters[0] = 0_i64
-      @counters[2] = limits.work_budget(state_count, @timeout).allowance(haystack_bytes.to_i64)
+      @counters[2] = StaticMeter.allowance(limits, state_count, haystack_bytes)
       @counters[1] = next_checkpoint
     end
 
     # The operations charged so far.
     def operations : Int64
       @counters[0]
+    end
+
+    # `SearchLimits#max_work` for *state_count* states over
+    # *haystack_bytes* bytes, saturating as it does, with 128-bit products
+    # in place of its overflow divisions: every static search starts here.
+    def self.allowance(limits : SearchLimits, state_count : Int32, haystack_bytes : Int32) : Int64
+      most = Int64::MAX.to_u128
+      base = limits.work_per_state.to_u128 * state_count.to_u128 + limits.base_work.to_u128
+      scaled = limits.work_per_byte.to_u128 * haystack_bytes.to_u128
+      total = Math.min(base + scaled, most).to_i64
+      Math.min(total, limits.work_ceiling)
     end
 
     # The operations the allowance has left.
