@@ -289,33 +289,7 @@ module Mica::Regex
     # deadline and `max_work` stop a long validation as they stop a scan.
     # Raises `Mica::EncodingError` at the first invalid byte.
     private def validate_in_windows(bytes : Bytes) : Nil
-      at = 0
-      while at < bytes.size
-        stop = window_end_at_a_character(bytes, at, at + @meter.readable(bytes.size - at, at))
-        if offset = Core::UTF8.first_invalid_offset(bytes[at, stop - at])
-          raise Mica::EncodingError.new("The haystack is not valid UTF-8", Core::Position.new((at + offset).to_i64))
-        end
-        @meter.charge(stop - at, at)
-        at = stop
-      end
-    end
-
-    # Moves the end *stop* of a validation window that starts at *at* so
-    # no character is split between two windows: back to the lead byte of
-    # the character it would cut, or, when that empties the window, on
-    # past at most three continuation bytes (an invalid run longer than a
-    # character is then split, and the window still holds its first part).
-    private def window_end_at_a_character(bytes : Bytes, at : Int32, stop : Int32) : Int32
-      boundary = stop
-      while boundary > at && boundary < bytes.size && bytes.unsafe_fetch(boundary) & 0xC0 == 0x80
-        boundary -= 1
-      end
-      return boundary if boundary > at
-      boundary = at + 1
-      while boundary < bytes.size && boundary - at < 4 && bytes.unsafe_fetch(boundary) & 0xC0 == 0x80
-        boundary += 1
-      end
-      boundary
+      ValidateInWindows.new(bytes, @meter).perform
     end
 
     # Returns the byte index of character *pos* of the haystack (its

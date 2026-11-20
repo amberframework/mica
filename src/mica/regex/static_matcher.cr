@@ -144,20 +144,17 @@ module Mica::Regex
     end
 
     # Starts a call's meter, reads the deadline and (with *validate*)
-    # checks that *haystack* is valid UTF-8, charging a byte per operation.
+    # checks that *haystack* is valid UTF-8 (see `ValidateInWindows`).
     private def open(counters : Pointer(Int64), haystack : String, limits : SearchLimits, deadline : Time::Span?,
                      validate : Bool) : StaticMeter
       meter = StaticMeter.new(counters, limits, @budget_states, haystack.bytesize, deadline)
       # The deadline is read before the haystack is, as on the runtime
       # engine.
       meter.enforce_deadline(0)
-      if validate
-        bytes = haystack.to_slice
-        meter.charge(bytes.size, 0)
-        if offset = Core::UTF8.first_invalid_offset(bytes)
-          raise Mica::EncodingError.new("The haystack is not valid UTF-8", Core::Position.new(offset.to_i64))
-        end
-      end
+      # Validation reads every byte once, one operation per byte, in
+      # windows the meter allows before each is read, so the deadline and
+      # `max_work` stop it as they stop a scan.
+      ValidateInWindows.new(haystack.to_slice, meter).perform if validate
       meter
     end
 
