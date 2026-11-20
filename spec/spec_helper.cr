@@ -104,3 +104,11 @@ end
 def node_at(context : Mica::XML::Document | Mica::XML::Node, path : String) : Mica::XML::Node
   context.xpath_node(path) || raise "No node matches #{path}"
 end
+
+# Bytes the process has allocated so far: the collector's count plus what
+# Mica::Regex asked of libc for its engine tables, which sit outside the
+# collector's heap (`Mica::Regex::OffHeap`). Allocation-bound specs measure
+# with this, so moving a buffer off the heap never hides it from them.
+def allocated_bytes_so_far : Int64
+  GC.stats.total_bytes.to_i64 + Mica::Regex::OffHeap.allocated_bytes
+end

@@ -4,11 +4,12 @@ require "../spec_helper"
 #
 # 1. The four hostile compile families are refused under
 #    UNTRUSTED_PATTERN by a named limit, and the process allocates less
-#    than max_compile_bytes while refusing them (measured with GC.stats,
+#    than max_compile_bytes while refusing them (measured with GC.stats plus
+#    the bytes Mica asked of libc, `allocated_bytes_so_far`,
 #    not with the ledger the code under test keeps).
 # 2. The ledger is an upper bound on what compiling really allocates: for
 #    the worst accepted families under both presets, the process
-#    allocation (GC.stats) stays within max_compile_bytes and within the
+#    allocation (`allocated_bytes_so_far`) stays within max_compile_bytes and within the
 #    ledger's total (plus LEDGER_SLACK_BYTES for the collector counting
 #    whole free lists at a time).
 # 3. Upper envelopes: for each family, the compile work Mica charges at
@@ -32,9 +33,9 @@ private OPEN = Mica::Regex::CompileLimits.custom(
 # Bytes the process allocates while checking *pattern*, and the error.
 private def allocation_of(pattern : String, limits : Mica::Regex::CompileLimits) : {Int64, Mica::Error?}
   GC.collect
-  before = GC.stats.total_bytes
+  before = allocated_bytes_so_far
   error = Mica::Regex::Syntax.error?(pattern, dialect: :crystal, compile_limits: limits)
-  {(GC.stats.total_bytes - before).to_i64, error}
+  {(allocated_bytes_so_far - before).to_i64, error}
 end
 
 # What the collector may count beyond the ledger: it charges a thread's
@@ -48,9 +49,9 @@ private def ledger_and_allocation_of(pattern : String, limits : Mica::Regex::Com
   # fixed sets), which belong to the process rather than to a pattern.
   Mica::Regex::Syntax.check("(?i)[\\p{L}a[:alpha:]]\\R.\\N^$\\b(?<n>k)", dialect: :crystal, compile_limits: limits)
   GC.collect
-  before = GC.stats.total_bytes
+  before = allocated_bytes_so_far
   report = Mica::Regex::Syntax.check(pattern, dialect: :crystal, compile_limits: limits)
-  {report.compile_bytes, (GC.stats.total_bytes - before).to_i64}
+  {report.compile_bytes, (allocated_bytes_so_far - before).to_i64}
 end
 
 # The worst accepted pattern families: the most nodes, list entries and

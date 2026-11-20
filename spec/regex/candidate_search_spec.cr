@@ -72,9 +72,9 @@ private def prepared_filter(source : String) : Mica::Regex::StartFilter
 end
 
 private def bytes_allocated(&) : Int64
-  before = GC.stats.total_bytes
+  before = allocated_bytes_so_far
   yield
-  (GC.stats.total_bytes - before).to_i64
+  (allocated_bytes_so_far - before).to_i64
 end
 
 describe "Mica::Regex candidate searches" do

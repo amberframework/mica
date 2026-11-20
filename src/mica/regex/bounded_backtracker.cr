@@ -129,7 +129,7 @@ module Mica::Regex
     # open-addressing set, at most half full, of entries that hold
     # `pair key + 1` below the search's generation (see `clear_sparse`);
     # an entry of an earlier generation is empty.
-    @sparse_visited = Slice(UInt64).new(0)
+    @sparse_visited = Slice(UInt64).empty
     @sparse_count = 0
     @sparse_generation = 0_u64
     @sparse = false
@@ -162,8 +162,34 @@ module Mica::Regex
 
     def initialize(program : Program, @slot_count : Int32)
       @program = program
-      @slots = Slice(Int64).new(@slot_count, PikeVM::UNSET)
-      @visited = Slice(UInt64).new(0)
+      @slots = owned(OffHeap.slice(Int64, @slot_count, PikeVM::UNSET))
+      @visited = Slice(UInt64).empty
+    end
+
+    # Every buffer sits outside the collector's heap (`OffHeap`), as
+    # PCRE2's match data does. A lease's backtracker is reachable from its
+    # own program, so an owner outside that cycle frees them (see
+    # `OffHeapOwner`): each buffer is recorded there as it is made
+    # (`owned`) and forgotten as it is freed (`disown`).
+    @owner = OffHeapOwner.new
+
+    private def owned(buffer : Slice(T)) : Slice(T) forall T
+      @owner.track(buffer.to_unsafe)
+      buffer
+    end
+
+    private def owned(buffer : Pointer(T)) : Pointer(T) forall T
+      @owner.track(buffer)
+      buffer
+    end
+
+    private def disown(buffer : Slice) : Nil
+      disown(buffer.to_unsafe)
+    end
+
+    private def disown(buffer : Pointer) : Nil
+      @owner.untrack(buffer)
+      OffHeap.free(buffer)
     end
 
     # The program this backtracker searches; nil while it waits as a
@@ -182,7 +208,10 @@ module Mica::Regex
     def attach(program : Program, slot_count : Int32) : Nil
       @program = program
       @slot_count = slot_count
-      @slots = Slice(Int64).new(slot_count, PikeVM::UNSET) if @slots.size < slot_count
+      if @slots.size < slot_count
+        disown(@slots)
+        @slots = owned(OffHeap.slice(Int64, slot_count, PikeVM::UNSET))
+      end
       @visit_limit = Int64::MAX
       # Another program numbers its states differently.
       @list_of_min_bytes = nil
@@ -197,15 +226,15 @@ module Mica::Regex
       @list_of_min_bytes = nil
       while @chunk_count > SPARE_JOB_CHUNKS
         last = @chunk_count - 1
-        GC.free(@list_of_chunks[last].as(Void*))
+        disown(@list_of_chunks[last])
         @job_capacity -= @list_of_chunk_sizes[last]
         @list_of_chunks[last] = Pointer(Job).null
         @list_of_chunk_sizes[last] = 0_i64
         @chunk_count = last
       end
       if @sparse_visited.size > SPARE_SPARSE_SLOTS
-        GC.free(@sparse_visited.to_unsafe.as(Void*))
-        @sparse_visited = Slice(UInt64).new(0)
+        disown(@sparse_visited)
+        @sparse_visited = Slice(UInt64).empty
       end
     end
 
@@ -229,8 +258,8 @@ module Mica::Regex
         @sparse = false
         words = ((bits + 63) // 64).to_i32
         if @visited.size < words
-          GC.free(@visited.to_unsafe.as(Void*)) unless @visited.empty?
-          @visited = Slice(UInt64).new(words, 0_u64)
+          disown(@visited)
+          @visited = owned(OffHeap.slice(UInt64, words, 0_u64))
         else
           @visited.fill(0_u64, 0, words)
         end
@@ -330,16 +359,18 @@ module Mica::Regex
                 run_first = run_end = 0
               end
             end
-            if run_first <= current < run_end
+            run = run_first <= current < run_end ? program.list_of_runs.unsafe_fetch(run_slot) : nil
+            if run && !run.optional
               @visits_left = visits_left
-              current, at = follow_run(program, program.list_of_runs.unsafe_fetch(run_slot), current, at, haystack,
-                start, columns, end_bound, meter)
+              current, at = follow_run(program, run, current, at, haystack, start, columns, end_bound, meter)
               visits_left = @visits_left
               return false if current == GAVE_UP
               break if current < 0
               next
             end
-            state = program.state_outside_runs(current, run_slot)
+            # An optional run (`x{n,m}`) splits after each copy, so its
+            # states are walked one by one, as written states are.
+            state = run ? run.state_at(current) : program.state_outside_runs(current, run_slot)
           else
             state = program.state_at(current, meter, at)
           end
@@ -594,7 +625,7 @@ module Mica::Regex
                            start : Int32, columns : Int32, end_bound : Int32, meter : SearchMeter) : {Int32, Int32}
       block = run.list_of_block_states
       block_size = block.size
-      table = run.table_id == 0 ? program.list_of_transitions : program.list_of_shared_tables.unsafe_fetch(run.table_id.to_i32 - 1)
+      table = run.table_id == 0 ? program.transition_table : program.list_of_shared_tables.unsafe_fetch(run.table_id.to_i32 - 1).to_unsafe
       relative = current - run.first_state
       copy = relative.unsafe_div(block_size)
       copy_first = run.first_state + copy * block_size
@@ -641,12 +672,12 @@ module Mica::Regex
     # that holds *byte*, or `ClassMemo::NO_TRANSITION`: a binary search over sorted,
     # disjoint ranges, as `Program#sparse_target`.
     @[AlwaysInline]
-    protected def self.table_target(table : Array(Program::Transition), first : Int32, count : Int32, byte : UInt8) : Int32
+    protected def self.table_target(table : Pointer(Program::Transition), first : Int32, count : Int32, byte : UInt8) : Int32
       low = first
       high = first + count
       while low < high
         middle = (low + high) >> 1
-        transition = table.unsafe_fetch(middle)
+        transition = table[middle]
         if transition.high < byte
           low = middle + 1
         elsif transition.low > byte
@@ -676,7 +707,7 @@ module Mica::Regex
       @job_limit = limit
       last = @chunk_count - 1
       return unless last >= 0 && @job_capacity < limit && @list_of_chunk_sizes[last] < FIRST_JOB_CHUNK << last
-      GC.free(@list_of_chunks[last].as(Void*))
+      disown(@list_of_chunks[last])
       @job_capacity -= @list_of_chunk_sizes[last]
       @list_of_chunks[last] = Pointer(Job).null
       @list_of_chunk_sizes[last] = 0_i64
@@ -693,7 +724,7 @@ module Mica::Regex
       @sparse_count = 0
       @sparse_generation += 1
       if @sparse_visited.empty?
-        @sparse_visited = Slice(UInt64).new(FIRST_SPARSE_SLOTS, 0_u64)
+        @sparse_visited = owned(OffHeap.slice(UInt64, FIRST_SPARSE_SLOTS, 0_u64))
         @sparse_generation = 1_u64
       elsif @sparse_generation >= SPARSE_GENERATIONS
         @sparse_visited.fill(0_u64)
@@ -726,7 +757,7 @@ module Mica::Regex
 
     private def grow_sparse : Nil
       old = @sparse_visited
-      grown = Slice(UInt64).new(old.size * 2, 0_u64)
+      grown = owned(OffHeap.slice(UInt64, old.size * 2, 0_u64))
       mask = grown.size - 1
       generation = @sparse_generation
       old.each do |key|
@@ -737,7 +768,7 @@ module Mica::Regex
         end
         grown[index] = key
       end
-      GC.free(old.to_unsafe.as(Void*))
+      disown(old)
       @sparse_visited = grown
     end
 
@@ -784,7 +815,7 @@ module Mica::Regex
           raise Mica::Error.new("internal error: the backtracker pushed more than its #{@job_limit} jobs")
         end
         size = Math.min(FIRST_JOB_CHUNK << index, room)
-        @list_of_chunks[index] = Pointer(Job).malloc(size)
+        @list_of_chunks[index] = owned(OffHeap.pointer(Job, size))
         @list_of_chunk_sizes[index] = size
         @job_capacity += size
         @chunk_count += 1

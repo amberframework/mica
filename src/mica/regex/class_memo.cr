@@ -48,8 +48,40 @@ module Mica::Regex
     # `NO_TRANSITION`, so a search reads the lead byte of a sequence with
     # one load (see `Program#sparse_target`), and in slot
     # `ENTRY_FIRST_SLOT` where the entry's transitions begin in the table.
-    record Block, list_of_states : Array(Program::State), list_of_transitions : Array(Program::Transition),
-      entry : Int32, shared_table : Array(Program::Transition)? = nil, entry_targets : Slice(Int32)? = nil
+    #
+    # A block's lists sit outside the collector's heap (`OffHeapList`), as
+    # PCRE2's static tables do. A block the memo keeps lives as long as the
+    # process; any other block belongs to the compilation that built it,
+    # which records it in its ledger (`AllocationLedger#own`) and hands it
+    # to the program or frees it.
+    record Block, list_of_states : OffHeapList(Program::State), list_of_transitions : OffHeapList(Program::Transition),
+      entry : Int32, shared_table : OffHeapList(Program::Transition)? = nil, entry_targets : Slice(Int32)? = nil do
+      # True when *other* holds this block's very lists.
+      def same_lists?(other : Block) : Bool
+        list_of_states.to_unsafe == other.list_of_states.to_unsafe
+      end
+
+      # Yields each buffer the block holds (for `OffHeapOwner#track`).
+      def each_buffer(& : Pointer(Void) ->) : Nil
+        yield list_of_states.to_unsafe.as(Void*)
+        yield list_of_transitions.to_unsafe.as(Void*)
+        if table = shared_table
+          yield table.to_unsafe.as(Void*)
+        end
+        if targets = entry_targets
+          yield targets.to_unsafe.as(Void*)
+        end
+      end
+
+      # Returns the block's lists to libc. Only the block's owner calls it,
+      # once (see `AllocationLedger#own`).
+      def free : Nil
+        list_of_states.free
+        list_of_transitions.free
+        shared_table.try(&.free)
+        entry_targets.try { |targets| OffHeap.free(targets) }
+      end
+    end
 
     # A set as a hash key: the hash is the set's digest, computed once when
     # the set was made, and equality is the same object (the shared sets of
@@ -89,15 +121,19 @@ module Mica::Regex
       if block = @@mutex.synchronize { @@blocks[lookup]? }
         return block
       end
-      block = prebuilt_block?(set, ledger, meter) || build(set, ledger, meter)
-      @@mutex.synchronize do
+      built = prebuilt_block?(set, ledger, meter) || build(set, ledger, meter)
+      kept = @@mutex.synchronize do
         if existing = @@blocks[lookup]?
-          block = existing
+          existing
         elsif @@blocks.size < MAX_ENTRIES
-          @@blocks[lookup] = block
+          @@blocks[lookup] = built
         end
       end
-      block
+      return kept if kept && kept.same_lists?(built)
+      # The memo is full, or another thread kept its block first: this
+      # compilation owns the block it built.
+      ledger.own(built)
+      kept || built
     end
 
     # :nodoc:
@@ -173,8 +209,13 @@ module Mica::Regex
         next unless same_past_ascii?(bounds, set_id, negated, meter)
         list_of_states, list_of_transitions = decode_prebuilt(state_count, transition_count, offset, ledger, meter,
           spare_transitions: ascii_range_count(bounds))
-        return nil unless replace_ascii_transitions(list_of_states, list_of_transitions, entry, bounds, ledger)
-        return finished_block(list_of_states, list_of_transitions, entry, ledger)
+        replaced = replace_ascii_transitions(list_of_states, list_of_transitions, entry, bounds, ledger)
+        list_of_transitions.free
+        unless replaced
+          list_of_states.free
+          return nil
+        end
+        return finished_block(list_of_states, replaced, entry, ledger)
       end
       nil
     end
@@ -227,29 +268,34 @@ module Mica::Regex
     # makes: the entry's transitions do not end the list, one straddles
     # `ASCII_END`, or the entry would keep a single transition (`build` makes
     # that a `ByteRange` state).
-    private def self.replace_ascii_transitions(list_of_states : Array(Program::State),
-                                               list_of_transitions : Array(Program::Transition), entry : Int32,
-                                               bounds : Array(Int32), ledger : AllocationLedger) : Bool
+    private def self.replace_ascii_transitions(list_of_states : OffHeapList(Program::State),
+                                               list_of_transitions : OffHeapList(Program::Transition), entry : Int32,
+                                               bounds : Array(Int32), ledger : AllocationLedger) : OffHeapList(Program::Transition)?
       state = list_of_states[entry]
       first = state.argument
-      return false unless state.kind.sparse? && first + state.alternate == list_of_transitions.size
+      return nil unless state.kind.sparse? && first + state.alternate == list_of_transitions.size
       past_ascii = first
       while past_ascii < list_of_transitions.size && list_of_transitions[past_ascii].high < ASCII_END
         past_ascii += 1
       end
-      return false if past_ascii < list_of_transitions.size && list_of_transitions[past_ascii].low < ASCII_END
-      list_of_transitions.delete_at(first, past_ascii - first)
-      position = first
+      return nil if past_ascii < list_of_transitions.size && list_of_transitions[past_ascii].low < ASCII_END
+      # The entry's transitions end the list: the ones before it, then the
+      # set's ASCII ranges, then the entry's transitions past ASCII.
+      replaced = OffHeapList(Program::Transition).new(list_of_transitions.capacity)
+      first.times { |index| replaced << list_of_transitions.unsafe_fetch(index) }
       index = 0
       while index < bounds.size && bounds[index] < ASCII_END
-        list_of_transitions.insert(position, Program::Transition.new(bounds[index].to_u8, Math.min(bounds[index + 1], ASCII_END - 1).to_u8, EXIT))
-        position += 1
+        replaced << Program::Transition.new(bounds[index].to_u8, Math.min(bounds[index + 1], ASCII_END - 1).to_u8, EXIT)
         index += 2
       end
-      count = list_of_transitions.size - first
-      return false if count < 2
+      (past_ascii...list_of_transitions.size).each { |position| replaced << list_of_transitions.unsafe_fetch(position) }
+      count = replaced.size - first
+      if count < 2
+        replaced.free
+        return nil
+      end
       list_of_states[entry] = state.copy_with(alternate: count)
-      true
+      replaced
     end
 
     # The ranges of *bounds* that reach past ASCII.
@@ -275,18 +321,18 @@ module Mica::Regex
     # transitions.
     private def self.decode_prebuilt(state_count : Int32, transition_count : Int32, offset : Int32,
                                      ledger : AllocationLedger, meter : Core::WorkMeter,
-                                     spare_transitions : Int32 = 0) : {Array(Program::State), Array(Program::Transition)}
+                                     spare_transitions : Int32 = 0) : {OffHeapList(Program::State), OffHeapList(Program::Transition)}
       meter.enforce { Core::Position.new(0_i64) } if meter.charge(state_count + transition_count)
       prebuilt_bytes = Prebuilt::DATA.to_slice
       ledger.charge_array(state_count, sizeof(Program::State), "a class block", 0)
-      list_of_states = Array(Program::State).new(state_count)
+      ledger.charge_array(transition_count + spare_transitions, sizeof(Program::Transition), "a class block", 0)
+      list_of_states = OffHeapList(Program::State).new(state_count)
       state_count.times do
         list_of_states << Program::State.new(Program::StateKind.new(prebuilt_bytes[offset]), prebuilt_bytes[offset + 1], prebuilt_bytes[offset + 2],
           prebuilt_int(prebuilt_bytes, offset + 3), prebuilt_int(prebuilt_bytes, offset + 5), prebuilt_int(prebuilt_bytes, offset + 7))
         offset += PREBUILT_STATE_BYTES
       end
-      ledger.charge_array(transition_count + spare_transitions, sizeof(Program::Transition), "a class block", 0)
-      list_of_transitions = Array(Program::Transition).new(transition_count + spare_transitions)
+      list_of_transitions = OffHeapList(Program::Transition).new(transition_count + spare_transitions)
       transition_count.times do
         list_of_transitions << Program::Transition.new(prebuilt_bytes[offset], prebuilt_bytes[offset + 1], prebuilt_int(prebuilt_bytes, offset + 2))
         offset += PREBUILT_TRANSITION_BYTES
@@ -296,10 +342,18 @@ module Mica::Regex
 
     # The block of *list_of_states* and *list_of_transitions* entered at
     # *entry*, with its shared table and entry targets.
-    private def self.finished_block(list_of_states : Array(Program::State), list_of_transitions : Array(Program::Transition),
+    private def self.finished_block(list_of_states : OffHeapList(Program::State),
+                                    list_of_transitions : OffHeapList(Program::Transition),
                                     entry : Int32, ledger : AllocationLedger) : Block
       table = shared_table(list_of_states, list_of_transitions, ledger)
-      Block.new(list_of_states, list_of_transitions, entry, table, entry_targets(list_of_states[entry], table, ledger))
+      targets = entry_targets(list_of_states[entry], table, ledger)
+      Block.new(list_of_states, list_of_transitions, entry, table, targets)
+    rescue error
+      # A limit stopped the block: its lists, which it owns, go back.
+      list_of_states.free
+      list_of_transitions.free
+      table.try(&.free)
+      raise error
     end
 
     # True when *bounds* are those of static set *set_id*, or of its
@@ -340,53 +394,69 @@ module Mica::Regex
     # and targets equal a node already emitted reuses that node's state.
     private def self.build(set : CodePointSet, ledger : AllocationLedger, meter : Core::WorkMeter) : Block
       ClassTrie.charge_new(ledger)
-      trie = ClassTrie.new
-      trie.build(set, ledger, meter)
       ledger.charge_array(0, sizeof(Program::State), "a class block", 0)
-      list_of_states = [] of Program::State
       ledger.charge_array(0, sizeof(Program::Transition), "a class block", 0)
-      list_of_transitions = [] of Program::Transition
-      if trie.empty?
-        ledger.charge_append(sizeof(Program::State), "a class block", 0)
-        list_of_states << Program::State.new(Program::StateKind::Fail, 0_u8, 0_u8, NONE, NONE, 0)
-        return Block.new(list_of_states, list_of_transitions, 0)
+      trie = ClassTrie.new
+      begin
+        trie.build(set, ledger, meter)
+        return empty_block(ledger) if trie.empty?
+        build_from(trie, ledger, meter)
+      ensure
+        # The trie was for this build alone.
+        trie.release
       end
+    end
+
+    # The block of a set with no UTF-8 sequences: one `Fail` state.
+    private def self.empty_block(ledger : AllocationLedger) : Block
+      ledger.charge_append(sizeof(Program::State), "a class block", 0)
+      list_of_states = OffHeapList(Program::State).new(1)
+      list_of_states << Program::State.new(Program::StateKind::Fail, 0_u8, 0_u8, NONE, NONE, 0)
+      Block.new(list_of_states, OffHeapList(Program::Transition).new, 0)
+    end
+
+    # Emits the minimal automaton of *trie* (see `build`). The lists are
+    # freed when a limit stops the build.
+    private def self.build_from(trie : ClassTrie, ledger : AllocationLedger, meter : Core::WorkMeter) : Block
       node_count = trie.node_count
       ledger.charge_array(node_count, sizeof(Int32), "a class block", 0)
-      node_states = Array(Int32).new(node_count, NONE)
       ledger.charge_object(instance_sizeof(Hash(UInt64, Int32)), "a class block", 0)
+      node_states = OffHeapList(Int32).new(node_count, NONE)
       shared_nodes = {} of UInt64 => Int32
-      builder = BlockBuilder.new(trie, node_states, list_of_states, list_of_transitions, ledger, meter)
-      (node_count - 1).downto(0) do |node_index|
-        digest = builder.digest(node_index)
-        existing = shared_nodes[digest]?
-        if existing && builder.same_edges?(existing, node_index)
-          node_states[node_index] = existing
-          next
+      builder = BlockBuilder.new(trie, node_states, ledger, meter)
+      begin
+        (node_count - 1).downto(0) do |node_index|
+          digest = builder.digest(node_index)
+          existing = shared_nodes[digest]?
+          if existing && builder.same_edges?(existing, node_index)
+            node_states[node_index] = existing
+            next
+          end
+          state = builder.emit(node_index)
+          node_states[node_index] = state
+          next if existing
+          ledger.charge_hash_entry(sizeof(UInt64) + sizeof(Int32), "a class block", 0)
+          shared_nodes[digest] = state
         end
-        state = builder.emit(node_index)
-        node_states[node_index] = state
-        next if existing
-        ledger.charge_hash_entry(sizeof(UInt64) + sizeof(Int32), "a class block", 0)
-        shared_nodes[digest] = state
+        entry = node_states[0]
+      rescue error
+        builder.list_of_states.free
+        builder.list_of_transitions.free
+        raise error
+      ensure
+        node_states.free
       end
-      table = shared_table(list_of_states, list_of_transitions, ledger)
-      entry = node_states[0]
-      # The trie and the node states were for this build alone.
-      trie.release
-      GC.free(node_states.to_unsafe.as(Void*))
-      GC.free(node_states.as(Void*))
-      Block.new(list_of_states, list_of_transitions, entry, table, entry_targets(list_of_states[entry], table, ledger))
+      finished_block(builder.list_of_states, builder.list_of_transitions, entry, ledger)
     end
 
     # The target in *table* for each byte value at *entry* (a `Sparse`
     # state; nil for any other), `NO_TRANSITION` where it has none, and
     # the entry's first transition in slot `ENTRY_FIRST_SLOT`.
-    private def self.entry_targets(entry : Program::State, table : Array(Program::Transition),
+    private def self.entry_targets(entry : Program::State, table : OffHeapList(Program::Transition),
                                    ledger : AllocationLedger) : Slice(Int32)?
       return nil unless entry.kind.sparse?
       ledger.charge(AllocationLedger.granules((ENTRY_FIRST_SLOT + 1) * sizeof(Int32)), "a class entry table", 0)
-      targets = Slice(Int32).new(ENTRY_FIRST_SLOT + 1, NO_TRANSITION)
+      targets = OffHeap.slice(Int32, ENTRY_FIRST_SLOT + 1, NO_TRANSITION)
       targets[ENTRY_FIRST_SLOT] = entry.argument
       entry.alternate.times do |offset|
         transition = table[entry.argument + offset]
@@ -397,10 +467,11 @@ module Mica::Regex
 
     # The transitions of a block as a shared table: each target relative
     # to the `Sparse` state that holds it, the exit as `SHARED_EXIT`.
-    private def self.shared_table(list_of_states : Array(Program::State), list_of_transitions : Array(Program::Transition),
-                                  ledger : AllocationLedger) : Array(Program::Transition)
+    private def self.shared_table(list_of_states : OffHeapList(Program::State),
+                                  list_of_transitions : OffHeapList(Program::Transition),
+                                  ledger : AllocationLedger) : OffHeapList(Program::Transition)
       ledger.charge_array(list_of_transitions.size, sizeof(Program::Transition), "a shared class table", 0)
-      table = list_of_transitions.dup
+      table = OffHeapList(Program::Transition).copy_of(list_of_transitions)
       list_of_states.each_with_index do |state, index|
         next unless state.kind.sparse?
         state.alternate.times do |offset|
@@ -413,9 +484,15 @@ module Mica::Regex
     end
 
     # Emits trie nodes into a block's lists.
+    #
+    # The builder owns the lists it emits into until the block takes them
+    # (read them back through the getters: the builder is a struct, and
+    # its lists grow in place).
     private struct BlockBuilder
-      def initialize(@trie : ClassTrie, @node_states : Array(Int32), @list_of_states : Array(Program::State),
-                     @list_of_transitions : Array(Program::Transition), @ledger : AllocationLedger,
+      getter list_of_states = OffHeapList(Program::State).new
+      getter list_of_transitions = OffHeapList(Program::Transition).new
+
+      def initialize(@trie : ClassTrie, @node_states : OffHeapList(Int32), @ledger : AllocationLedger,
                      @meter : Core::WorkMeter)
       end
 

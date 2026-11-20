@@ -16,7 +16,7 @@ module Mica::Regex
   # task and per emitted state to the `Core::WorkMeter`, and checks
   # `CompileLimits#max_program_states` as it emits, and
   # `CompileLimits#max_pike_bytes` when it finishes.
-  class Compiler
+  struct Compiler
     # What a task on the work stack does.
     private enum TaskKind
       # Compile `node` so that it continues at `next_state`; push its start.
@@ -54,19 +54,29 @@ module Mica::Regex
     def self.compile(pattern : Hir::Pattern, estimate : Int64, limits : CompileLimits, ledger : AllocationLedger,
                      meter : Core::WorkMeter) : Program
       compiler = new(pattern, estimate, limits, ledger, meter)
-      program = compiler.compile
-      compiler.release
-      program
+      begin
+        compiler.compile
+      rescue error
+        # A limit or the deadline stopped the compile: the states and
+        # transitions never reach a program, so they are freed here.
+        compiler.free_program_lists
+        raise error
+      ensure
+        compiler.release
+      end
     end
 
-    @list_of_states : Array(Program::State)
-    @list_of_transitions : Array(Program::Transition)
+    # The states and transitions go to the program, outside the
+    # collector's heap (`OffHeapList`); the value stack, the trie states
+    # and the visited marks are scratch, freed by `release`.
+    @list_of_states : OffHeapList(Program::State)
+    @list_of_transitions : OffHeapList(Program::Transition)
     @list_of_tasks : Array(Task)
-    @list_of_values : Array(Int32)
+    @list_of_values : OffHeapList(Int32)
     # The byte trie of the small class being compiled, reused for every
     # class, and the state of each of its nodes.
     @class_trie : ClassTrie
-    @list_of_trie_states : Array(Int32)
+    @list_of_trie_states : OffHeapList(Int32)
     # The memoized class block instantiated last, and its set: the copies
     # of a repeated class share one set object, so the memo is asked once
     # per set rather than once per copy.
@@ -80,12 +90,15 @@ module Mica::Regex
     @repeated_small_set : CodePointSet? = nil
     @repeated_small_block : ClassMemo::Block? = nil
     @high_water = StaticArray(Int32, 4).new(0)
-    @list_of_visited = [] of Bool
-    @list_of_class_blocks = [] of Program::ClassBlock
+    @list_of_visited = OffHeapList(Bool).new
+    @list_of_class_blocks = OffHeapList(Program::ClassBlock).new
     # The shared tables the program's large classes use (see
     # `Program#list_of_shared_tables`); a `Sparse` state names one by its
     # position plus one, in a byte, so at most `MAX_SHARED_TABLES`.
-    @list_of_shared_tables = [] of Array(Program::Transition)
+    # Made with the first table or run: most programs have neither, and
+    # share the program's empty lists (`Program::NO_SHARED_TABLES`,
+    # `Program::NO_RUNS`).
+    @list_of_shared_tables = Program::NO_SHARED_TABLES
     # For each shared table, its block's `ClassMemo::Block#entry_targets`
     # (an empty slice for a table without), made when the first table with
     # them is added (see `Program#sparse_target`).
@@ -93,7 +106,7 @@ module Mica::Regex
     # The runs of class copies held as their block (`Program::ClassRun`),
     # in state order, and the states they stand for: state numbers count
     # them, `@list_of_states` does not hold them.
-    @list_of_runs = [] of Program::ClassRun
+    @list_of_runs = Program::NO_RUNS
     @run_states = 0
     # The most states `@list_of_states` may hold: the preflight's bound,
     # charged to the ledger, less the runs found ahead.
@@ -110,12 +123,12 @@ module Mica::Regex
     # The ASCII class whose run block (`run_block`) was built last, and the
     # block, so a run's two lookups build it once.
     @ascii_run_set : CodePointSet? = nil
-    @ascii_run_block : {Array(Program::State), Array(Program::Transition), Int32}? = nil
+    @ascii_run_block : {OffHeapList(Program::State), OffHeapList(Program::Transition), Int32}? = nil
 
     private def initialize(@pattern : Hir::Pattern, @estimate : Int64, @limits : CompileLimits,
                            @ledger : AllocationLedger, @meter : Core::WorkMeter)
       capacity = @estimate.clamp(1_i64, @limits.max_program_states).to_i32
-      @ledger.charge_object(instance_sizeof(Compiler), "the compiler", 0)
+      @ledger.charge_object(sizeof(Compiler), "the compiler", 0)
       @ledger.charge_array(capacity, sizeof(Program::State), "the program states", 0)
       # A program of few states has few transitions; it skips the bound
       # and grows its list as it emits. The bound's walk also finds the
@@ -127,22 +140,20 @@ module Mica::Regex
       # states after all (see `check_state_room`).
       @physical_capacity = Math.max(capacity - Math.min(@run_states_ahead, capacity.to_i64).to_i32, 1)
       @state_room = @physical_capacity <= WHOLE_ROOM_STATES ? @physical_capacity : FIRST_STATE_ROOM
-      @list_of_states = Array(Program::State).new(@state_room)
-      if PRESIZED_TRANSITIONS <= transition_bound <= @limits.max_program_states
-        @ledger.charge_array(transition_bound, sizeof(Program::Transition), "the program transitions", 0)
-        @list_of_transitions = Array(Program::Transition).new(transition_bound.to_i32)
-      else
-        @ledger.charge_array(0, sizeof(Program::Transition), "the program transitions", 0)
-        @list_of_transitions = [] of Program::Transition
-      end
+      presized_transitions = PRESIZED_TRANSITIONS <= transition_bound <= @limits.max_program_states
+      @ledger.charge_array(presized_transitions ? transition_bound : 0, sizeof(Program::Transition), "the program transitions", 0)
       @ledger.charge_array(0, sizeof(Task), "the compiler task stack", 0)
-      @list_of_tasks = [] of Task
       @ledger.charge_array(0, sizeof(Int32), "the compiler value stack", 0)
-      @list_of_values = [] of Int32
       ClassTrie.charge_new(@ledger)
-      @class_trie = ClassTrie.new
       @ledger.charge_array(0, sizeof(Int32), "the class trie", 0)
-      @list_of_trie_states = [] of Int32
+      # Every charge above may refuse the pattern, so the lists outside the
+      # collector's heap are made only once all of them passed.
+      @list_of_tasks = [] of Task
+      @class_trie = ClassTrie.new
+      @list_of_states = OffHeapList(Program::State).new(@state_room)
+      @list_of_transitions = OffHeapList(Program::Transition).new(presized_transitions ? transition_bound.to_i32 : 0)
+      @list_of_values = OffHeapList(Int32).new
+      @list_of_trie_states = OffHeapList(Int32).new
     end
 
     # The states the state list starts with room for when the bound is
@@ -179,8 +190,16 @@ module Mica::Regex
         when Hir::Repetition
           maximum = node.maximum
           # A run's transitions sit in its table, not in the program's
-          # list: an exact count (`x{n}`) adds none.
-          next if copies == 1 && run_ahead?(node) && maximum == node.minimum
+          # list: an exact count (`x{n}`) adds none, and `x{n,m}` adds only
+          # the copies no run holds.
+          if copies == 1
+            mandatory_run = run_ahead?(node)
+            if maximum && node.child.is_a?(Hir::Class)
+              emitted = (optional_run_ahead?(node) ? 0 : maximum - node.minimum) + (mandatory_run ? 0 : node.minimum)
+              push_bound_entry(stack, node.child, emitted.to_i64) if emitted > 0
+              next
+            end
+          end
           repeated = if maximum
                        maximum.to_i64
                      else
@@ -255,7 +274,7 @@ module Mica::Regex
       trim_transitions
       Program.new(@list_of_states, @list_of_transitions, start, @pattern.capture_count, group_names,
         @pattern.options, @limits.max_pike_bytes - workspace_charge, @pattern.source_end, literal_set,
-        @list_of_class_blocks, @list_of_shared_tables, @list_of_runs, @list_of_entry_targets)
+        @list_of_class_blocks, @list_of_shared_tables, @list_of_runs, @list_of_entry_targets, @ledger.take_owned_blocks)
     end
 
     private def charge_literal_set(literal_set : LiteralSet) : Nil
@@ -404,7 +423,13 @@ module Mica::Regex
     private def compile_counted_item(node : Hir::Repetition, maximum : Int32, next_state : Int32) : Int32
       child = node.child
       current = next_state
-      (maximum - node.minimum).times do
+      optional_copies = maximum - node.minimum
+      if child.is_a?(Hir::Class) && (run = class_run(child.code_point_set, optional_copies, current, optional: true,
+           lazy: !node.greedy?))
+        current = run
+        optional_copies = 0
+      end
+      optional_copies.times do
         charge_work
         copy = compile_item(child, current)
         current = node.greedy? ? emit_split(copy, next_state) : emit_split(next_state, copy)
@@ -429,7 +454,7 @@ module Mica::Regex
     # and its entry. A large class has its memoized block; an ASCII class
     # its one byte state, as `compile_ascii_class` emits it, its ranges in
     # a table of the program's own. Nil for any other class.
-    private def run_block(set : CodePointSet) : {Array(Program::State), Array(Program::Transition), Int32}?
+    private def run_block(set : CodePointSet) : {OffHeapList(Program::State), OffHeapList(Program::Transition), Int32}?
       return nil if set.empty?
       if ClassMemo.memoized?(set)
         block = memo_block(set)
@@ -446,20 +471,27 @@ module Mica::Regex
       built
     end
 
-    private def ascii_run_block(set : CodePointSet) : {Array(Program::State), Array(Program::Transition), Int32}
+    #
+    # The block's lists sit outside the collector's heap and belong to
+    # this compilation (`AllocationLedger#own`): the program frees them.
+    private def ascii_run_block(set : CodePointSet) : {OffHeapList(Program::State), OffHeapList(Program::Transition), Int32}
       bounds = set.list_of_bounds
       range_count = bounds.size // 2
       @ledger.charge_array(1, sizeof(Program::State), "a class run block", 0)
+      @ledger.charge_array(range_count, sizeof(Program::Transition), "a class run table", 0) if range_count > 1
+      list_of_states = OffHeapList(Program::State).new(1)
+      table = OffHeapList(Program::Transition).new(range_count > 1 ? range_count : 0)
       if range_count == 1
-        state = Program::State.new(Program::StateKind::ByteRange, bounds[0].to_u8, bounds[1].to_u8, ClassMemo::EXIT,
-          NONE, 0)
-        return {[state], [] of Program::Transition, 0}
+        list_of_states << Program::State.new(Program::StateKind::ByteRange, bounds[0].to_u8, bounds[1].to_u8,
+          ClassMemo::EXIT, NONE, 0)
+      else
+        range_count.times do |index|
+          table << Program::Transition.new(bounds[index * 2].to_u8, bounds[index * 2 + 1].to_u8, Program::SHARED_EXIT)
+        end
+        list_of_states << Program::State.new(Program::StateKind::Sparse, 0_u8, 0_u8, NONE, range_count, 0)
       end
-      @ledger.charge_array(range_count, sizeof(Program::Transition), "a class run table", 0)
-      table = Array(Program::Transition).new(range_count) do |index|
-        Program::Transition.new(bounds[index * 2].to_u8, bounds[index * 2 + 1].to_u8, Program::SHARED_EXIT)
-      end
-      {[Program::State.new(Program::StateKind::Sparse, 0_u8, 0_u8, NONE, range_count, 0)], table, 0}
+      @ledger.own(ClassMemo::Block.new(list_of_states, table, 0))
+      {list_of_states, table, 0}
     end
 
     # Emits *copies* copies of class *set* as a `Program::ClassRun`, the
@@ -472,21 +504,29 @@ module Mica::Regex
     # program they would (an ASCII class's ranges then sit in a table of
     # the program's own rather than in its transition list); only its
     # states are not written.
-    private def class_run(set : CodePointSet, copies : Int32, next_state : Int32) : Int32?
+    #
+    # With *optional*, the copies are the optional copies of `x{n,m}`,
+    # each behind a split to *next_state* (see `Program::ClassRun`), and
+    # the run returns its last split.
+    private def class_run(set : CodePointSet, copies : Int32, next_state : Int32, *, optional : Bool = false,
+                          lazy : Bool = false) : Int32?
       return nil if copies < 2
       block_states, table, entry = run_block(set) || return nil
-      return nil if copies.to_i64 * block_states.size < RUN_MIN_STATES
+      stride = block_states.size + (optional ? 1 : 0)
+      return nil if copies.to_i64 * stride < RUN_MIN_STATES
       table_id = 0_u8
       unless table.empty?
         table_id = shared_table_id(table, ClassMemo.memoized?(set) ? memo_block(set) : nil) || return nil
       end
-      added = copies.to_i64 * block_states.size
+      added = copies.to_i64 * stride
       check_state_room(added.to_i32, written: false)
       @meter.enforce { Core::Position.new(0_i64) } if @meter.charge(added + copies)
       @ledger.charge_appends(copies, sizeof(Program::ClassBlock), "a class block", 0) if block_states.size > 1
       @ledger.charge_append(sizeof(Program::ClassRun), "a class run", 0)
       entry_targets = memo_block(set).entry_targets if ClassMemo.memoized?(set)
-      run = Program::ClassRun.new(state_total, copies, block_states, table_id, entry, next_state, entry_targets)
+      run = Program::ClassRun.new(state_total, copies, block_states, table_id, entry, next_state, entry_targets,
+        optional, lazy)
+      @list_of_runs = [] of Program::ClassRun if @list_of_runs.same?(Program::NO_RUNS)
       @list_of_runs << run
       @run_states += run.size
       run.last_entry
@@ -546,22 +586,22 @@ module Mica::Regex
       return false if first <= start < last && state_at(start).kind.in?(Program::StateKind::ByteRange, Program::StateKind::Sparse)
       size = last - first
       grow(GrowingList::Visited, size, sizeof(Bool))
-      visited = @list_of_visited
-      visited.clear
-      size.times { visited << false }
-      stack = @list_of_values
-      base = stack.size
+      # The lists are structs: read and write them through the fields, never
+      # through a local copy, which would not see them grow.
+      @list_of_visited.clear
+      @list_of_visited.fill_to(size, false)
+      base = @list_of_values.size
       push_value(start)
       found = false
-      while stack.size > base
-        current = stack.pop
+      while @list_of_values.size > base
+        current = @list_of_values.pop
         if current == loop_split
           found = true
           break
         end
         next unless first <= current < last
-        next if visited[current - first]
-        visited[current - first] = true
+        next if @list_of_visited[current - first]
+        @list_of_visited[current - first] = true
         charge_work
         state = state_at(current)
         case state.kind
@@ -572,7 +612,7 @@ module Mica::Regex
           push_value(state.next_state)
         end
       end
-      (stack.size - base).times { stack.pop }
+      @list_of_values.truncate(base)
       found
     end
 
@@ -672,16 +712,18 @@ module Mica::Regex
       transition_count = @list_of_transitions.size - first_transition
       @ledger.charge_array(state_count, sizeof(Program::State), "a repeated class", 0)
       @ledger.charge_array(transition_count, sizeof(Program::Transition), "a repeated class", 0)
-      list_of_states = Array(Program::State).new(state_count) do |offset|
+      list_of_states = OffHeapList(Program::State).new(state_count) do |offset|
         state = state_at(first_state + offset)
         state.copy_with(next_state: relative_target(state.next_state, first_state, next_state),
           argument: state.kind.sparse? ? state.argument - first_transition : state.argument)
       end
-      list_of_transitions = Array(Program::Transition).new(transition_count) do |offset|
+      list_of_transitions = OffHeapList(Program::Transition).new(transition_count) do |offset|
         transition = @list_of_transitions[first_transition + offset]
         transition.copy_with(target: relative_target(transition.target, first_state, next_state))
       end
-      ClassMemo::Block.new(list_of_states, list_of_transitions, entry - first_state)
+      block = ClassMemo::Block.new(list_of_states, list_of_transitions, entry - first_state)
+      @ledger.own(block)
+      block
     end
 
     private def relative_target(target : Int32, first_state : Int32, next_state : Int32) : Int32
@@ -733,12 +775,12 @@ module Mica::Regex
     # The number a `Sparse` state uses for *table* (its position in the
     # program's shared tables, plus one), adding it the first time; nil
     # once `MAX_SHARED_TABLES` are in use, when the block is copied whole.
-    private def shared_table_id(table : Array(Program::Transition), block : ClassMemo::Block? = nil) : UInt8?
-      if index = @list_of_shared_tables.index(&.same?(table))
+    private def shared_table_id(table : OffHeapList(Program::Transition), block : ClassMemo::Block? = nil) : UInt8?
+      if index = @list_of_shared_tables.index { |shared| shared.to_unsafe == table.to_unsafe }
         return (index + 1).to_u8
       end
       return nil if @list_of_shared_tables.size >= MAX_SHARED_TABLES
-      @ledger.charge_append(sizeof(Array(Program::Transition)), "a shared class table", 0)
+      @ledger.charge_append(sizeof(OffHeapList(Program::Transition)), "a shared class table", 0)
       if entry_targets = block.try(&.entry_targets)
         @ledger.charge_array(0, sizeof(Slice(Int32)), "the shared tables' entry targets", 0) unless @list_of_entry_targets
         list_of_entry_targets = @list_of_entry_targets ||= [] of Slice(Int32)
@@ -749,6 +791,7 @@ module Mica::Regex
         end
         list_of_entry_targets << entry_targets
       end
+      @list_of_shared_tables = [] of OffHeapList(Program::Transition) if @list_of_shared_tables.same?(Program::NO_SHARED_TABLES)
       @list_of_shared_tables << table
       @list_of_shared_tables.size.to_u8
     end
@@ -844,13 +887,8 @@ module Mica::Regex
     # `AllocationLedger#charge_append` charged for them.
     private def reserve_transitions(added : Int32) : Nil
       size = @list_of_transitions.size
-      # `remaining_capacity` counts from the start of the buffer, so it
-      # includes the elements already held.
-      return if @list_of_transitions.remaining_capacity - size >= added
-      grown = Array(Program::Transition).new(Math.max(size + added, size * 2))
-      grown.concat(@list_of_transitions)
-      GC.free(@list_of_transitions.to_unsafe.as(Void*))
-      @list_of_transitions = grown
+      return if @list_of_transitions.capacity - size >= added
+      @list_of_transitions.reserve(Math.max(size + added, size * 2))
     end
 
     private def absolute_target(target : Int32, first_state : Int32, next_state : Int32) : Int32
@@ -865,16 +903,15 @@ module Mica::Regex
       # A set of surrogates only (`\p{Cs}`) has no UTF-8 sequences: like an
       # empty class, it never matches.
       return emit(Program::StateKind::Fail) if trie.empty?
-      states = @list_of_trie_states
-      states.clear
+      @list_of_trie_states.clear
       grow(GrowingList::TrieStates, trie.node_count, sizeof(Int32))
-      trie.node_count.times { states << NONE }
+      @list_of_trie_states.fill_to(trie.node_count, NONE)
       # Children are created after their parents, so emitting from the
       # last node back reaches every child before its parent.
       (trie.node_count - 1).downto(0) do |node_index|
-        states[node_index] = emit_trie_node(node_index, next_state)
+        @list_of_trie_states[node_index] = emit_trie_node(node_index, next_state)
       end
-      states[0]
+      @list_of_trie_states[0]
     end
 
     # Compiles a non-empty set of ASCII code points straight to the state
@@ -980,14 +1017,10 @@ module Mica::Regex
     end
 
     # Gives `@list_of_states` room for *needed* states: twice its room, at
-    # least *needed*, at most the charged bound. The list it outgrew is
-    # freed (the compiler alone holds it, and never shifts it).
+    # least *needed*, at most the charged bound.
     private def make_state_room(needed : Int32) : Nil
       room = Math.min(Math.max(@state_room * 2, needed), @physical_capacity)
-      grown = Array(Program::State).new(room)
-      grown.concat(@list_of_states)
-      GC.free(@list_of_states.to_unsafe.as(Void*))
-      @list_of_states = grown
+      @list_of_states.reserve(room)
       @state_room = room
     end
 
@@ -998,25 +1031,17 @@ module Mica::Regex
     # toward the collector's next collection, for as long as the program
     # lives. The compiler alone holds the list, and never shifts it.
     private def trim_states : Nil
-      states = @list_of_states
-      spare = @state_room - states.size
-      return if spare < TRIM_MIN_SPARE_STATES || spare < states.size // 4
-      exact = Array(Program::State).new(states.size)
-      exact.concat(states)
-      GC.free(states.to_unsafe.as(Void*))
-      @list_of_states = exact
-      @state_room = states.size
+      spare = @state_room - @list_of_states.size
+      return if spare < TRIM_MIN_SPARE_STATES || spare < @list_of_states.size // 4
+      @list_of_states.trim
+      @state_room = @list_of_states.size
     end
 
     # The same for the transitions, whose list a large program allocates
     # at the bound `transitions_bound` finds (see `initialize`).
     private def trim_transitions : Nil
-      transitions = @list_of_transitions
-      return if transitions.size * 2 >= transitions.remaining_capacity
-      exact = Array(Program::Transition).new(transitions.size)
-      exact.concat(transitions)
-      GC.free(transitions.to_unsafe.as(Void*))
-      @list_of_transitions = exact
+      return if @list_of_transitions.size * 2 >= @list_of_transitions.capacity
+      @list_of_transitions.trim
     end
 
     # Spare room in the state list below this many states (1 KiB), or below
@@ -1024,18 +1049,24 @@ module Mica::Regex
     # the room.
     private TRIM_MIN_SPARE_STATES = 64
 
-    # Frees the compiler and the scratch lists the program does not keep
+    # Frees the scratch lists the program does not keep
     # (its stacks, its class trie, the trie's states and the visited
-    # marks), once the program is built: they would otherwise count toward
-    # the collector's next collection until it ran. The compiler is not
-    # used again; it alone holds these lists, and never shifts them.
+    # marks), once the program is built. The compiler is not used again;
+    # it alone holds these lists, and never shifts them.
     protected def release : Nil
       free_list(@list_of_tasks)
-      free_list(@list_of_values)
-      free_list(@list_of_trie_states)
-      free_list(@list_of_visited)
+      @list_of_values.free
+      @list_of_trie_states.free
+      @list_of_visited.free
       @class_trie.release
-      GC.free(self.as(Void*))
+    end
+
+    # Frees the lists a program would have taken over, when the compile
+    # stopped before it built one.
+    protected def free_program_lists : Nil
+      @list_of_states.free
+      @list_of_transitions.free
+      @list_of_class_blocks.free
     end
 
     private def free_list(list : Array) : Nil
@@ -1059,6 +1090,23 @@ module Mica::Regex
       block_states, _, _ = run_block(set) || return false
       return false if copies.to_i64 * block_states.size < RUN_MIN_STATES
       @run_states_ahead += copies.to_i64 * Preflight.set_states(set, @ledger, @meter)
+      true
+    end
+
+    # True when the optional copies of *node* (`x{n,m}`, a class) will be
+    # an optional run (`class_run`), whose states, the size preflight's
+    # count for each copy and its split, it then adds to
+    # `@run_states_ahead`, as `run_ahead?` does for the mandatory copies.
+    private def optional_run_ahead?(node : Hir::Repetition) : Bool
+      child = node.child
+      maximum = node.maximum
+      return false unless maximum && child.is_a?(Hir::Class)
+      copies = maximum - node.minimum
+      return false if copies < 2
+      set = child.code_point_set
+      block_states, _, _ = run_block(set) || return false
+      return false if copies.to_i64 * (block_states.size + 1) < RUN_MIN_STATES
+      @run_states_ahead += copies.to_i64 * (Preflight.set_states(set, @ledger, @meter) + 1)
       true
     end
 

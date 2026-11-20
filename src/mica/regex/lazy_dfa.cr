@@ -91,10 +91,6 @@ module Mica::Regex
     # Entries per state in the transition table: one per class, then the
     # end of input, then (forward) a line feed that ends the haystack.
     getter stride : Int32
-    # A new state's row: every transition still to build (-1).
-    getter unbuilt_row : Array(Int32)
-    # A dead state's row: every transition to the dead state.
-    getter dead_row : Array(Int32)
     @reverse_nfa : ReverseNFA?
     @relevant_flags : Int32
     # The slot of each start's flags in a cache's start table, in two
@@ -150,8 +146,6 @@ module Mica::Regex
       # so a row offset leaves three low bits free for flags (see `find_end`).
       symbols = @unicode_words ? @word_offset + class_count : @word_offset
       @stride = (symbols + 7) & ~7
-      @unbuilt_row = Array(Int32).new(@stride, -1)
-      @dead_row = Array(Int32).new(@stride, SPECIAL)
       @reverse_nfa = @reverse ? ReverseNFA.new(@program, @with_reversed_classes) : nil
       line_start = looks.includes?(Program::LookKind::StartOfLine)
       text_start = looks.includes?(Program::LookKind::StartOfText)
@@ -224,10 +218,23 @@ module Mica::Regex
     end
 
     # The assertion kinds *program* uses.
-    def self.looks_used(program : Program) : Array(Program::LookKind)
-      list_of_kinds = [] of Program::LookKind
-      program.each_distinct_state { |state, _| list_of_kinds << Program::LookKind.new(state.argument) if state.kind.look? }
-      list_of_kinds.uniq!
+    def self.looks_used(program : Program) : LookSet
+      bits = 0_u32
+      program.each_distinct_state { |state, _| bits |= 1_u32 << state.argument if state.kind.look? }
+      LookSet.new(bits)
+    end
+
+    # :nodoc:
+    # A set of `Program::LookKind`s, one bit each.
+    record LookSet, bits : UInt32 do
+      def includes?(kind : Program::LookKind) : Bool
+        bits & (1_u32 << kind.value) != 0
+      end
+
+      def any?(& : Program::LookKind -> Bool) : Bool
+        Program::LookKind.each { |kind| return true if includes?(kind) && yield kind }
+        false
+      end
     end
 
     protected def self.unicode_word?(kind : Program::LookKind) : Bool

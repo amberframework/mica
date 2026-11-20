@@ -46,6 +46,30 @@ module Mica::Regex
     def initialize(@limit : Int64)
     end
 
+    # The `ClassMemo::Block`s this compilation built and the memo did not
+    # keep, whose lists sit outside the collector's heap: the compilation
+    # hands them to its program (`take_owned_blocks`), which frees them with
+    # itself, or frees them when it stops early (`free_owned_blocks`).
+    @list_of_owned_blocks : Array(ClassMemo::Block)? = nil
+
+    # Records *block* as this compilation's.
+    def own(block : ClassMemo::Block) : Nil
+      (@list_of_owned_blocks ||= [] of ClassMemo::Block) << block
+    end
+
+    # Hands the owned blocks over (nil when there are none); the ledger no
+    # longer owns them.
+    def take_owned_blocks : Array(ClassMemo::Block)?
+      owned = @list_of_owned_blocks
+      @list_of_owned_blocks = nil
+      owned
+    end
+
+    # Frees the blocks the ledger still owns.
+    def free_owned_blocks : Nil
+      take_owned_blocks.try(&.each(&.free))
+    end
+
     # Returns the bytes the collector takes for a request of *count*
     # bytes: it adds one byte (so a pointer just past the end still keeps
     # the object alive) and rounds up to its granule.

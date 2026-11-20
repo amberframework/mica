@@ -330,7 +330,9 @@ module Mica::Regex
     # streams, charged as 1 + the heap's depth per range.
     private def self.union(list_of_streams : Array(RangeStream), context : Context) : CodePointSet
       context.charge_array(list_of_streams.size, sizeof(Int32))
-      heap = Array(Int32).new(list_of_streams.size)
+      # The heap and the bounds are scratch outside the collector's heap;
+      # the set gets the bounds in one array of their exact size.
+      heap = OffHeapList(Int32).new(list_of_streams.size)
       list_of_streams.each_with_index do |stream, index|
         next if stream.done?
         heap << index
@@ -338,7 +340,7 @@ module Mica::Regex
       end
       context.charge_work(list_of_streams.size * (heap.size.bit_length + 1))
       context.charge_array(0, sizeof(Int32))
-      bounds = [] of Int32
+      bounds = OffHeapList(Int32).new(8)
       until heap.empty?
         stream = list_of_streams[heap[0]]
         first = stream.current_first
@@ -359,10 +361,13 @@ module Mica::Regex
         sift_down(heap, list_of_streams, 0) unless heap.empty?
       end
       context.charge_set
-      CodePointSet.from_bounds(bounds)
+      CodePointSet.from_bounds(Array(Int32).new(bounds.size) { |index| bounds.unsafe_fetch(index) })
+    ensure
+      heap.try(&.free)
+      bounds.try(&.free)
     end
 
-    private def self.sift_up(heap : Array(Int32), list_of_streams : Array(RangeStream), position : Int32) : Nil
+    private def self.sift_up(heap : OffHeapList(Int32), list_of_streams : Array(RangeStream), position : Int32) : Nil
       index = position
       while index > 0
         parent = (index - 1) // 2
@@ -372,7 +377,7 @@ module Mica::Regex
       end
     end
 
-    private def self.sift_down(heap : Array(Int32), list_of_streams : Array(RangeStream), position : Int32) : Nil
+    private def self.sift_down(heap : OffHeapList(Int32), list_of_streams : Array(RangeStream), position : Int32) : Nil
       index = position
       loop do
         left = index * 2 + 1

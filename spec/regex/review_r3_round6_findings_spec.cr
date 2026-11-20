@@ -115,8 +115,8 @@ private macro instance_variable_type(type, name)
 end
 
 private def program_ivar_types : Array(String)
-  [instance_variable_type(Mica::Regex::Program, "materialized"),
-   instance_variable_type(Mica::Regex::Program, "materialized_blocks")]
+  # The flag that publishes both lists (`Program#list_of_states`).
+  [instance_variable_type(Mica::Regex::Program, "materialized")]
 end
 
 private def lazy_dfa_ivar_type : String
@@ -175,7 +175,7 @@ describe "Mica::Regex R3 sixth review findings, publication of lazily built arra
       seen = Array(Array(Mica::Regex::Program::State)?).new(8, nil)
       on_threads(8) do |index|
         if index.even?
-          seen[index] = program.list_of_states
+          seen[index] = program.list_of_states.to_a
         else
           # A reader that races the build reads each state through
           # `state_at`, before or after the array is published.

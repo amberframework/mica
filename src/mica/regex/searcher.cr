@@ -107,7 +107,9 @@ module Mica::Regex
 
     @pike : PikeVM? = nil
     @backtracker : BoundedBacktracker? = nil
-    @span_slots = Slice(Int64).new(2, PikeVM::UNSET)
+    # The span slots and the capture slots share one buffer: the first two
+    # entries, then the program's slots.
+    @span_slots : Slice(Int64)
     @capture_slots : Slice(Int64)
     # The last first-line scan: it started at @line_scan_start and found
     # the line feed (or the haystack end) at @line_feed_at.
@@ -144,7 +146,9 @@ module Mica::Regex
                    @engine : Engine = Engine::Auto, @cache_pool : CachePool = CachePool.default,
                    lease : SearchLease? = nil)
       @meter = SearchMeter.new(limits, @program.state_count, @haystack.bytesize, timeout)
-      @capture_slots = Slice(Int64).new(@program.slot_count, PikeVM::UNSET)
+      slots = Slice(Int64).new(2 + @program.slot_count, PikeVM::UNSET)
+      @span_slots = slots[0, 2]
+      @capture_slots = slots[2, @program.slot_count]
       if @engine.automata?
         plan = @plan = @program.plan
         attach(lease || plan.lease(@cache_pool))
