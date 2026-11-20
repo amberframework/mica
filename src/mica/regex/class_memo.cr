@@ -122,11 +122,12 @@ module Mica::Regex
 
     # Returns *set*'s block decoded from `Prebuilt` when the set is the
     # static set (or the complement of one) a prebuilt block was generated
-    # for, else nil. A prebuilt block is the one `build` makes for that
-    # set (scripts/generate_class_blocks.cr writes it with `build`, and a
-    # spec checks them equal), read from static data in one pass of
-    # copies: `\w` and `\p{L}` cost tens of microseconds and over 100 KiB
-    # of short-lived allocation to build, once per process.
+    # for, or differs from one only in ASCII members (see
+    # `#ascii_variant_block?`), else nil. A prebuilt block is the one `build`
+    # makes for that set (scripts/generate_class_blocks.cr writes it with
+    # `build`, and a spec checks them equal), read from static data in one
+    # pass of copies: `\w` and `\p{L}` cost tens of microseconds and over
+    # 100 KiB of short-lived allocation to build, once per process.
     private def self.prebuilt_block?(set : CodePointSet, ledger : AllocationLedger,
                                      meter : Core::WorkMeter) : Block?
       bounds = set.list_of_bounds
@@ -134,9 +135,152 @@ module Mica::Regex
         set_id, negated, range_count, entry, state_count, transition_count, offset = prebuilt
         next unless bounds.size == range_count * 2
         next unless static_set?(bounds, set_id, negated, meter)
-        return decode_prebuilt(entry, state_count, transition_count, offset, ledger, meter)
+        list_of_states, list_of_transitions = decode_prebuilt(state_count, transition_count, offset, ledger, meter)
+        return finished_block(list_of_states, list_of_transitions, entry, ledger)
+      end
+      ascii_variant_block?(bounds, ledger, meter)
+    end
+
+    # The first code point past ASCII. A set's ASCII members are one-byte
+    # sequences, so its automaton reads them only as transitions from the
+    # entry straight to the exit; every longer sequence starts with a lead
+    # byte of at least 0xC2.
+    private ASCII_END = 0x80
+
+    # Returns the block of a set whose members past ASCII are exactly those of
+    # a prebuilt set (or its complement), as `(?i)[\w+\-.]` and `[^\W_]` are
+    # `\w`'s, else nil. The block is the prebuilt one with the entry's ASCII
+    # transitions replaced by the set's ASCII ranges: the trie of the set has
+    # the prebuilt set's nodes past the entry, and the builder emits the entry
+    # last, so `build` makes exactly this block (a spec checks them equal).
+    # Grant's email validator class built from its trie cost about 150 us and
+    # 190 KB of allocation on a process's first compile.
+    private def self.ascii_variant_block?(bounds : Array(Int32), ledger : AllocationLedger,
+                                          meter : Core::WorkMeter) : Block?
+      return nil if bounds.empty? || bounds[-1] < ASCII_END
+      Prebuilt::LIST_OF_ENTRIES.each do |prebuilt|
+        set_id, negated, _range_count, entry, state_count, transition_count, offset = prebuilt
+        next unless same_past_ascii?(bounds, set_id, negated, meter)
+        list_of_states, list_of_transitions = decode_prebuilt(state_count, transition_count, offset, ledger, meter,
+          spare_transitions: ascii_range_count(bounds))
+        return nil unless replace_ascii_transitions(list_of_states, list_of_transitions, entry, bounds, ledger)
+        return finished_block(list_of_states, list_of_transitions, entry, ledger)
       end
       nil
+    end
+
+    # True when *bounds* and static set *set_id* (its complement when
+    # *negated*) have the same members past ASCII.
+    private def self.same_past_ascii?(bounds : Array(Int32), set_id : Int32, negated : Bool,
+                                      meter : Core::WorkMeter) : Bool
+      static = Unicode.decoded_ranges(set_id)
+      meter.enforce { Core::Position.new(0_i64) } if meter.charge(static.size + 1)
+      index = 0
+      # Skip the ranges that lie wholly in ASCII; the last range reaches past it.
+      while bounds[index + 1] < ASCII_END
+        index += 2
+      end
+      each_range_past_ascii(static, negated) do |first, last|
+        return false unless index + 1 < bounds.size && Math.max(bounds[index], ASCII_END) == first && bounds[index + 1] == last
+        index += 2
+      end
+      index == bounds.size
+    end
+
+    # Yields each range of *static* (of its complement when *negated*) that
+    # reaches past ASCII, cut to start at `ASCII_END` at the earliest.
+    private def self.each_range_past_ascii(static : Slice(Int32), negated : Bool, & : Int32, Int32 ->) : Nil
+      unless negated
+        index = 0
+        while index < static.size
+          yield Math.max(static[index], ASCII_END), static[index + 1] if static[index + 1] >= ASCII_END
+          index += 2
+        end
+        return
+      end
+      # The complement's ranges are the gaps between the static ranges.
+      first = 0
+      index = 0
+      while index <= static.size
+        last = index == static.size ? CodePointSet::MAX_CODE_POINT : static[index] - 1
+        yield Math.max(first, ASCII_END), last if first <= last && last >= ASCII_END
+        break if index == static.size
+        first = static[index + 1] + 1
+        index += 2
+      end
+    end
+
+    # Replaces the ASCII transitions of the *entry* state with one transition
+    # to the exit per ASCII range of *bounds*, in place, within the room
+    # `decode_prebuilt` left (`ascii_range_count`). Returns false, leaving
+    # the set to `build`, where the result would not be the block `build`
+    # makes: the entry's transitions do not end the list, one straddles
+    # `ASCII_END`, or the entry would keep a single transition (`build` makes
+    # that a `ByteRange` state).
+    private def self.replace_ascii_transitions(list_of_states : Array(Program::State),
+                                               list_of_transitions : Array(Program::Transition), entry : Int32,
+                                               bounds : Array(Int32), ledger : AllocationLedger) : Bool
+      state = list_of_states[entry]
+      first = state.argument
+      return false unless state.kind.sparse? && first + state.alternate == list_of_transitions.size
+      past_ascii = first
+      while past_ascii < list_of_transitions.size && list_of_transitions[past_ascii].high < ASCII_END
+        past_ascii += 1
+      end
+      return false if past_ascii < list_of_transitions.size && list_of_transitions[past_ascii].low < ASCII_END
+      list_of_transitions.delete_at(first, past_ascii - first)
+      position = first
+      index = 0
+      while index < bounds.size && bounds[index] < ASCII_END
+        list_of_transitions.insert(position, Program::Transition.new(bounds[index].to_u8, Math.min(bounds[index + 1], ASCII_END - 1).to_u8, EXIT))
+        position += 1
+        index += 2
+      end
+      count = list_of_transitions.size - first
+      return false if count < 2
+      list_of_states[entry] = state.copy_with(alternate: count)
+      true
+    end
+
+    # The ranges of *bounds* that start in ASCII.
+    private def self.ascii_range_count(bounds : Array(Int32)) : Int32
+      count = 0
+      while count * 2 < bounds.size && bounds[count * 2] < ASCII_END
+        count += 1
+      end
+      count
+    end
+
+    # Decodes the states and transitions of the prebuilt block at *offset*
+    # in `Prebuilt::DATA`, with room for *spare_transitions* more
+    # transitions.
+    private def self.decode_prebuilt(state_count : Int32, transition_count : Int32, offset : Int32,
+                                     ledger : AllocationLedger, meter : Core::WorkMeter,
+                                     spare_transitions : Int32 = 0) : {Array(Program::State), Array(Program::Transition)}
+      meter.enforce { Core::Position.new(0_i64) } if meter.charge(state_count + transition_count)
+      prebuilt_bytes = Prebuilt::DATA.to_slice
+      ledger.charge_array(state_count, sizeof(Program::State), "a class block", 0)
+      list_of_states = Array(Program::State).new(state_count)
+      state_count.times do
+        list_of_states << Program::State.new(Program::StateKind.new(prebuilt_bytes[offset]), prebuilt_bytes[offset + 1], prebuilt_bytes[offset + 2],
+          prebuilt_int(prebuilt_bytes, offset + 3), prebuilt_int(prebuilt_bytes, offset + 5), prebuilt_int(prebuilt_bytes, offset + 7))
+        offset += PREBUILT_STATE_BYTES
+      end
+      ledger.charge_array(transition_count + spare_transitions, sizeof(Program::Transition), "a class block", 0)
+      list_of_transitions = Array(Program::Transition).new(transition_count + spare_transitions)
+      transition_count.times do
+        list_of_transitions << Program::Transition.new(prebuilt_bytes[offset], prebuilt_bytes[offset + 1], prebuilt_int(prebuilt_bytes, offset + 2))
+        offset += PREBUILT_TRANSITION_BYTES
+      end
+      {list_of_states, list_of_transitions}
+    end
+
+    # The block of *list_of_states* and *list_of_transitions* entered at
+    # *entry*, with its shared table and entry targets.
+    private def self.finished_block(list_of_states : Array(Program::State), list_of_transitions : Array(Program::Transition),
+                                    entry : Int32, ledger : AllocationLedger) : Block
+      table = shared_table(list_of_states, list_of_transitions, ledger)
+      Block.new(list_of_states, list_of_transitions, entry, table, entry_targets(list_of_states[entry], table, ledger))
     end
 
     # True when *bounds* are those of static set *set_id*, or of its
@@ -165,27 +309,6 @@ module Mica::Regex
         static_index += 2
       end
       index == bounds.size
-    end
-
-    private def self.decode_prebuilt(entry : Int32, state_count : Int32, transition_count : Int32, offset : Int32,
-                                     ledger : AllocationLedger, meter : Core::WorkMeter) : Block
-      meter.enforce { Core::Position.new(0_i64) } if meter.charge(state_count + transition_count)
-      prebuilt_bytes = Prebuilt::DATA.to_slice
-      ledger.charge_array(state_count, sizeof(Program::State), "a class block", 0)
-      list_of_states = Array(Program::State).new(state_count)
-      state_count.times do
-        list_of_states << Program::State.new(Program::StateKind.new(prebuilt_bytes[offset]), prebuilt_bytes[offset + 1], prebuilt_bytes[offset + 2],
-          prebuilt_int(prebuilt_bytes, offset + 3), prebuilt_int(prebuilt_bytes, offset + 5), prebuilt_int(prebuilt_bytes, offset + 7))
-        offset += PREBUILT_STATE_BYTES
-      end
-      ledger.charge_array(transition_count, sizeof(Program::Transition), "a class block", 0)
-      list_of_transitions = Array(Program::Transition).new(transition_count)
-      transition_count.times do
-        list_of_transitions << Program::Transition.new(prebuilt_bytes[offset], prebuilt_bytes[offset + 1], prebuilt_int(prebuilt_bytes, offset + 2))
-        offset += PREBUILT_TRANSITION_BYTES
-      end
-      table = shared_table(list_of_states, list_of_transitions, ledger)
-      Block.new(list_of_states, list_of_transitions, entry, table, entry_targets(list_of_states[entry], table, ledger))
     end
 
     @[AlwaysInline]
