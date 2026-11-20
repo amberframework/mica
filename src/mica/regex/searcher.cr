@@ -257,10 +257,11 @@ module Mica::Regex
     # Reads the deadline, then validates the haystack (unless the lease
     # validated this very string).
     private def begin_call : Nil
-      # The deadline is read at the start of every call, before the
+      # The deadline is checked at the start of every call, before the
       # haystack is read, so a timeout that has already passed fails even a
-      # search too short to reach a clock checkpoint.
-      @meter.enforce_deadline(0)
+      # search too short to reach a clock checkpoint. The meter read the
+      # clock as the call began.
+      @meter.enforce_start_deadline(0)
       lease = @lease
       plan = @plan
       # A lease remembers the last `String` it validated (strings are
@@ -387,8 +388,8 @@ module Mica::Regex
       return nil if byte_index > bytes.size
       check_start(bytes, byte_index)
       return nil if required_byte_missing?(bytes, byte_index)
-      anchored = @program.options.anchored? || options.anchored? || anchored_start?
       end_anchored = @program.options.end_anchored? || options.end_anchored?
+      anchored = @program.options.anchored? || options.anchored? || anchored_at_offset?(end_anchored)
       case @engine
       in .pike_vm?
         slots = @capture_slots
@@ -422,8 +423,8 @@ module Mica::Regex
       return false if byte_index > bytes.size
       check_start(bytes, byte_index)
       return false if required_byte_missing?(bytes, byte_index)
-      anchored = @program.options.anchored? || options.anchored? || anchored_start?
       end_anchored = @program.options.end_anchored? || options.end_anchored?
+      anchored = @program.options.anchored? || options.anchored? || anchored_at_offset?(end_anchored)
       if dfa = automaton(end_anchored)
         if literal_search?(anchored)
           return literal_span(bytes, byte_index)
@@ -928,10 +929,10 @@ module Mica::Regex
     # True when the plan proved every match starts at the start of the text,
     # so an unanchored search finds only what an anchored one at its offset
     # finds (nothing past offset 0).
-    private def anchored_start? : Bool
+    private def anchored_at_offset?(end_anchored : Bool) : Bool
       return false unless @engine.automata?
       plan = @plan
-      !!plan && plan.anchored_start?
+      !!plan && plan.anchored_at_offset?(end_anchored)
     end
 
     # The forward lazy DFA when this search may use it, or nil.
@@ -954,7 +955,8 @@ module Mica::Regex
       scan = @scan ||= PrefilterScan.new(prefilter, bytes, verified_only: true)
       start = scan.find(byte_index, @meter)
       return false if start < 0
-      literal = prefilter.literal_at(bytes, start, @meter)
+      # The scan verified the candidate, so it knows the literal.
+      literal = scan.last_literal
       @span_slots[0] = start.to_i64
       @span_slots[1] = (start + prefilter.literal_size(literal)).to_i64
       true
@@ -987,21 +989,38 @@ module Mica::Regex
     # after the end of the match before it, which contains the byte, so an
     # iteration call reads each byte at most once per required byte.
     private def required_byte_missing?(bytes : Bytes, byte_index : Int32) : Bool
-      if @engine.auto?
-        # A literal prefilter already skips to where a match can start, and
-        # each byte checked reads the haystack again, so Auto checks only
-        # the rarest byte, and only without a prefilter.
-        return false if @plan.try(&.prefilter)
-        list_of_bytes = @program.list_of_required_bytes
-        checked = Math.min(list_of_bytes.size, 1)
+      if @engine.auto? && (plan = @plan)
+        # Auto checks the rarest required byte at every search, as a
+        # haystack may lack it past an earlier match. It looks for the
+        # others (at most `StartFilter::MAX_REQUIRED_BYTES` in all) once per
+        # haystack, when its first search starts: the rarest byte by
+        # English text is not always the absent one (`x` ranks rarer than
+        # `y` in `(x+x+)+y` over a run of x's), and `memchr` reads many
+        # bytes per cycle where a DFA reads about one, while an iteration
+        # whose searches each looked again would pay a call per match. With
+        # a literal prefilter, which already skips to where a literal
+        # starts, it looks once per haystack for the bytes some literal
+        # lacks (`y` past the literal `xx`) and for no other.
+        if plan.prefilter
+          list_of_bytes = plan.list_of_required_bytes_past_literals
+          every_search = 0
+        else
+          list_of_bytes = @program.list_of_required_bytes
+          every_search = 1
+        end
+        checked = list_of_bytes.size
       elsif @first_search
         list_of_bytes = @program.required_bytes_for_first_search(bytes.size - byte_index, @meter, byte_index) || return false
-        checked = list_of_bytes.size
+        checked = every_search = list_of_bytes.size
       else
         return false
       end
       checked.times do |index|
-        next if @required_at[index] >= byte_index
+        found_at = @required_at[index]
+        next if found_at >= byte_index
+        # The others once per haystack, and only past a short span, where a
+        # scan costs about what the engine would.
+        next if index >= every_search && (found_at >= 0 || bytes.size - byte_index <= ShortSearch::MAX_BYTES)
         found = find_byte(bytes, list_of_bytes.unsafe_fetch(index), byte_index)
         return true if found < 0
         @required_at[index] = found

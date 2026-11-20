@@ -2,9 +2,9 @@ module Mica::Regex
   # Unicode data for classes and case folding: the property sets and the
   # simple case folding orbits of one pinned Unicode Character Database
   # version (`Tables::VERSION`), generated into `unicode/tables.cr` by
-  # scripts/unicode/generate_tables.rb. The tables are static table_bytes in the
-  # binary; a set's ranges are decoded into integers once per process, the
-  # first time a class uses the set.
+  # scripts/unicode/generate_tables.rb. The tables are read-only static data
+  # in the binary, read in place: no heap, no decoding and no work at
+  # program start.
   module Unicode
     # What a property name refers to, following PCRE2's property types.
     enum PropertyKind
@@ -67,75 +67,81 @@ module Mica::Regex
     end
 
     private def self.script_property(value : String, script_only : Bool) : Property?
-      entry = Tables::PROPERTY_NAMES[value]?
+      entry = property_name_entry(value)
       return nil unless entry
-      kind, set_id, script_set_id = entry
+      kind = property_kind(entry)
+      set_id = Tables::PROPERTY_NAMES[entry + 3]
       return Property.new(PropertyKind::Script, set_id) if kind.script?
       return nil unless kind.script_extensions?
-      script_only ? Property.new(PropertyKind::Script, script_set_id) : Property.new(kind, set_id)
+      script_only ? Property.new(PropertyKind::Script, Tables::PROPERTY_NAMES[entry + 4]) : Property.new(kind, set_id)
     end
 
     private def self.lookup_loose(loose : String) : Property?
-      entry = Tables::PROPERTY_NAMES[loose]?
+      entry = property_name_entry(loose)
       return nil unless entry
-      kind, set_id, _script_set_id = entry
-      Property.new(kind, set_id)
+      Property.new(property_kind(entry), Tables::PROPERTY_NAMES[entry + 3])
+    end
+
+    # The fields of each `Tables::PROPERTY_NAMES` entry.
+    private PROPERTY_NAME_FIELDS = 5
+
+    # Returns the index in `Tables::PROPERTY_NAMES` of the entry for
+    # *loose*, or nil: a binary search of the sorted names, which are
+    # static data in the binary.
+    private def self.property_name_entry(loose : String) : Int32?
+      wanted = loose.to_slice
+      text = Tables::PROPERTY_NAME_TEXT.to_slice
+      entries = Tables::PROPERTY_NAMES
+      low = 0
+      high = Tables::PROPERTY_NAME_COUNT
+      while low < high
+        middle = (low + high) // 2
+        entry = middle * PROPERTY_NAME_FIELDS
+        order = text[entries[entry], entries[entry + 1]] <=> wanted
+        return entry if order == 0
+        if order < 0
+          low = middle + 1
+        else
+          high = middle
+        end
+      end
+      nil
+    end
+
+    private def self.property_kind(entry : Int32) : PropertyKind
+      PropertyKind.from_value(Tables::PROPERTY_NAMES[entry + 2])
     end
 
     # Returns the number of ranges in static set *set_id*.
     def self.range_count(set_id : Int32) : Int32
-      Tables::SETS[set_id][1]
+      Tables::SETS[set_id * 2 + 1]
     end
 
     # Yields each range of static set *set_id* as `{first, last}`, in
     # order.
     def self.each_range(set_id : Int32, & : Int32, Int32 ->) : Nil
-      first_index, count = Tables::SETS[set_id]
-      table_bytes = Tables::RANGES.to_slice
-      count.times do |index|
-        offset = (first_index + index) * 12
-        yield hex6(table_bytes, offset), hex6(table_bytes, offset + 6)
-      end
+      bounds = decoded_ranges(set_id)
+      (bounds.size // 2).times { |index| yield bounds[index * 2], bounds[index * 2 + 1] }
     end
 
-    # Returns the ranges of static set *set_id* as `first, last` pairs,
-    # decoded from the hex table once per process on first use (a set is
-    # lowered from them every time a pattern uses it). Callers read the
-    # slice and never write it.
+    # Returns the ranges of static set *set_id* as `first, last` pairs: a
+    # read-only view of the generated table, which is static data in the
+    # binary, so reading a set allocates nothing and decodes nothing.
     def self.decoded_ranges(set_id : Int32) : Slice(Int32)
-      # Every read and write of the memo is under the mutex: a
-      # `Slice(Int32)?` is wider than a machine word, so an unsynchronized
-      # read could see a torn value. Callers take the slice once per class.
-      @@decoded_mutex.synchronize do
-        @@decoded_bounds[set_id] ||= begin
-          bounds = Slice(Int32).new(range_count(set_id) * 2)
-          index = 0
-          each_range(set_id) do |first, last|
-            bounds[index] = first
-            bounds[index + 1] = last
-            index += 2
-          end
-          bounds
-        end
-      end
+      Tables::RANGES[Tables::SETS[set_id * 2] * 2, range_count(set_id) * 2]
     end
-
-    @@decoded_bounds = Array(Slice(Int32)?).new(Tables::SETS.size, nil)
-    @@decoded_mutex = Mutex.new
 
     # Returns true when *code_point* is in static set *set_id* (a binary
     # search).
     def self.includes?(set_id : Int32, code_point : Int32) : Bool
-      first_index, count = Tables::SETS[set_id]
-      table_bytes = Tables::RANGES.to_slice
+      bounds = decoded_ranges(set_id)
       low = 0
-      high = count
+      high = bounds.size // 2
       while low < high
         middle = (low + high) // 2
-        offset = (first_index + middle) * 12
-        if hex6(table_bytes, offset + 6) < code_point
+        if bounds[middle * 2 + 1] < code_point
           low = middle + 1
-        elsif hex6(table_bytes, offset) > code_point
+        elsif bounds[middle * 2] > code_point
           high = middle
         else
           return true
@@ -149,7 +155,7 @@ module Mica::Regex
     def self.each_fold_partner(code_point : Int32, & : Int32 ->) : Nil
       index = fold_index_at_or_after(code_point)
       return if index >= fold_entry_count
-      entries = FOLD_ENTRIES
+      entries = Tables::FOLD_ORBITS
       return unless entries[index * 2] == code_point
       partner = entries[index * 2 + 1]
       steps = 0
@@ -165,7 +171,7 @@ module Mica::Regex
     # visited (the work done).
     def self.each_folding_code_point(first : Int32, last : Int32, & : Int32 ->) : Int32
       index = fold_index_at_or_after(first)
-      entries = FOLD_ENTRIES
+      entries = Tables::FOLD_ORBITS
       visited = 0
       while index < fold_entry_count
         code_point = entries[index * 2]
@@ -184,24 +190,11 @@ module Mica::Regex
     end
 
     private def self.fold_entry_count : Int32
-      FOLD_ENTRIES.size // 2
-    end
-
-    # The simple case folding orbits as `code_point, next member` pairs
-    # sorted by code point, decoded from the hex table once per process
-    # (the constant is initialized on first use, under the runtime's
-    # once-lock). Every case-insensitive class and literal reads it, so it
-    # is decoded once rather than parsed digit by digit on each lookup.
-    # Only read after it is built.
-    private FOLD_ENTRIES = begin
-      table_bytes = Tables::FOLD_CYCLE.to_slice
-      entries = Slice(Int32).new(table_bytes.size // 6)
-      entries.size.times { |index| entries[index] = hex6(table_bytes, index * 6) }
-      entries
+      Tables::FOLD_ORBITS.size // 2
     end
 
     private def self.fold_index_at_or_after(code_point : Int32) : Int32
-      entries = FOLD_ENTRIES
+      entries = Tables::FOLD_ORBITS
       low = 0
       high = entries.size // 2
       while low < high
@@ -213,22 +206,6 @@ module Mica::Regex
         end
       end
       low
-    end
-
-    # Reads six upper-case hex digits at *offset*. Callers index entries
-    # of the generated tables, so the bounds are checked once here and the
-    # digits are read without per-byte checks.
-    @[AlwaysInline]
-    private def self.hex6(table_bytes : Bytes, offset : Int32) : Int32
-      raise IndexError.new unless 0 <= offset && offset + 6 <= table_bytes.size
-      digits = table_bytes.to_unsafe + offset
-      value = 0
-      6.times do |index|
-        byte = digits[index].to_i32
-        digit = byte <= 0x39 ? byte &- 0x30 : byte &- 0x37
-        value = (value << 4) | digit
-      end
-      value
     end
   end
 end

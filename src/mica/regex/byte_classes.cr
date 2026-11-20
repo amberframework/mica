@@ -52,6 +52,14 @@ module Mica::Regex
       @list_of_representatives[class_index]
     end
 
+    # Returns the number of byte values in class *class_index* (a class is
+    # a run of consecutive bytes, from its representative to the next
+    # class's).
+    def class_size(class_index : Int32) : Int32
+      next_start = class_index + 1 < @class_count ? @list_of_representatives[class_index + 1].to_i32 : 256
+      next_start - @list_of_representatives[class_index].to_i32
+    end
+
     # :nodoc:
     # The byte-to-class table, for the search loops.
     def table : Pointer(UInt8)

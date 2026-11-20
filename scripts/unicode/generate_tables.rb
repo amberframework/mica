@@ -332,9 +332,15 @@ end
 largest_orbit = orbits.map(&:size).max
 
 # ---- Output ---------------------------------------------------------------------
-def hex6(value)
-  format("%06X", value)
-end
+# Every table is a read-only `Slice(Int32).literal` (or a string literal):
+# static data in the binary, read in place, so the tables cost no heap,
+# no decoding and no work at program start.
+
+# The values of `Mica::Regex::Unicode::PropertyKind`, in its declaration
+# order (src/mica/regex/unicode.cr); `PROPERTY_NAMES` stores each kind as
+# its value.
+PROPERTY_KINDS = %w[GeneralCategory GeneralCategoryGroup LetterAmpersand Script ScriptExtensions BidiClass Boolean Any
+  Alnum Space UniversalName Word].freeze
 
 def string_literal(io, data, indent)
   data.scan(/.{1,96}/).each_with_index do |chunk, index|
@@ -342,14 +348,41 @@ def string_literal(io, data, indent)
   end
 end
 
-range_data = +""
-set_table = []
-list_of_sets.each do |ranges|
-  set_table << [range_data.size / 12, ranges.size]
-  ranges.each { |first, last| range_data << hex6(first) << hex6(last) }
+# Writes `Slice(Int32).literal(...)` of *values*, *per_line* to a line.
+def int_slice_literal(io, values, per_line, indent, &format)
+  io << "Slice(Int32).literal(\n"
+  values.each_slice(per_line) do |line|
+    io << indent << "  " << line.map { |value| format ? format.call(value) : value.to_s }.join(", ") << ",\n"
+  end
+  io << indent << ")"
 end
-fold_data = +""
-next_in_orbit.keys.sort.each { |code_point| fold_data << hex6(code_point) << hex6(next_in_orbit[code_point]) }
+
+def hex(value)
+  format("0x%X", value)
+end
+
+range_values = []
+set_values = []
+list_of_sets.each do |ranges|
+  set_values << range_values.size / 2 << ranges.size
+  ranges.each { |first, last| range_values << first << last }
+end
+fold_values = []
+next_in_orbit.keys.sort.each { |code_point| fold_values << code_point << next_in_orbit[code_point] }
+# One bit per code point below U+10000 for the UCP word set (`xwd`).
+word_bits = Array.new(1024, 0)
+list_of_sets[set_ids.fetch("xwd")].each do |first, last|
+  next if first >= 0x10000
+  (first..[last, 0xFFFF].min).each { |code_point| word_bits[code_point >> 6] |= 1 << (code_point & 63) }
+end
+name_text = +""
+name_values = []
+names.keys.sort.each do |loose|
+  kind, set, script_set = names[loose]
+  kind_value = PROPERTY_KINDS.index(kind) || abort("unknown property kind #{kind}")
+  name_values << name_text.bytesize << loose.bytesize << kind_value << set_ids.fetch(set) << set_ids.fetch(script_set)
+  name_text << loose
+end
 
 FileUtils.mkdir_p(File.dirname(OUTPUT))
 File.open(OUTPUT, "w") do |io|
@@ -361,38 +394,46 @@ File.open(OUTPUT, "w") do |io|
   io << "  module Tables\n"
   io << "    VERSION = #{MANIFEST.fetch("version").inspect}\n"
   io << "    UCD_SHA256 = #{MANIFEST.fetch("sha256").inspect}\n\n"
-  io << "    # Ranges of every set, 12 hex digits each: first and last code point.\n"
+  io << "    # The ranges of every set, as `first, last` code point pairs.\n"
   io << "    RANGES = "
-  string_literal(io, range_data, "      ")
-  io << "\n\n    # Each set as {first range index, range count}.\n"
-  io << "    SETS = ["
-  set_table.each_with_index do |(first, count), index|
-    io << (index % 6 == 0 ? "\n      " : " ") << "{" << first << ", " << count << "},"
-  end
-  io << "\n    ] of {Int32, Int32}\n\n"
+  int_slice_literal(io, range_values, 12, "    ") { |value| hex(value) }
+  io << "\n\n    # Each set as `first range index, range count`.\n"
+  io << "    SETS = "
+  int_slice_literal(io, set_values, 12, "    ")
+  io << "\n\n    # The number of sets.\n"
+  io << "    SET_COUNT = #{list_of_sets.size}\n\n"
   set_ids.each do |key, id|
     constant = "SET_" + key.upcase.gsub(/[^A-Z0-9]+/, "_")
     io << "    #{constant} = #{id}\n" if key =~ /\A(gc|gcg|lamp|any|xan|xsp|xwd|xuc|hspace|vspace|px|bool:(ASCII|White_Space)\z)/
   end
-  io << "\n    # Loose property names (lower case, no underscores, as PCRE2 matches\n"
-  io << "    # them) to {kind, set, script-only set}.\n"
-  io << "    PROPERTY_NAMES = {\n"
-  names.keys.sort.each do |loose|
-    kind, set, script_set = names[loose]
-    io << "      #{loose.inspect} => {PropertyKind::#{kind}, #{set_ids.fetch(set)}, #{set_ids.fetch(script_set)}},\n"
+  io << "\n    # One bit per code point below U+10000, set for the UCP word set\n"
+  io << "    # (`SET_XWD`): bit `c & 63` of word `c >> 6`.\n"
+  io << "    WORD_BITS = Slice(UInt64).literal(\n"
+  word_bits.each_slice(4) do |line|
+    io << "      " << line.map { |value| format("0x%016X_u64", value) }.join(", ") << ",\n"
   end
-  io << "    }\n\n"
-  io << "    # Simple case folding orbits (CaseFolding.txt C and S), 12 hex digits per\n"
-  io << "    # entry sorted by code point: the code point, then the next member of its\n"
-  io << "    # orbit (the members form a cycle).\n"
+  io << "    )\n"
+  io << "\n    # Loose property names (lower case, no underscores, as PCRE2 matches\n"
+  io << "    # them), sorted by byte and written one after another.\n"
+  io << "    PROPERTY_NAME_TEXT = "
+  string_literal(io, name_text, "      ")
+  io << "\n\n    # Each loose name, in `PROPERTY_NAME_TEXT` order, as its byte offset there,\n"
+  io << "    # its bytesize, its `PropertyKind` value, its set and its script-only set.\n"
+  io << "    PROPERTY_NAMES = "
+  int_slice_literal(io, name_values, 15, "    ")
+  io << "\n\n    # The number of loose names.\n"
+  io << "    PROPERTY_NAME_COUNT = #{names.size}\n\n"
+  io << "    # Simple case folding orbits (CaseFolding.txt C and S) as `code point,\n"
+  io << "    # next member of its orbit` pairs sorted by code point (the members form\n"
+  io << "    # a cycle).\n"
   io << "    LARGEST_ORBIT = #{largest_orbit}\n"
-  io << "    FOLD_CYCLE = "
-  string_literal(io, fold_data, "      ")
+  io << "    FOLD_ORBITS = "
+  int_slice_literal(io, fold_values, 12, "    ") { |value| hex(value) }
   io << "\n  end\nend\n"
 end
 # The committed file is in crystal-alpha tool format layout, so a rerun
 # reproduces it byte for byte.
 formatted = system("crystal-alpha", "tool", "format", OUTPUT)
 abort "crystal-alpha tool format failed on #{OUTPUT}" unless formatted
-puts "wrote #{OUTPUT.sub(ROOT + "/", "")}: #{list_of_sets.size} sets, #{range_data.size / 12} ranges, " \
+puts "wrote #{OUTPUT.sub(ROOT + "/", "")}: #{list_of_sets.size} sets, #{range_values.size / 2} ranges, " \
      "#{names.size} names, #{next_in_orbit.size} folding entries in #{orbits.size} orbits (largest #{largest_orbit})"

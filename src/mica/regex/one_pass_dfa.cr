@@ -44,6 +44,19 @@ module Mica::Regex
       OnePassBuilder.new(program, byte_classes).build
     end
 
+    # The most cells the one-pass table of *program* can have: one row of
+    # *byte_classes* per NFA state, the most DFA states it can have.
+    def self.most_cells(program : Program, byte_classes : ByteClasses) : Int64
+      program.state_count.to_i64 * byte_classes.class_count
+    end
+
+    # True when the one-pass table of *program* has at most
+    # `OnePassBuilder::PRESIZED_TABLE_CELLS` cells, so building it, or
+    # finding the program is not one-pass, costs little.
+    def self.small?(program : Program, byte_classes : ByteClasses) : Bool
+      most_cells(program, byte_classes) <= OnePassBuilder::PRESIZED_TABLE_CELLS
+    end
+
     # For `search`: per table cell, the target state's row offset (state
     # times class count) shifted left by two, with `STEP_TAKES_EDGE` when
     # the edge has assertions or slots and `STEP_REACHES_MATCH` when the
@@ -68,6 +81,15 @@ module Mica::Regex
     # a run of ASCII bytes there without reading the table.
     @list_of_ascii_loops : Array(Bool)
 
+    # Per state: true when its match path has no assertion, so it holds
+    # wherever the state is reached, and some byte leads back to it with no
+    # edge work; `search` then reads a run of bytes
+    # that lead back to the state with no edge work (`.*`) in one loop,
+    # and the match ends where the run does.
+    @list_of_match_loops : Array(Bool)
+    # True when some state is a match loop (see `search`).
+    @any_match_loop : Bool
+
     def initialize(@byte_classes : ByteClasses, @table : Array(Int32), @match_edges : Array(Int32),
                    @list_of_edges : Array(Edge), @list_of_shadows : Array(Bool))
       @class_count = @byte_classes.class_count
@@ -81,6 +103,11 @@ module Mica::Regex
         step
       end
       @list_of_ascii_loops = Array(Bool).new(@match_edges.size) { |state| ascii_loop?(state) }
+      @list_of_match_loops = Array(Bool).new(@match_edges.size) do |state|
+        index = @match_edges[state]
+        index >= 0 && @list_of_edges[index].looks == 0 && loops_without_edge_work?(state)
+      end
+      @any_match_loop = @list_of_match_loops.any?
     end
 
     # :nodoc:
@@ -90,6 +117,29 @@ module Mica::Regex
     def static_parts : {Array(Int32), Array(Int32), Array(Int32), Array(Edge), Array(Bool)}
       {@steps, @table, @match_edges, @list_of_edges, @list_of_ascii_loops}
     end
+
+    # True when at least `WIDE_LOOP_BYTES` of the byte values lead from
+    # *state* back to it with no assertion and no slot (`.*`, `[^"]*`): a
+    # run there is likely long. A narrow loop (`\s+` between words) ends
+    # within a byte or two, where the run costs more than it saves.
+    #
+    # It reads one cell per byte class, not per byte: the DFA is built on a
+    # program's first search, and reading 256 cells per state there made
+    # the first search of `(?:(a+)|(b+)|...|(z+))` over 60 KB take about
+    # 43 us where per-class reads take about 35 us.
+    private def loops_without_edge_work?(state : Int32) : Bool
+      row = state * @class_count
+      looping_bytes = 0
+      @class_count.times do |class_index|
+        step = @steps.unsafe_fetch(row + class_index)
+        next unless step >= 0 && step & STEP_TAKES_EDGE == 0 && step >> 2 == row
+        looping_bytes += @byte_classes.class_size(class_index)
+      end
+      looping_bytes >= WIDE_LOOP_BYTES
+    end
+
+    # See `loops_without_edge_work?`.
+    private WIDE_LOOP_BYTES = 64
 
     private def ascii_loop?(state : Int32) : Bool
       row = state * @class_count
@@ -196,6 +246,25 @@ module Mica::Regex
     # returns `LazyDFA::GAVE_UP` there.
     def search(haystack : Bytes, start : Int32, search_start : Int32, slots : Slice(Int64), scratch : Slice(Int64),
                meter : SearchMeter?, stop : Int32 = Int32::MAX) : {Int32, Int32}
+      if @any_match_loop
+        search_with_match_loops(haystack, start, search_start, slots, scratch, meter, stop)
+      else
+        search_without_match_loops(haystack, start, search_start, slots, scratch, meter, stop)
+      end
+    end
+
+    # The two loops of `search`, made from one body: the search loop of a
+    # pattern that runs it is tight enough that a branch it never takes
+    # still slows it, so the match-loop run (see `@list_of_match_loops`) is
+    # compiled only into the loop of the DFAs that have a looping match
+    # state.
+    {% for match_loops in [true, false] %}
+      private def search_{{ (match_loops ? "with" : "without").id }}_match_loops(haystack : Bytes, start : Int32,
+                                                                                 search_start : Int32,
+                                                                                 slots : Slice(Int64),
+                                                                                 scratch : Slice(Int64),
+                                                                                 meter : SearchMeter?,
+                                                                                 stop : Int32) : {Int32, Int32}
       # Slot counts are small: plain loops beat the `memset` and `memcpy`
       # calls of `fill` and `copy_from`.
       scratch.size.times { |index| scratch.unsafe_put(index, PikeVM::UNSET) }
@@ -229,6 +298,20 @@ module Mica::Regex
             pending_edge = edge_index
             found = at
             undecided = false
+            # In a state whose match path always holds
+            # (`@list_of_match_loops`), a run of bytes that lead back to it
+            # with no edge work (`.*`) ends a match at each byte with the
+            # same slots: the run is read in one loop, within the bytes the
+            # meter allowed, and the match ends where it stops.
+            {% if match_loops %}
+            if @list_of_match_loops.unsafe_fetch(state_of(row)) && at < allowed_end && at < stop && at < size
+              run_end = match_loop_end(haystack, row, at, Math.min(Math.min(size, stop), allowed_end))
+              if run_end > at
+                found = at = run_end
+                next
+              end
+            end
+            {% end %}
           elsif @list_of_shadows.unsafe_fetch(state_of(row))
             undecided = true
           end
@@ -243,10 +326,10 @@ module Mica::Regex
           charged = at
           allowed_end = at + meter.readable(Math.min(Math.min(size, stop) - at, PrefilterScan::CHARGE_CHUNK), at)
         end
+        bound = Math.min(Math.min(size, stop), allowed_end)
         # The common step (no edge work, no match path ahead) in a tight
         # loop up to the next bound, and short of the last byte, whose
         # position the check above must see: one table load per byte.
-        bound = Math.min(Math.min(size, stop), allowed_end)
         tight_bound = Math.min(bound, size - 1)
         entered = at
         while at < tight_bound
@@ -289,6 +372,27 @@ module Mica::Regex
       record_match(edges[pending_edge], found, scratch, slots) if pending_edge >= 0
       meter.try(&.charge(at - charged + 1, charged))
       {undecided ? LazyDFA::GAVE_UP : found, at - start}
+    end
+    {% end %}
+
+    # Where a run from *at* of bytes that lead back to the state at *row*
+    # with no edge work stops, before *run_end*; *at* itself when the byte
+    # there leaves the state (see `search`).
+    @[AlwaysInline]
+    private def match_loop_end(haystack : Bytes, row : Int32, at : Int32, run_end : Int32) : Int32
+      steps = @steps.to_unsafe
+      class_of = @byte_classes.table
+      bytes = haystack.to_unsafe
+      loop_step = steps[row &+ class_of[bytes[at]]]
+      return at unless loop_step >= 0 && loop_step >> 2 == row && loop_step & STEP_TAKES_EDGE == 0
+      at &+= 1
+      if @list_of_ascii_loops.unsafe_fetch(state_of(row)) && at < run_end
+        at = Core::ByteScan.skip_ascii(haystack, at, run_end)
+      end
+      while at < run_end && steps[row &+ class_of[bytes[at]]] == loop_step
+        at &+= 1
+      end
+      at
     end
 
     # Writes the match that *edge* completes at *at* into *slots*: the
@@ -368,9 +472,17 @@ module Mica::Regex
     @list_of_shadows = [] of Bool
     @seen : Array(Int32)
 
+    # A table of at most this many cells (one row per NFA state, the most
+    # the DFA can have) is allocated once at that size instead of grown
+    # row by row, which would allocate about twice the final table.
+    PRESIZED_TABLE_CELLS = 4096
+
     def initialize(@program : Program, @byte_classes : ByteClasses)
       @dfa_state_of = Array(Int32).new(@program.state_count, -1)
       @seen = Array(Int32).new(@program.state_count, -1)
+      if OnePassDFA.small?(@program, @byte_classes)
+        @table = Array(Int32).new(OnePassDFA.most_cells(@program, @byte_classes).to_i32)
+      end
     end
 
     def build : OnePassDFA?

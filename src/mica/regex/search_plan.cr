@@ -40,10 +40,21 @@ module Mica::Regex
     # the start state passes `\A` before it reads a byte): a search is
     # then anchored at its offset, and the reverse DFA is not needed.
     getter? anchored_start : Bool
+    # True when the program is anchored at its start and its one-pass DFA
+    # is small (`OnePassDFA.small?`): its first search builds the one-pass
+    # DFA and reads the groups with the match (see `defers_groups?`).
+    getter? reads_groups_on_first_search : Bool
+    # True when the empty string matches at every offset (a path from the
+    # start state reaches a match through no byte and no assertion, as in
+    # `.*` or `(a*)`): the leftmost match then starts at the search's
+    # offset (see `anchored_at_offset?`).
+    getter? empty_match_everywhere : Bool
     # The lazily built parts are published through atomics, so a search
     # on another thread that sees one sees it fully built.
     @reverse = Atomic(LazyDFA?).new(nil)
     @reverse_with_reversed_classes = Atomic(LazyDFA?).new(nil)
+    # See `list_of_required_bytes_past_literals`.
+    @required_bytes_past_literals = Atomic(Array(UInt8)?).new(nil)
     # Set once `widen_reverse` found the widened DFA too large.
     @widen_refused = Atomic(Int32).new(0)
     # Match starts found by the backtracker (see `backtrack_start?`).
@@ -93,6 +104,37 @@ module Mica::Regex
       @prefilter = literal_set ? Prefilter.new(literal_set) : nil
       @literal_search = !!literal_set.try(&.exact?)
       @anchored_start = SearchPlan.anchored_start?(@program)
+      @reads_groups_on_first_search = @anchored_start && OnePassDFA.small?(@program, @byte_classes)
+      @empty_match_everywhere = SearchPlan.empty_match_everywhere?(@program)
+    end
+
+    # The required bytes (`Program#list_of_required_bytes`, rarest first)
+    # that some prefix literal lacks (all of them without literals): a
+    # prefilter candidate shows nothing of them, so a search with the
+    # prefilter still checks they are present. Found on first use.
+    def list_of_required_bytes_past_literals : Array(UInt8)
+      if found = @required_bytes_past_literals.get(:acquire)
+        return found
+      end
+      list_of_bytes = @program.list_of_required_bytes
+      if literal_set = @program.literal_set
+        list_of_literals = literal_set.list_of_literals
+        list_of_bytes = list_of_bytes.reject { |byte| list_of_literals.all?(&.includes?(byte)) }
+      end
+      # Threads racing here find the same bytes; the first to publish wins.
+      @required_bytes_past_literals.compare_and_set(nil, list_of_bytes)
+      @required_bytes_past_literals.get(:acquire) || list_of_bytes
+    end
+
+    # True when a search from an offset may run anchored there, as the
+    # leftmost match starts there if anywhere: every match starts at the
+    # start of the text (`anchored_start?`), or the empty string matches
+    # at every offset (`empty_match_everywhere?`) and the match need not
+    # end at the end of the text (*end_anchored* false; under it the
+    # empty match at the offset does not count).
+    @[AlwaysInline]
+    def anchored_at_offset?(end_anchored : Bool) : Bool
+      @anchored_start || (@empty_match_everywhere && !end_anchored)
     end
 
     # The fewest bytes and the first bytes of a match (see `StartFilter`),
@@ -136,6 +178,23 @@ module Mica::Regex
         end
       end
       true
+    end
+
+    # True when a path from *program*'s start state reaches a match state
+    # through splits and group saves alone: no byte, and no assertion.
+    def self.empty_match_everywhere?(program : Program) : Bool
+      visited = Set(Int32).new
+      list_of_pending = [program.start_state]
+      while index = list_of_pending.pop?
+        next unless visited.add?(index)
+        state = program.state_at(index)
+        case state.kind
+        when .match? then return true
+        when .split? then list_of_pending << state.next_state << state.alternate
+        when .save?  then list_of_pending << state.next_state
+        end
+      end
+      false
     end
 
     # The reverse lazy DFA (built on first use; replaced once by
@@ -238,15 +297,23 @@ module Mica::Regex
     # costs less than a later call would, and the groups are read with the
     # match.
     #
-    # Until a search has built the one-pass DFA (the first capture pass
-    # does), this is false, so a search that never matches never pays for
-    # building it. Once a caller has read the groups of a match found
-    # without them (`note_groups_read`), it is false for good: this
-    # program's callers read groups, and reading them later costs more
-    # than reading them with the match.
+    # Until a caller has read groups, this is also true while the one-pass
+    # DFA is not built: a program's first searches find their match
+    # without groups, so a caller that only asks whether and where it
+    # matched never pays for a capture pass or for building the one-pass
+    # DFA (the first capture pass, when a caller reads the groups, builds
+    # it). The exception is a program anchored at its start whose one-pass
+    # DFA is small (`reads_groups_on_first_search?`): it makes one attempt,
+    # the one-pass DFA reads that attempt with its groups in one pass, and
+    # building that DFA costs little, so its first search builds it. Once a
+    # caller has read the groups of a match found without them
+    # (`note_groups_read`), it is false for good: this program's callers
+    # read groups, and reading them later costs more than reading them
+    # with the match.
     def defers_groups? : Bool
-      @program.slot_count > 2 && @one_pass_built.get == 1 && @one_pass.get.nil? &&
-        @groups_read.get(:relaxed) == 0
+      return false unless @program.slot_count > 2 && @groups_read.get(:relaxed) == 0
+      return @one_pass.get.nil? if @one_pass_built.get == 1
+      !@reads_groups_on_first_search
     end
 
     # True while unanchored short searches of this program usually find

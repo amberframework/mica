@@ -339,14 +339,18 @@ module Mica::Regex
             chunk_end = at + meter.readable(wanted_end - at, at)
           end
           at &+= 1
-          if entry == current && at >= runs_from && entry & SPECIAL == 0 && !words &&
-             (scan.nil? || entry & START_ENTRY == 0)
+          if entry == current && at >= runs_from && !words && entry & ASCII_LOOP == 0 &&
+             (scan.nil? || entry & START_ENTRY == 0) &&
+             (entry & SPECIAL == 0 || (!earliest && cache.list_of_marks.unsafe_fetch(entry // stride) == MARK_MATCH))
             # A state that loops to itself (`.*`, `[^"]*`, the start state
             # between candidates): its row stays, so the loads of the run
             # no longer wait on each other. A short run (the letters of a
             # word under `\w+`) pays more for leaving this loop than it
             # saves, so after one the search steps byte by byte for
-            # `RUN_BACKOFF` bytes.
+            # `RUN_BACKOFF` bytes. In a match state (`(?s).*`, unless the
+            # search wants the earliest end) each byte of the run ends a
+            # match, so the last one read ends the latest (see below). A
+            # state flagged `ASCII_LOOP` skips its ASCII runs faster below.
             run_start = at
             row = entry & ROW_MASK
             while at < chunk_end && table[row &+ class_table[bytes[at]]] == entry
@@ -358,8 +362,16 @@ module Mica::Regex
           if entry & (SPECIAL | START_ENTRY | ASCII_LOOP) != 0
             if entry & ASCII_LOOP != 0
               # Every ASCII byte leads back here and the state is neither
-              # a match, dead nor a start: a run of them changes nothing.
-              at = Core::ByteScan.skip_ascii(haystack, at, chunk_end)
+              # dead nor a start: a run of them changes nothing, except
+              # that in a match state each of them ends a match.
+              if entry & SPECIAL != 0
+                last_end = at - 1
+                break if earliest
+                at = Core::ByteScan.skip_ascii(haystack, at, chunk_end)
+                last_end = at - 1
+              else
+                at = Core::ByteScan.skip_ascii(haystack, at, chunk_end)
+              end
               next
             end
             break if scan && entry & START_ENTRY != 0
