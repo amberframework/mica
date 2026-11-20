@@ -154,7 +154,9 @@ module Mica::Regex
           if Prefilter.rank(rare) >= COMMON_RANK
             @needle_offset = first
             @pair_gap = second - first
-            @list_of_needles.clear << literal[first] << literal[second]
+            @list_of_needles.clear
+            @list_of_needles << literal[first]
+            @list_of_needles << literal[second]
             @list_of_pair_tests << pair
             # Two common bytes (`t` and `h` of `the`) may take a third,
             # the least common of the rest.

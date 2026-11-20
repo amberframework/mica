@@ -168,7 +168,8 @@ module Mica::Regex
         state = program.state_at(index)
         case state.kind
         when .split?
-          list_of_pending << state.next_state << state.alternate
+          list_of_pending << state.next_state
+          list_of_pending << state.alternate
         when .save?
           list_of_pending << state.next_state
         when .look?
@@ -280,8 +281,10 @@ module Mica::Regex
         state = program.state_at(index)
         case state.kind
         when .match? then return true
-        when .split? then list_of_pending << state.next_state << state.alternate
-        when .save?  then list_of_pending << state.next_state
+        when .split?
+          list_of_pending << state.next_state
+          list_of_pending << state.alternate
+        when .save? then list_of_pending << state.next_state
         end
       end
       false

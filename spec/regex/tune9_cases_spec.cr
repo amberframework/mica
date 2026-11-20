@@ -97,7 +97,7 @@ describe "Mica::Regex round 9 case work" do
     end
 
     it "does not hold when a match can end before the end" do
-      {"abc", "a$|b", "(?m)x$", "x$?", "[ -~]*XYZ.*"}.each do |source|
+      {"abc", "a$|b", "(?m)x$", "x(?:$)?", "[ -~]*XYZ.*"}.each do |source|
         {source, Mica::Regex::SearchPlan.ends_at_text_end?(program_of(source))}.should eq({source, false})
       end
     end

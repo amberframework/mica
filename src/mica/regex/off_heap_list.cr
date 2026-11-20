@@ -25,7 +25,8 @@ module Mica::Regex
   #
   # ```
   # list = Mica::Regex::OffHeapList(Int32).new(4)
-  # list << 7 << 8
+  # list << 7
+  # list << 8
   # list.sum # => 15
   # list.free
   # ```
@@ -90,29 +91,29 @@ module Mica::Regex
 
     # Appends *value*, growing the buffer when it is full.
     @[AlwaysInline]
-    def <<(value : T) : self
+    def <<(value : T) : Nil
       reserve(@capacity == 0 ? 4 : @capacity * 2) if @size == @capacity
       @buffer[@size] = value
       @size += 1
-      self
     end
 
     # Appends every element of *values*.
-    def concat(values : Indexable(T)) : self
+    def concat(values : Indexable(T)) : Nil
       reserve(Math.max(@size + values.size, @capacity * 2)) if @size + values.size > @capacity
       values.each_with_index { |value, index| @buffer[@size + index] = value }
       @size += values.size
-      self
     end
 
     # Appends *value* (same as `<<`).
-    def push(value : T) : self
+    def push(value : T) : Nil
       self << value
     end
 
     # Removes and returns the last element; raises `IndexError` when empty.
     def pop : T
-      pop? || raise IndexError.new("OffHeapList is empty")
+      raise IndexError.new("OffHeapList is empty") if @size == 0
+      @size -= 1
+      @buffer[@size]
     end
 
     # Removes and returns the last element, or nil when empty.
@@ -124,36 +125,33 @@ module Mica::Regex
     end
 
     # Removes every element, keeping the buffer.
-    def clear : self
+    def clear : Nil
       @size = 0
-      self
     end
 
     # Keeps the first *count* elements (at most `size`).
-    def truncate(count : Int32) : self
+    def truncate(count : Int32) : Nil
       @size = count.clamp(0, @size)
-      self
     end
 
     # Grows the buffer to room for at least *wanted* elements.
-    def reserve(wanted : Int32) : self
-      return self if wanted <= @capacity
+    def reserve(wanted : Int32) : Nil
+      return if wanted <= @capacity
       reallocate(wanted)
     end
 
     # Appends *count* copies of *value*.
-    def fill_to(count : Int32, value : T) : self
+    def fill_to(count : Int32, value : T) : Nil
       reserve(count)
       while @size < count
         @buffer[@size] = value
         @size += 1
       end
-      self
     end
 
     # Shrinks the buffer to the elements it holds.
-    def trim : self
-      return self if @size == @capacity
+    def trim : Nil
+      return if @size == @capacity
       if @size == 0
         free
       else
@@ -198,22 +196,20 @@ module Mica::Regex
 
     # Returns the buffer to libc and leaves the list empty. Freeing an
     # empty or already freed list does nothing.
-    def free : self
+    def free : Nil
       LibC.free(@buffer.as(Void*)) unless @buffer.null?
       @buffer = Pointer(T).null
       @size = 0
       @capacity = 0
-      self
     end
 
-    private def reallocate(capacity : Int32) : self
+    private def reallocate(capacity : Int32) : Nil
       bytes = LibC::SizeT.new(capacity) * sizeof(T)
       grown = LibC.realloc(@buffer.as(Void*), bytes).as(Pointer(T))
       raise OutOfMemoryError.new("Out of memory: a list of #{capacity} elements (#{bytes} bytes)") if grown.null?
       OffHeap.count(bytes) if capacity > @capacity
       @buffer = grown
       @capacity = capacity
-      self
     end
   end
 end

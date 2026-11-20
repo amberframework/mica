@@ -351,7 +351,8 @@ module Mica::Regex
         else
           context.check_growth(bounds.size // 2 + 1)
           context.charge_range
-          bounds << first << last
+          bounds << first
+          bounds << last
         end
         stream.advance
         if stream.done?

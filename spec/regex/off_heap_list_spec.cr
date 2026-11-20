@@ -22,7 +22,8 @@ describe Mica::Regex::OffHeapList do
   describe "#pop?" do
     it "removes from the end and answers nil when empty" do
       list = Mica::Regex::OffHeapList(UInt8).new(2)
-      list << 1_u8 << 2_u8
+      list << 1_u8
+      list << 2_u8
       list.pop?.should eq(2_u8)
       list.pop?.should eq(1_u8)
       list.pop?.should be_nil
@@ -44,7 +45,8 @@ describe Mica::Regex::OffHeapList do
     it "appends a slice and keeps records whole" do
       list = Mica::Regex::OffHeapList(Mica::Regex::Program::Transition).new
       transitions = [Mica::Regex::Program::Transition.new(1_u8, 2_u8, 3), Mica::Regex::Program::Transition.new(4_u8, 5_u8, -6)]
-      list.concat(transitions).concat(transitions)
+      list.concat(transitions)
+      list.concat(transitions)
       list.to_a.should eq(transitions + transitions)
       list.should eq(transitions + transitions)
       list.free
