@@ -257,10 +257,11 @@ module Mica::Regex
     # Reads the deadline, then validates the haystack (unless the lease
     # validated this very string).
     private def begin_call : Nil
-      # The deadline is read at the start of every call, before the
+      # The deadline is checked at the start of every call, before the
       # haystack is read, so a timeout that has already passed fails even a
-      # search too short to reach a clock checkpoint.
-      @meter.enforce_deadline(0)
+      # search too short to reach a clock checkpoint. The meter read the
+      # clock as the call began.
+      @meter.enforce_start_deadline(0)
       lease = @lease
       plan = @plan
       # A lease remembers the last `String` it validated (strings are
@@ -987,13 +988,16 @@ module Mica::Regex
     # after the end of the match before it, which contains the byte, so an
     # iteration call reads each byte at most once per required byte.
     private def required_byte_missing?(bytes : Bytes, byte_index : Int32) : Bool
-      if @engine.auto?
-        # A literal prefilter already skips to where a match can start, and
-        # each byte checked reads the haystack again, so Auto checks only
-        # the rarest byte, and only without a prefilter.
-        return false if @plan.try(&.prefilter)
-        list_of_bytes = @program.list_of_required_bytes
-        checked = Math.min(list_of_bytes.size, 1)
+      if @engine.auto? && (plan = @plan)
+        # Auto checks every required byte (at most
+        # `StartFilter::MAX_REQUIRED_BYTES`), rarest first: `memchr` reads
+        # many bytes per cycle where the DFA reads about one, and the rarest
+        # byte by English text is not always the absent one (`x` ranks rarer
+        # than `y` in `(x+x+)+y` over a run of x's). With a literal
+        # prefilter, which already skips to where a literal starts, only the
+        # bytes some literal lacks (`y` there, past the literal `xx`).
+        list_of_bytes = plan.prefilter ? plan.list_of_required_bytes_past_literals : @program.list_of_required_bytes
+        checked = list_of_bytes.size
       elsif @first_search
         list_of_bytes = @program.required_bytes_for_first_search(bytes.size - byte_index, @meter, byte_index) || return false
         checked = list_of_bytes.size

@@ -49,6 +49,8 @@ module Mica::Regex
     # on another thread that sees one sees it fully built.
     @reverse = Atomic(LazyDFA?).new(nil)
     @reverse_with_reversed_classes = Atomic(LazyDFA?).new(nil)
+    # See `list_of_required_bytes_past_literals`.
+    @required_bytes_past_literals = Atomic(Array(UInt8)?).new(nil)
     # Set once `widen_reverse` found the widened DFA too large.
     @widen_refused = Atomic(Int32).new(0)
     # Match starts found by the backtracker (see `backtrack_start?`).
@@ -99,6 +101,24 @@ module Mica::Regex
       @literal_search = !!literal_set.try(&.exact?)
       @anchored_start = SearchPlan.anchored_start?(@program)
       @empty_match_everywhere = SearchPlan.empty_match_everywhere?(@program)
+    end
+
+    # The required bytes (`Program#list_of_required_bytes`, rarest first)
+    # that some prefix literal lacks (all of them without literals): a
+    # prefilter candidate shows nothing of them, so a search with the
+    # prefilter still checks they are present. Found on first use.
+    def list_of_required_bytes_past_literals : Array(UInt8)
+      if found = @required_bytes_past_literals.get(:acquire)
+        return found
+      end
+      list_of_bytes = @program.list_of_required_bytes
+      if literal_set = @program.literal_set
+        list_of_literals = literal_set.list_of_literals
+        list_of_bytes = list_of_bytes.reject { |byte| list_of_literals.all?(&.includes?(byte)) }
+      end
+      # Threads racing here find the same bytes; the first to publish wins.
+      @required_bytes_past_literals.compare_and_set(nil, list_of_bytes)
+      @required_bytes_past_literals.get(:acquire) || list_of_bytes
     end
 
     # True when a search from an offset may run anchored there, as the

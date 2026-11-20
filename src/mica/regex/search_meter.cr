@@ -76,6 +76,16 @@ module Mica::Regex
       @work_meter.enforce_deadline("while searching") { Core::Position.new(at.to_i64) }
     end
 
+    # Raises `Mica::DeadlineExceededError` when the timeout passed before
+    # the call began, as the call starts. The meter's clock started with
+    # the call (`initialize`, `restart`), so a positive timeout has not
+    # passed yet and the clock is not read again; a zero or negative one
+    # has, whatever the clock reads.
+    def enforce_start_deadline(at : Int32) : Nil
+      timeout = @budget.timeout
+      enforce_deadline(at) if timeout && !timeout.positive?
+    end
+
     private def exceeded(at : Int32) : Nil
       verdict = @work_meter.verdict
       return if verdict.within?
