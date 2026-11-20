@@ -1008,6 +1008,15 @@ Set `MICA_COMPLEXITY_REPORT=path` to write every measurement.
 
 ## Conformance
 
+**PCRE2 is the reference.** Mica::Regex replaces PCRE2 inside Crystal, so
+PCRE2's answer is the expected answer, and the only engine Mica is checked
+against is the one it replaces. The RE2 and Rust corpora below are kept as
+extra test cases, judged only by whether Mica gives PCRE2's answer on the
+same pattern and input: a case fails when Mica's result differs from
+PCRE2 10.49's, whatever the corpus engine expects. When the corpus engine
+expects something else and Mica gives PCRE2's answer, the case is a
+divergence, recorded with its reason and approved by the project lead.
+
 `spec/regex/search_conformance_spec.cr` runs two pinned corpora with fixed
 denominators (roadmap 6.5):
 
@@ -1028,12 +1037,13 @@ denominators (roadmap 6.5):
 Every case lands in exactly one list. **Excluded** cases are outside the
 Crystal dialect's search semantics (`excluded.tsv`, with the reason).
 **Divergent** cases are those where the corpus engine expects one result
-and PCRE2 10.49 gives exactly Mica's result, so the difference is the
+and Mica gives exactly PCRE2 10.49's result, so the difference is the
 dialect's meaning, not a Mica defect (`divergences.tsv`; PCRE2's results
 come from `spec/regex/differential/pcre2_search_oracle.cr`, a standalone
 program run by hand, recorded in
 `spec/regex/fixtures/pcre2_search_verdicts.json`). Every other case is
-**eligible** and must pass, on every engine path that applies: the
+**eligible**: it must give PCRE2's result (which the corpus engine expects
+too) and pass, on every engine path that applies: the
 default path (literal search, prefilters, lazy DFAs, one-pass DFA), the
 same without the literal accelerators, R2's two phases, the Pike VM, and
 the backtracker when the haystack fits. The lists must
@@ -1041,11 +1051,11 @@ partition the corpus and match the files exactly, and `denominator.json`
 pins the counts. `MICA_REGEX_CONFORMANCE_WRITE=1` rewrites the files from
 a run, so any change shows in review.
 
-| Corpus | Total | Passed | Failed | Excluded | Divergent |
-|---|---|---|---|---|---|
-| RE2 search | 7,552 | 3,616 | 0 | 3,936 | 0 |
-| Rust regex | 1,203 | 566 | 0 | 529 | 108 |
-| PCRE2 10.49 testdata subjects (valid UTF-8) | 14,916 | 7,735 | 0 | 7,174 | 7 |
+| Corpus | Total | Passed | Failed | Excluded | Divergent | Resource-limit |
+|---|---|---|---|---|---|---|
+| RE2 search | 7,552 | 3,616 | 0 | 3,936 | 0 | - |
+| Rust regex | 1,203 | 566 | 0 | 529 | 108 | - |
+| PCRE2 10.49 testdata subjects (valid UTF-8) | 14,916 | 7,735 | 0 | 7,174 | 0 | 7 |
 
 RE2 exclusions: 3,776 leftmost-longest (POSIX) columns and 160 uses of
 `\C`. Rust exclusions: 117 `utf8 = false` and 101 `unicode = false`
@@ -1066,14 +1076,15 @@ Rust divergences, each confirmed against PCRE2:
 | Multiline `^` does not match after a newline that ends the haystack | 3 |
 | The Crystal dialect accepts `(?)` | 1 |
 
-Every divergence row ends in an approval column. `.github/CODEOWNERS`
+Every divergence row (and every PCRE2 resource-limit row) ends in an
+approval column. `.github/CODEOWNERS`
 gives `/conformance/regex/` (and the gates that read it) to the project
 lead, so a change to these lists needs the owner's approving review, and
-the RE2, Rust and PCRE2 census gates fail on any divergence row whose
+the RE2, Rust and PCRE2 gates fail on any such row whose
 approval column is not `approved by @login` for an owner of that path. A
 regenerated list keeps the approval of every row that stays and marks a
-new row `pending CODEOWNERS review`. The 108 Rust rows are pending the
-owner's review, so the Rust gate fails until they are approved.
+new row `pending CODEOWNERS review`. The project lead approved all 108
+Rust rows on 2026-11-19 (`approved by @crimson-knight`).
 
 **PCRE2 testdata (milestone R3).** `conformance/regex/pcre2/convert_testdata.rb`
 also writes every subject line of the PCRE2 10.49 testinput files
@@ -1090,12 +1101,34 @@ dialect, 1,247 with data modifiers and 708 whose pattern has a modifier
 that changes how pcre2test searches (`replace`, `use_offset_limit`,
 `match_invalid_utf` and the like), 147 invalid UTF-8 subjects (milestone
 R4), 122 lines pcre2test itself cannot read, and a few patterns that are
-not valid UTF-8, that both engines reject, or that pass a compile limit. The 7
-divergences (`search_divergences.tsv`, pending the owner's review) are all
-patterns that set their own match, depth or heap limit with
-`(*LIMIT_...)`: PCRE2 stops there, while Mica reads and ignores those
-settings and answers within its own limits. Every engine path agrees on
-all 7,735 eligible subjects.
+not valid UTF-8, that both engines reject, or that pass a compile limit.
+There are no divergences (`search_divergences.tsv` is empty). Seven
+subjects are **resource-limit** rows (`search_resource_limits.tsv`, each
+approved by the project lead): their patterns set PCRE2's own match, depth
+or heap limit with `(*LIMIT_MATCH=...)`, `(*LIMIT_DEPTH=...)` or
+`(*LIMIT_HEAP=...)`, and PCRE2 gives up there. They test how PCRE2 stops a
+runaway match, not what a pattern means, so they sit outside the replay,
+and `spec/regex/bail_early_spec.cr` covers them instead (see Bail-early
+suite below). Mica reads and ignores those settings and answers within its
+own limits. `search_denominator.json` pins the resource-limit count beside
+the others. Every engine path agrees on all 7,735 eligible subjects.
+
+**Bail-early suite.** `spec/regex/bail_early_spec.cr` proves Mica stops
+early with its named limit error when the caller's budget or deadline runs
+out. It covers the 7 PCRE2 resource-limit patterns on their PCRE2
+haystacks, every family of the benchmark ReDoS set
+(`bench/regex/corpus/redos.json`) at a 16 MiB haystack, and a
+`CompileOptions::FirstLine` search of `"\n" + "a" * 16 MiB` (the regression
+test for the FirstLine deadline fix). Each case runs through every public
+entry point (`match`, `match!`, `matches?`, `match_at_byte_index`,
+`matches_at_byte_index?`, `search`, `each_match`, `scan`, `gsub`, `sub`,
+`split`) twice: under a small work budget (8 operations for the PCRE2
+cases, one `CLOCK_INTERVAL` of 65,536 for the rest), where it must raise
+`SearchLimitError` naming `max_work`, and under a deadline (expired for
+the PCRE2 cases, whose searches finish in microseconds; 100 us for the
+rest), where it must raise `Mica::DeadlineExceededError` no later than the
+deadline plus one clock interval of work plus 20 ms of slack. A returned
+result or any other error fails the case.
 
 The replay also found an R2 defect: `\p{Cs}` (surrogates only, which no
 UTF-8 haystack holds) crashed the compiler; it now compiles to a state

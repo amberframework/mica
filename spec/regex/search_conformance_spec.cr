@@ -4,7 +4,10 @@ require "./support/conformance_approval"
 
 # The search conformance gate of milestone R2 (roadmap 6.5): the RE2
 # search tests and the Rust regex TOML tests, each pinned by commit and
-# sha256, with a fixed denominator. Every case lands in exactly one list:
+# sha256, with a fixed denominator. PCRE2 is the engine Mica replaces in
+# Crystal, so these corpora are extra test cases judged only by whether
+# Mica gives PCRE2's answer; the corpus engine's own expectation decides
+# only which list a case lands in. Every case lands in exactly one list:
 #
 # - **excluded** (conformance/regex/<corpus>/excluded.tsv): outside the
 #   Crystal dialect's search semantics (leftmost-longest columns, regex
@@ -15,7 +18,8 @@ require "./support/conformance_approval"
 #   else, and PCRE2 10.49 (spec/regex/fixtures/pcre2_search_verdicts.json)
 #   gives exactly Mica's result, so the difference is the Crystal dialect's
 #   meaning, not a Mica defect;
-# - **eligible**: every other case, and every eligible case must pass, on
+# - **eligible**: every other case, and every eligible case must give
+#   PCRE2's result (which is also the corpus engine's) and pass, on
 #   every engine path that applies: the default path (literal search,
 #   prefilter, lazy DFAs, one-pass DFA), the same without the literal
 #   accelerators, R2's two phases, the Pike VM, and the backtracker.
@@ -59,17 +63,21 @@ module SearchConformance
         end
       end
     end
-    if job.expected.same_result?(mica, job.groups_compared)
-      mismatch = engine_mismatch(job, mica)
-      return Classified.new(id, pattern, "failed", mismatch) if mismatch
-      return Classified.new(id, pattern, "passed", "")
+    # PCRE2 is the engine Mica replaces, so its answer is the expected one:
+    # a case passes or diverges only when Mica gives exactly PCRE2's result.
+    unless verdict
+      return Classified.new(id, pattern, "failed", "no PCRE2 verdict recorded; Mica gives #{mica.describe}")
     end
-    if verdict && verdict.same_result?(mica)
+    unless verdict.same_result?(mica)
+      return Classified.new(id, pattern, "failed",
+        "PCRE2 10.49 gives #{verdict.describe}, Mica gives #{mica.describe} (the corpus expects #{job.expected.describe})")
+    end
+    unless job.expected.same_result?(mica, job.groups_compared)
       return Classified.new(id, pattern, "divergent", divergence_reason(job, mica))
     end
-    detail = "expected #{job.expected.describe}, Mica gives #{mica.describe}"
-    detail += ", PCRE2 gives #{verdict.describe}" if verdict
-    Classified.new(id, pattern, "failed", detail)
+    mismatch = engine_mismatch(job, mica)
+    return Classified.new(id, pattern, "failed", mismatch) if mismatch
+    Classified.new(id, pattern, "passed", "")
   end
 
   # Runs the other engine paths and returns how one disagrees, or nil.
