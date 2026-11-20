@@ -97,6 +97,14 @@ module Mica::Regex
     getter dead_row : Array(Int32)
     @reverse_nfa : ReverseNFA?
     @relevant_flags : Int32
+    # The slot of each start's flags in a cache's start table, in two
+    # parts (the flags below `UNANCHORED`, and the three above), so the table
+    # holds one entry per combination of the flags this DFA reads rather
+    # than one per value below `START_FLAG_COUNT` (see `start_slot`).
+    @start_slots_low = StaticArray(UInt16, 64).new(0_u16)
+    @start_slots_high = StaticArray(UInt16, 8).new(0_u16)
+    # The entries of a cache's start table (see `start_slot`).
+    getter start_slot_count : Int32
     @unicode_words : Bool
     @final_lf : Bool
     # The first word symbol (see `word_symbol`); every symbol below it is a
@@ -196,6 +204,36 @@ module Mica::Regex
       relevant |= PREVIOUS_WORD if ascii_words
       relevant |= PREVIOUS_UNICODE_WORD if @unicode_words
       @relevant_flags = relevant
+      start_flags = relevant & (START_FLAG_COUNT - 1)
+      low_mask = start_flags & (UNANCHORED - 1)
+      high_mask = start_flags >> 6
+      low_bits = low_mask.popcount
+      64.times { |value| @start_slots_low[value] = LazyDFA.gather(value, low_mask).to_u16 if value & ~low_mask == 0 }
+      8.times { |value| @start_slots_high[value] = (LazyDFA.gather(value, high_mask) << low_bits).to_u16 if value & ~high_mask == 0 }
+      @start_slot_count = 1 << start_flags.popcount
+    end
+
+    # The slot of a start with *flags* (a start's flags, within
+    # `@relevant_flags` and below `START_FLAG_COUNT`) in a cache's start
+    # table: the flags' bits gathered to the low end, one slot per
+    # combination.
+    @[AlwaysInline]
+    def start_slot(flags : Int32) : Int32
+      (@start_slots_low.unsafe_fetch(flags & (UNANCHORED - 1)) | @start_slots_high.unsafe_fetch(flags >> 6)).to_i32
+    end
+
+    # The bits of *value* that *mask* selects, packed to the low end.
+    protected def self.gather(value : Int32, mask : Int32) : Int32
+      packed = 0
+      position = 0
+      bits = mask
+      while bits != 0
+        lowest = bits & -bits
+        packed |= 1 << position if value & lowest != 0
+        position += 1
+        bits &= bits - 1
+      end
+      packed
     end
 
     # The NFA states a DFA state can hold: the program's, or (reverse) the
@@ -780,7 +818,7 @@ module Mica::Regex
     # returns its key, or nil when the DFA must give up (a Unicode word
     # assertion next to a non-ASCII byte). Writes into *builder*, and
     # charges each NFA state the closure visits.
-    def next_key(key : Array(Int32), symbol : Int32, builder : DFABuilder, meter : SearchMeter) : Array(Int32)?
+    def next_key(key : Slice(Int32), symbol : Int32, builder : DFABuilder, meter : SearchMeter) : Slice(Int32)?
       @reverse ? reverse_next_key(key, symbol, builder, meter) : forward_next_key(key, symbol, builder, meter)
     end
 
@@ -793,59 +831,77 @@ module Mica::Regex
       @byte_classes.representative(symbol).to_i32
     end
 
-    private def forward_next_key(key : Array(Int32), symbol : Int32, builder : DFABuilder,
-                                 meter : SearchMeter) : Array(Int32)?
+    # How following a closure ended (see `explore_closure`).
+    private enum Closure
+      # Every path ended at a consuming state or a failed assertion.
+      Open
+      # A path reached the match state.
+      Matched
+      # An assertion needs the Pike VM.
+      Quit
+    end
+
+    # Follows the closure from NFA state *seed* before *byte* (read as
+    # *symbol*, after a position described by *flags*), recording the
+    # consuming states it reaches in *builder*, and charging *meter* one
+    # operation per state visited.
+    private def explore_closure(seed : Int32, flags : Int32, byte : Int32, symbol : Int32, builder : DFABuilder,
+                                meter : SearchMeter) : Closure
+      builder.push(seed)
+      while current = builder.pop?
+        while true
+          break unless builder.visit(current)
+          meter.charge(1, 0)
+          state = @program.state_at(current)
+          case state.kind
+          when .byte_range?, .sparse?
+            builder.output(current)
+            break
+          when .match?
+            builder.clear_stack
+            return Closure::Matched
+          when .split?
+            builder.push(state.alternate)
+            current = state.next_state
+          when .save?
+            current = state.next_state
+          when .look?
+            verdict = forward_look(Program::LookKind.new(state.argument), flags, byte, symbol)
+            if verdict.nil?
+              builder.clear_stack
+              return Closure::Quit
+            end
+            break unless verdict
+            current = state.next_state
+          else
+            break
+          end
+        end
+      end
+      Closure::Open
+    end
+
+    private def forward_next_key(key : Slice(Int32), symbol : Int32, builder : DFABuilder,
+                                 meter : SearchMeter) : Slice(Int32)?
       flags = key.unsafe_fetch(0)
       byte = symbol_byte(symbol)
       builder.reset
       matched = false
       quit = false
-      explore = ->(seed : Int32) do
-        builder.push(seed)
-        while current = builder.pop?
-          while true
-            break unless builder.visit(current)
-            meter.charge(1, 0)
-            state = @program.state_at(current)
-            case state.kind
-            when .byte_range?, .sparse?
-              builder.output(current)
-              break
-            when .match?
-              matched = true
-              builder.clear_stack
-              break
-            when .split?
-              builder.push(state.alternate)
-              current = state.next_state
-            when .save?
-              current = state.next_state
-            when .look?
-              verdict = forward_look(Program::LookKind.new(state.argument), flags, byte, symbol)
-              if verdict.nil?
-                quit = true
-                builder.clear_stack
-                break
-              end
-              break unless verdict
-              current = state.next_state
-            else
-              break
-            end
-          end
-        end
-        nil
-      end
       (1...key.size).each do |index|
-        explore.call(key.unsafe_fetch(index))
+        outcome = explore_closure(key.unsafe_fetch(index), flags, byte, symbol, builder, meter)
+        matched = outcome.matched?
+        quit = outcome.quit?
         break if matched || quit
       end
       boundary = byte < 0x80 || byte >= 0xC0
       if !matched && !quit && (flags & START_PENDING != 0 || (flags & UNANCHORED != 0 && boundary))
-        explore.call(@program.start_state)
+        outcome = explore_closure(@program.start_state, flags, byte, symbol, builder, meter)
+        matched = outcome.matched?
+        quit = outcome.quit?
       end
       return nil if quit
-      return matched ? DEAD_MATCH_KEY : DEAD_KEY if byte < 0 && symbol == edge_symbol
+      return dead_key(builder, matched) if byte < 0 && symbol == edge_symbol
       next_flags = matched ? MATCH_BEHIND : 0
       next_flags |= UNANCHORED if flags & UNANCHORED != 0 && !matched
       next_flags |= symbol_flags(byte, symbol)
@@ -861,7 +917,7 @@ module Mica::Regex
       end
       targets = builder.targets
       if targets.size == 1 && next_flags & UNANCHORED == 0
-        return matched ? DEAD_MATCH_KEY : DEAD_KEY
+        return dead_key(builder, matched)
       end
       targets
     end
@@ -914,8 +970,8 @@ module Mica::Regex
       end
     end
 
-    private def reverse_next_key(key : Array(Int32), symbol : Int32, builder : DFABuilder,
-                                 meter : SearchMeter) : Array(Int32)?
+    private def reverse_next_key(key : Slice(Int32), symbol : Int32, builder : DFABuilder,
+                                 meter : SearchMeter) : Slice(Int32)?
       reverse_nfa = @reverse_nfa || raise Mica::Error.new("internal error: no reverse NFA")
       flags = key.unsafe_fetch(0)
       byte = symbol_byte(symbol)
@@ -942,7 +998,7 @@ module Mica::Regex
       end
       return nil if quit
       accepted = false if flags & PREVIOUS_TAIL != 0
-      return accepted ? DEAD_MATCH_KEY : DEAD_KEY if byte < 0
+      return dead_key(builder, accepted) if byte < 0
       next_flags = accepted ? MATCH_BEHIND : 0
       next_flags |= symbol_flags(byte, symbol)
       next_flags |= PREVIOUS_TAIL if byte & 0xC0 == 0x80
@@ -952,7 +1008,7 @@ module Mica::Regex
         reverse_nfa.each_byte_target(node, byte.to_u8) { |target| builder.add_target(target) }
       end
       targets = builder.sorted_targets
-      return accepted ? DEAD_MATCH_KEY : DEAD_KEY if targets.size == 1
+      return dead_key(builder, accepted) if targets.size == 1
       targets
     end
 
@@ -984,25 +1040,29 @@ module Mica::Regex
       end
     end
 
-    # The keys of the two dead states.
-    DEAD_KEY       = [0]
-    DEAD_MATCH_KEY = [MATCH_BEHIND]
+    # :nodoc:
+    # The key of a dead state, `DEAD_MATCH` when *matched*, written into
+    # *builder* (no allocation).
+    def dead_key(builder : DFABuilder, matched : Bool) : Slice(Int32)
+      builder.begin_targets(matched ? MATCH_BEHIND : 0)
+      builder.targets
+    end
 
     # :nodoc:
-    # The key of a start state with *flags*: no NFA states yet (forward), or
-    # the match state (reverse).
-    def start_key(flags : Int32) : Array(Int32)
+    # The key of a start state with *flags*, written into *builder*: no NFA
+    # states yet (forward), or the match state (reverse).
+    def start_key(flags : Int32, builder : DFABuilder) : Slice(Int32)
+      builder.begin_targets(flags)
       if reverse_nfa = @reverse_nfa
-        [flags, reverse_nfa.start_node]
-      else
-        [flags]
+        builder.add_target(reverse_nfa.start_node)
       end
+      builder.targets
     end
 
     # :nodoc:
     # True when a state with *key* is a forward start state: no threads,
     # and a new one starts at every character.
-    def start_like?(key : Array(Int32)) : Bool
+    def start_like?(key : Slice(Int32)) : Bool
       !@reverse && key.size == 1 && key.unsafe_fetch(0) & UNANCHORED != 0
     end
   end

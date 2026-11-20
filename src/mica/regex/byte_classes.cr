@@ -10,35 +10,35 @@ module Mica::Regex
     # The number of classes (1 to 256).
     getter class_count : Int32
     @class_of : StaticArray(UInt8, 256)
-    @list_of_representatives : Array(UInt8)
+    # The first byte of each class, in order (the first `class_count`).
+    @list_of_representatives : StaticArray(UInt8, 256)
 
     def initialize(program : Program)
       boundaries = StaticArray(Bool, 257).new(false)
-      mark = ->(low : Int32, high : Int32) do
-        boundaries[low] = true
-        boundaries[high + 1] = true
-      end
       program.each_distinct_state do |state, _|
-        mark.call(state.low.to_i32, state.high.to_i32) if state.kind.byte_range?
+        ByteClasses.mark(pointerof(boundaries), state.low.to_i32, state.high.to_i32) if state.kind.byte_range?
       end
-      program.each_transition_range { |low, high| mark.call(low.to_i32, high.to_i32) }
-      mark.call(0x0A, 0x0A)
-      mark.call(0x30, 0x39)
-      mark.call(0x41, 0x5A)
-      mark.call(0x5F, 0x5F)
-      mark.call(0x61, 0x7A)
-      mark.call(0x80, 0xBF)
+      program.each_transition_range { |low, high| ByteClasses.mark(pointerof(boundaries), low.to_i32, high.to_i32) }
+      {% for range in [{0x0A, 0x0A}, {0x30, 0x39}, {0x41, 0x5A}, {0x5F, 0x5F}, {0x61, 0x7A}, {0x80, 0xBF}] %}
+        ByteClasses.mark(pointerof(boundaries), {{range[0]}}, {{range[1]}})
+      {% end %}
       @class_of = StaticArray(UInt8, 256).new(0_u8)
-      @list_of_representatives = [0_u8]
+      @list_of_representatives = StaticArray(UInt8, 256).new(0_u8)
       current = 0
       (1..255).each do |byte|
         if boundaries[byte]
           current += 1
-          @list_of_representatives << byte.to_u8
+          @list_of_representatives[current] = byte.to_u8
         end
         @class_of[byte] = current.to_u8
       end
       @class_count = current + 1
+    end
+
+    # Marks the class boundaries *low* and *high* + 1 in *boundaries*.
+    protected def self.mark(boundaries : StaticArray(Bool, 257)*, low : Int32, high : Int32) : Nil
+      boundaries.value[low] = true
+      boundaries.value[high + 1] = true
     end
 
     # Returns the class of *byte*.

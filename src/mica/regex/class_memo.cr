@@ -372,6 +372,10 @@ module Mica::Regex
       end
       table = shared_table(list_of_states, list_of_transitions, ledger)
       entry = node_states[0]
+      # The trie and the node states were for this build alone.
+      trie.release
+      GC.free(node_states.to_unsafe.as(Void*))
+      GC.free(node_states.as(Void*))
       Block.new(list_of_states, list_of_transitions, entry, table, entry_targets(list_of_states[entry], table, ledger))
     end
 

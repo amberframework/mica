@@ -42,10 +42,12 @@ module Mica::Regex
   class BoundedBacktracker
     # The largest visited bitset, in bits (256 Ki bits, 32 KiB).
     MAX_VISITED_BITS = 256_i64 * 1024
-    # Entries in the first chunk of the job stack (4 KiB).
-    FIRST_JOB_CHUNK = 256_i64
+    # Entries in the first chunk of the job stack (512 bytes): a first
+    # search of a short pattern pushes a few dozen jobs, and each byte it
+    # allocates counts toward the collector's next collection.
+    FIRST_JOB_CHUNK = 32_i64
     # The most chunks the job stack has: the doubling chunks reach
-    # `MAX_VISITED_BITS` + 1 entries within 11, whatever was cut before.
+    # `MAX_VISITED_BITS` + 1 entries within 14, whatever was cut before.
     MAX_JOB_CHUNKS = 16
 
     # The most visits a search that marks pairs in a hash set makes (see
@@ -172,7 +174,7 @@ module Mica::Regex
     # `detach`): its bitset at its largest (`MAX_VISITED_BITS`, 32 KiB),
     # the first chunks of its job stack and a hash set of up to
     # `SPARE_SPARSE_SLOTS` pairs.
-    SPARE_JOB_CHUNKS   =    2
+    SPARE_JOB_CHUNKS   =    5
     SPARE_SPARSE_SLOTS = 2048
 
     # Points this backtracker at *program* for its next searches, keeping

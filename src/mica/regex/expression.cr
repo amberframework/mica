@@ -54,10 +54,21 @@ module Mica::Regex
         raise ArgumentError.new("CompileOptions::MatchInvalidUtf arrives in Mica::Regex milestone R4")
       end
       @program = Syntax.compile(@source, dialect: @dialect, compile_limits: compile_limits, options: @options)
-      @list_of_name_entries = Expression.name_entries(@program.list_of_group_names)
-      @names_by_group = {} of Int32 => String
-      @list_of_name_entries.each { |entry| @names_by_group[entry.capture_index] = entry.group_name }
+      list_of_group_names = @program.list_of_group_names
+      if list_of_group_names.empty?
+        # Most patterns name no group: they share one empty table, read only.
+        @list_of_name_entries = list_of_group_names
+        @names_by_group = NO_GROUP_NAMES
+      else
+        @list_of_name_entries = Expression.name_entries(list_of_group_names)
+        @names_by_group = {} of Int32 => String
+        @list_of_name_entries.each { |entry| @names_by_group[entry.capture_index] = entry.group_name }
+      end
     end
+
+    # The group-name table of every pattern without named groups (never
+    # changed: `name_table` hands out copies).
+    private NO_GROUP_NAMES = {} of Int32 => String
 
     # The name table entries of *list_of_group_names*, in PCRE2 order.
     protected def self.name_entries(list_of_group_names : Array(Ast::GroupName)) : Array(Ast::GroupName)

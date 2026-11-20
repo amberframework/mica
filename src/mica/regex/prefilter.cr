@@ -71,8 +71,12 @@ module Mica::Regex
     getter minimum_length : Int32
     @masks : Slice(UInt64)
     @literals : Array(Bytes)
-    # For each byte, the literals that start with it (bit per literal).
-    @starting_with : StaticArray(UInt64, 256)
+    # For each byte, the slot in `@starting_with` of the literals that start
+    # with it (slot 0 holds none), and for each slot those literals as a bit
+    # per literal: 256 bytes and a word per distinct first byte, rather
+    # than a word for every byte value.
+    @first_byte_slots : Slice(UInt8)
+    @starting_with : Slice(UInt64)
     # For each literal of at most eight bytes, its bytes as a little-endian
     # word and the mask of those bytes (0 for a longer literal), so
     # `literal_at` compares it with one load (see `literal_fits_at?`).
@@ -85,8 +89,15 @@ module Mica::Regex
     def initialize(@literal_set : LiteralSet)
       @literals = @literal_set.list_of_literals
       @minimum_length = @literal_set.minimum_length
-      @starting_with = StaticArray(UInt64, 256).new(0_u64)
-      @literals.each_with_index { |literal, index| @starting_with[literal[0]] |= 1_u64 << index }
+      @first_byte_slots = Slice(UInt8).new(256, 0_u8)
+      slot_count = 1
+      @literals.each do |literal|
+        next unless @first_byte_slots[literal[0]] == 0
+        @first_byte_slots[literal[0]] = slot_count.to_u8
+        slot_count += 1
+      end
+      @starting_with = Slice(UInt64).new(slot_count, 0_u64)
+      @literals.each_with_index { |literal, index| @starting_with[@first_byte_slots[literal[0]]] |= 1_u64 << index }
       @list_of_words = Slice(UInt64).new(@literals.size, 0_u64)
       @list_of_word_masks = Slice(UInt64).new(@literals.size, 0_u64)
       @literals.each_with_index do |literal, index|
@@ -176,7 +187,7 @@ module Mica::Regex
     # bytes compared.
     def literal_at(haystack : Bytes, at : Int32, meter : SearchMeter, candidates : UInt64 = UInt64::MAX) : Int32
       return -1 if at >= haystack.size
-      bits = candidates & @starting_with.unsafe_fetch(haystack.unsafe_fetch(at))
+      bits = candidates & @starting_with.unsafe_fetch(@first_byte_slots.unsafe_fetch(haystack.unsafe_fetch(at)))
       # With eight bytes left, a literal of at most eight bytes is compared
       # as one masked word.
       whole_word = at + 8 <= haystack.size
