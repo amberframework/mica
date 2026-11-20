@@ -82,7 +82,10 @@ describe "Mica::Regex R3 engines" do
     end
 
     it_satisfies "REGEX-R3-dfa", "reads $ and \\Z before a final line feed and multiline ^ as PCRE2 does" do
-      span("a$", "a\n").should eq({[0_i64, 1_i64], Mica::Regex::Searcher::Path::OnePass})
+      # Unanchored, every match of a$ ends at the end: the search runs from the end.
+      span("a$", "a\n").should eq({[0_i64, 1_i64], Mica::Regex::Searcher::Path::LazyDFA})
+      # One that can end elsewhere keeps the one-pass path at its prefix candidate.
+      span("a(?:$|b)", "a\n").should eq({[0_i64, 1_i64], Mica::Regex::Searcher::Path::OnePass})
       span("a*a$", "a\n").should eq({[0_i64, 1_i64], Mica::Regex::Searcher::Path::LazyDFA})
       span("a\\Z", "a\n\n").first.should be_nil
       span("(?m)^", "a\n").first.should eq([0, 0])
