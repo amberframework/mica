@@ -261,6 +261,32 @@ describe Mica::Core::UTF8 do
     end
   end
 
+  it "finds a non-ASCII byte at every position of short text, read word by word" do
+    (0..72).each do |size|
+      Mica::Core::UTF8.first_invalid_offset(Bytes.new(size, 0x61_u8)).should be_nil
+      size.times do |position|
+        text = Bytes.new(size, 0x61_u8)
+        text[position] = 0xFF_u8
+        Mica::Core::UTF8.first_invalid_offset(text).should eq(position)
+        next unless position + 2 <= size
+        # A valid two-byte character at the same place is not a fault.
+        text[position] = 0xC3_u8
+        text[position + 1] = 0xA9_u8
+        Mica::Core::UTF8.first_invalid_offset(text).should be_nil
+      end
+    end
+  end
+
+  it_satisfies "MICA-MEMORY-SAFETY", "reads no byte outside the slice it is given" do
+    backing = Bytes.new(96, 0xFF_u8)
+    (0..64).each do |size|
+      window = backing[16, size]
+      window.fill(0x61_u8)
+      Mica::Core::UTF8.first_invalid_offset(window).should be_nil
+      backing.fill(0xFF_u8)
+    end
+  end
+
   it_satisfies "MICA-MEMORY-SAFETY", "never reads past the limit it is given" do
     bytes = "\u20AC\u20AC".to_slice
     Mica::Core::UTF8.decode(bytes, 3, 6).should eq({0x20AC, 3})

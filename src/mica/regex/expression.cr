@@ -154,6 +154,7 @@ module Mica::Regex
         end
       end
       searcher = Searcher.open(@program, string, limits, timeout, @cache_pool)
+      searcher.note_required_bytes_present(byte_index) if short.screened?
       # The work a candidate search did before it declined counts against
       # the call's allowance.
       searcher.meter.charge(spent, byte_index) if spent > 0

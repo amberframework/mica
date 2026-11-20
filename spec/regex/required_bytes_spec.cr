@@ -21,6 +21,28 @@ describe "Mica::Regex required bytes" do
     end
   end
 
+  describe "StartFilter#rejects?" do
+    it_satisfies "REGEX-R3-required-bytes", "rejects a short span exactly when it lacks a start or a required byte" do
+      program = compiled_program("x[a-z]*@[a-z]*\\.[a-z]+")
+      filter = program.plan.start_filter
+      list_of_required = filter.list_of_required_bytes
+      list_of_required.should_not be_empty
+      random = Random.new(20261120)
+      alphabet = "xab@.z".to_slice
+      3000.times do
+        size = random.rand(0..80)
+        text = Bytes.new(size) { alphabet[random.rand(alphabet.size)] }
+        from = random.rand(0..size)
+        span = text[from, size - from]
+        anchored = random.next_bool
+        last = anchored ? from : size - filter.minimum_bytes
+        no_start = from > size - filter.minimum_bytes || (from..last).none? { |at| at < size && text[at] == 0x78_u8 }
+        missing = list_of_required.any? { |byte| !span.includes?(byte) }
+        filter.rejects?(text, from, anchored).should eq(no_start || missing)
+      end
+    end
+  end
+
   describe "Searcher#find" do
     it_satisfies "REGEX-R3-required-bytes", "runs no engine when a byte every match needs is missing" do
       haystack = "a" * 10_000
