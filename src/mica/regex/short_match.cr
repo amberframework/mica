@@ -82,15 +82,28 @@ module Mica::Regex
     # successors' are, and a successor still on the stack is a loop.
     def self.longest_match(program : Program) : Int32?
       # UNSEEN, ON_STACK, or the longest path in bytes.
-      longest = Array(Int32).new(program.state_count, UNSEEN)
-      list_of_pending = [program.start_state]
-      while index = list_of_pending.last?
+      # Both lists are scratch outside the collector's heap, freed on the
+      # way out; the stack grows in the helpers through its pointer.
+      longest = OffHeapList(Int32).new(program.state_count, UNSEEN)
+      list_of_pending = OffHeapList(Int32).new(16)
+      begin
+        longest_path(program, longest, pointerof(list_of_pending))
+      ensure
+        longest.free
+        list_of_pending.free
+      end
+    end
+
+    private def self.longest_path(program : Program, longest : OffHeapList(Int32),
+                                  list_of_pending : OffHeapList(Int32)*) : Int32?
+      list_of_pending.value << program.start_state
+      while index = list_of_pending.value.last?
         if longest[index] == UNSEEN
           longest[index] = ON_STACK
           return nil unless push_successors(program, index, program.state_at(index), longest, list_of_pending)
           next
         end
-        list_of_pending.pop
+        list_of_pending.value.pop
         next if longest[index] >= 0
         state = program.state_at(index)
         result = case state.kind
@@ -120,8 +133,8 @@ module Mica::Regex
 
     # Pushes the successors of *state* whose longest path is not known yet;
     # false when one is on the stack (a loop).
-    private def self.push_successors(program : Program, index : Int32, state : Program::State, longest : Array(Int32),
-                                     list_of_pending : Array(Int32)) : Bool
+    private def self.push_successors(program : Program, index : Int32, state : Program::State, longest : OffHeapList(Int32),
+                                     list_of_pending : OffHeapList(Int32)*) : Bool
       case state.kind
       when .byte_range?, .save?, .look?
         push_successor(state.next_state, longest, list_of_pending)
@@ -137,10 +150,10 @@ module Mica::Regex
       end
     end
 
-    private def self.push_successor(successor : Int32, longest : Array(Int32), list_of_pending : Array(Int32)) : Bool
+    private def self.push_successor(successor : Int32, longest : OffHeapList(Int32), list_of_pending : OffHeapList(Int32)*) : Bool
       length = longest[successor]
       return false if length == ON_STACK
-      list_of_pending << successor if length == UNSEEN
+      list_of_pending.value << successor if length == UNSEEN
       true
     end
 

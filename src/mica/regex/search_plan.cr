@@ -95,7 +95,7 @@ module Mica::Regex
       # A program with class runs (`Program::ClassRun`) writes its states
       # out here, once, so the plan's engines read each state from one
       # array (`Program#state_at`); its first searches built nothing.
-      @program.list_of_states
+      @program.materialized_states
       @short_searches = Atomic(Int32).new(@program.first_search_count)
       @backtracked_starts = Atomic(Int32).new(@program.first_searches_ended? ? FirstSearch::SEARCHES : 0)
       @byte_classes = ByteClasses.new(@program)
@@ -159,7 +159,8 @@ module Mica::Regex
     # `StartOfText` assertion before it reads a byte or matches.
     def self.anchored_start?(program : Program) : Bool
       visited = VisitedStates.new(program.state_count)
-      list_of_pending = [program.start_state]
+      list_of_pending = OffHeapList(Int32).new(8)
+      list_of_pending << program.start_state
       while index = list_of_pending.pop?
         next unless visited.add?(index)
         state = program.state_at(index)
@@ -178,28 +179,38 @@ module Mica::Regex
         end
       end
       true
+    ensure
+      list_of_pending.try(&.free)
+      visited.try(&.free)
     end
 
     # The NFA states a walk from the start state has visited: bits on the
     # stack for a program of up to `SMALL_STATES` states (no allocation, as
-    # the first search of most programs needs), a set for a larger one.
+    # the first search of most programs needs), and for a larger one in a
+    # bitset outside the collector's heap, which `free` returns.
     private struct VisitedStates
       SMALL_STATES = 512
 
       @bits = StaticArray(UInt64, 8).new(0_u64)
-      @large : Set(Int32)? = nil
+      @large = OffHeapList(UInt64).new
 
       def initialize(state_count : Int32)
-        @large = Set(Int32).new if state_count > SMALL_STATES
+        @large.fill_to((state_count + 63) // 64, 0_u64) if state_count > SMALL_STATES
+      end
+
+      def free : Nil
+        @large.free
       end
 
       # Marks *index* visited; false when it already was.
       def add?(index : Int32) : Bool
-        if large = @large
-          return large.add?(index)
-        end
         word = index >> 6
         bit = 1_u64 << (index & 63)
+        unless @large.empty?
+          return false if @large.unsafe_fetch(word) & bit != 0
+          @large.unsafe_put(word, @large.unsafe_fetch(word) | bit)
+          return true
+        end
         return false if @bits[word] & bit != 0
         @bits[word] |= bit
         true
@@ -210,7 +221,8 @@ module Mica::Regex
     # through splits and group saves alone: no byte, and no assertion.
     def self.empty_match_everywhere?(program : Program) : Bool
       visited = VisitedStates.new(program.state_count)
-      list_of_pending = [program.start_state]
+      list_of_pending = OffHeapList(Int32).new(8)
+      list_of_pending << program.start_state
       while index = list_of_pending.pop?
         next unless visited.add?(index)
         state = program.state_at(index)
@@ -221,6 +233,9 @@ module Mica::Regex
         end
       end
       false
+    ensure
+      list_of_pending.try(&.free)
+      visited.try(&.free)
     end
 
     # The reverse lazy DFA (built on first use; replaced once by
@@ -261,7 +276,7 @@ module Mica::Regex
       return if @widen_refused.get == 1
       current = @reverse.get
       return if current && current.with_reversed_classes?
-      return if @program.list_of_class_blocks.empty?
+      return if @program.class_blocks.empty?
       # The widened DFA has at least the program's nodes; only when those fit
       # are the reversed classes counted.
       scratch_per_node = DFABuilder::BYTES_PER_STATE.to_i64 * 2

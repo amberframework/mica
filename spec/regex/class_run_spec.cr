@@ -42,6 +42,11 @@ private RUN_PATTERNS = {
   "x[a-z]{64}",
   "[^\\n]{40}",
   "\\w{2}",
+  "[a-z]{1,64}",
+  "\\w{2,40}?x",
+  "[0-9A-Za-z_]{0,100}",
+  "\\p{L}{3,40}",
+  "(?:[-a-z.]{1,256})\\.[a-z]{1,6}",
 }
 
 describe Mica::Regex::Program::ClassRun do
@@ -95,6 +100,43 @@ describe Mica::Regex::Program::ClassRun do
     haystack = "b" * 300
     found = Mica::Regex::Expression.new("[0-9A-Za-z_]{256}", compile_limits: TRUSTED).match(haystack, limits: LIMITS)
     found.try(&.byte_end(0)).should eq(256)
+  end
+
+  it_satisfies "REGEX-R2-compiler", "holds the optional copies of a counted class as an optional run, not unrolled" do
+    program = program_of("\\A[-a-zA-Z0-9@:%._\\+~#=]{1,256}\\z")
+    optional = program.list_of_runs.find(&.optional).should_not be_nil
+    optional.copies.should eq(255)
+    optional.stride.should eq(2)
+    # The split of each copy is worked out, not written: the program's own
+    # list holds a handful of states for 513.
+    program.runs_pending?.should be_true
+    program.state_count.should be > 510
+    limits = Mica::Regex::SearchLimits::TRUSTED_INPUT
+    pattern = Mica::Regex::Expression.new("\\A[-a-zA-Z0-9@:%._\\+~#=]{1,256}\\z", compile_limits: TRUSTED)
+    pattern.match("a" * 256, limits: limits).should_not be_nil
+    pattern.match("a" * 257, limits: limits).should be_nil
+    pattern.match("", limits: limits).should be_nil
+  end
+
+  it_satisfies "REGEX-R2-compiler", "matches through an optional run as through the copies one by one, greedy and lazy" do
+    # The reference wraps the class in a group, which no run holds, so its
+    # copies are compiled one by one; the whole matches must agree.
+    {
+      {"[a-z]{1,64}", "([a-z]){1,64}"}, {"[a-z]{2,64}?q", "([a-z]){2,64}?q"}, {"\\w{0,40}x", "(\\w){0,40}x"},
+      {"\\p{L}{3,40}", "(\\p{L}){3,40}"}, {"x[0-9]{0,33}y", "x([0-9]){0,33}y"},
+      {"[-a-z.]{1,256}\\.[a-z]{1,6}", "([-a-z.]){1,256}\\.([a-z]){1,6}"},
+    }.each do |source, unrolled|
+      expression = Mica::Regex::Expression.new(source, compile_limits: TRUSTED)
+      expression.program.list_of_runs.any?(&.optional).should be_true
+      reference = Mica::Regex::Expression.new(unrolled, compile_limits: TRUSTED)
+      reference.program.list_of_runs.any?(&.optional).should be_false
+      {"", "q", "abcq", "a" * 70 + "q", "x" + "7" * 33 + "y", "x" + "7" * 34 + "y", "δ" * 50,
+       "mail.example.com", "a" * 300 + ".org", "x" * 39 + "x"}.each do |haystack|
+        found = expression.match(haystack, limits: LIMITS)
+        expected = reference.match(haystack, limits: LIMITS)
+        {found.try(&.byte_begin(0)), found.try(&.byte_end(0))}.should eq({expected.try(&.byte_begin(0)), expected.try(&.byte_end(0))})
+      end
+    end
   end
 
   it_satisfies "REGEX-R2-compiler", "searches alike on every engine path" do

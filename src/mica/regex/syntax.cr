@@ -46,6 +46,8 @@ module Mica::Regex
       parsed, estimate = front_half(pattern, dialect, compile_limits, options, ledger, work_meter)
       Translator.translate(parsed, dialect, ledger, work_meter)
       Report.new(parsed.capture_count, parsed.list_of_group_names, estimate, ledger.bytes, work_meter.operations)
+    ensure
+      ledger.try(&.free_owned_blocks)
     end
 
     # Returns the error `check` would raise for *pattern*, or nil when the
@@ -66,6 +68,8 @@ module Mica::Regex
       ledger = new_ledger(compile_limits, meter)
       parsed, _estimate = front_half(pattern, dialect, compile_limits, options, ledger, work_meter)
       Translator.translate(parsed, dialect, ledger, work_meter)
+    ensure
+      ledger.try(&.free_owned_blocks)
     end
 
     # Compiles *pattern* into the `Program` the engines run: the front half,
@@ -81,6 +85,10 @@ module Mica::Regex
       hir = Translator.translate(parsed, dialect, ledger, work_meter)
       work_meter.add_units(estimate)
       Compiler.compile(hir, estimate, compile_limits, ledger, work_meter)
+    ensure
+      # The program took the blocks it uses; any left were for a compile
+      # that stopped early.
+      ledger.try(&.free_owned_blocks)
     end
 
     # Parses *pattern* into its syntax tree (no class lowering or preflight).
@@ -89,6 +97,8 @@ module Mica::Regex
       work_meter = meter || Core::WorkMeter.new(COMPILE_WORK_BUDGET)
       ledger = new_ledger(compile_limits, meter)
       parser_for(pattern, dialect, compile_limits, options, ledger, work_meter).parse
+    ensure
+      ledger.try(&.free_owned_blocks)
     end
 
     private def self.front_half(pattern : String | Bytes, dialect : Dialect, limits : CompileLimits,

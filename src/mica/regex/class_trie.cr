@@ -19,9 +19,11 @@ module Mica::Regex
 
     # Each node's first and last edge (`NONE` for a node with no edges).
     # Children are created after their parents.
-    getter list_of_nodes = [] of {Int32, Int32}
+    # Both lists sit outside the collector's heap (`OffHeapList`); the
+    # owner frees them with `release`.
+    getter list_of_nodes = OffHeapList({Int32, Int32}).new
     # Every edge, linked per node through `next_sibling`.
-    getter list_of_edges = [] of Edge
+    getter list_of_edges = OffHeapList(Edge).new
     @node_high_water = 0
     @edge_high_water = 0
 
@@ -52,14 +54,11 @@ module Mica::Regex
       end
     end
 
-    # Frees the trie and its lists. Its owner calls this once it is done
-    # with the trie, which nothing else holds and which is never shifted.
+    # Frees the trie's lists. Its owner calls this once, when it is done
+    # with the trie, which nothing else holds.
     def release : Nil
-      GC.free(@list_of_nodes.to_unsafe.as(Void*))
-      GC.free(@list_of_nodes.as(Void*))
-      GC.free(@list_of_edges.to_unsafe.as(Void*))
-      GC.free(@list_of_edges.as(Void*))
-      GC.free(self.as(Void*))
+      @list_of_nodes.free
+      @list_of_edges.free
     end
 
     # Returns true when the set had no UTF-8 sequences (surrogates only,

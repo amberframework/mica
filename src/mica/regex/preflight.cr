@@ -38,9 +38,9 @@ module Mica::Regex
       # stack never holds more values than there are nodes.
       capacity = Math.max(pattern.node_count, 1)
       ledger.charge_array(capacity, sizeof(Int64), "the preflight value stack", pattern.root.offset)
-      list_of_values = Array(Int64).new(capacity)
+      list_of_values = OffHeapList(Int64).new(capacity)
       ledger.charge_array(capacity, sizeof(Bool), "the preflight nullability stack", pattern.root.offset)
-      list_of_nullable = Array(Bool).new(capacity)
+      list_of_nullable = OffHeapList(Bool).new(capacity)
       limit = limits.max_program_states
       # The first subtree over the limit locates the error; the decision
       # waits for the root, because a {0} repetition can cancel a subtree.
@@ -72,6 +72,10 @@ module Mica::Regex
           Core::Position.new((first_offender || 0).to_i64))
       end
       total
+    ensure
+      # Scratch outside the collector's heap, for this call alone.
+      list_of_values.try(&.free)
+      list_of_nullable.try(&.free)
     end
 
     # States of the fixed parts every program has: group 0's two slot
@@ -145,7 +149,7 @@ module Mica::Regex
 
     # The bound for *node*, whose *child_count* children's bounds are on
     # top of *list_of_values*.
-    private def self.node_states(node : Ast::Node, list_of_values : Array(Int64), list_of_nullable : Array(Bool),
+    private def self.node_states(node : Ast::Node, list_of_values : OffHeapList(Int64), list_of_nullable : OffHeapList(Bool),
                                  child_count : Int32, ledger : AllocationLedger, meter : Core::WorkMeter) : Int64
       first_child = list_of_values.size - child_count
       case node
@@ -186,7 +190,7 @@ module Mica::Regex
     end
 
     # The saturating sum of the values from index *first* to the top.
-    private def self.sum_from(list_of_values : Array(Int64), first : Int32) : Int64
+    private def self.sum_from(list_of_values : OffHeapList(Int64), first : Int32) : Int64
       total = 0_i64
       (first...list_of_values.size).each { |index| total = add(total, list_of_values[index]) }
       total
@@ -209,7 +213,7 @@ module Mica::Regex
     # Returns true when *node* can match the empty string, from its
     # children's answers on top of *list_of_nullable*. Assertions count as
     # nullable (they consume nothing).
-    private def self.node_nullable?(node : Ast::Node, list_of_nullable : Array(Bool), child_count : Int32) : Bool
+    private def self.node_nullable?(node : Ast::Node, list_of_nullable : OffHeapList(Bool), child_count : Int32) : Bool
       first_child = list_of_nullable.size - child_count
       case node
       when Ast::Literal, Ast::CharClass, Ast::AnyCharacter, Ast::LineBreak

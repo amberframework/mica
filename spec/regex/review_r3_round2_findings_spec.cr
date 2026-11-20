@@ -74,9 +74,9 @@ private def allocated_bytes(&) : Int64
     GC.collect
     GC.disable
     begin
-      before = GC.stats.total_bytes
+      before = allocated_bytes_so_far
       yield
-      (GC.stats.total_bytes - before).to_i64
+      (allocated_bytes_so_far - before).to_i64
     ensure
       GC.enable
     end

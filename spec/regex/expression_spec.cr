@@ -225,18 +225,18 @@ describe Mica::Regex::Expression do
       {"\\0" * 200, "\\k<x>" * 200}.each do |replacement|
         named = replacement.includes?("k<") ? expression("(?<x>a)") : compiled
         GC.collect
-        before = GC.stats.total_bytes
+        before = allocated_bytes_so_far
         expect_raises(Mica::Regex::SearchLimitError, "max_output_bytes") do
           named.gsub(haystack, replacement, limits: small)
         end
-        (GC.stats.total_bytes - before).should be < 4.5 * cap
+        (allocated_bytes_so_far - before).should be < 4.5 * cap
       end
       GC.collect
-      before = GC.stats.total_bytes
+      before = allocated_bytes_so_far
       expect_raises(Mica::Regex::SearchLimitError, "max_output_bytes") do
         compiled.gsub(haystack, limits: small) { |matched| matched * 200 }
       end
-      (GC.stats.total_bytes - before).should be < 4.5 * cap
+      (allocated_bytes_so_far - before).should be < 4.5 * cap
     end
 
     it_satisfies "REGEX-R2-limits", "meters split's shortcut paths like every other search" do
