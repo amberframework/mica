@@ -98,7 +98,8 @@ module Mica::Regex
     # The most states `@list_of_states` may hold: the preflight's bound,
     # charged to the ledger, less the runs found ahead.
     @physical_capacity : Int32
-    # The room `@list_of_states` has now. It starts at `FIRST_STATE_ROOM`
+    # The room `@list_of_states` has now. It starts at the whole bound or
+    # at `FIRST_STATE_ROOM` (see there)
     # and doubles as the compiler emits, up to `@physical_capacity`: the
     # bound counts every class at its largest and every optional copy of
     # a counted repetition, so a program often needs a small part of it.
@@ -125,7 +126,7 @@ module Mica::Regex
       # bound, charged again, only when a run found ahead is emitted as
       # states after all (see `check_state_room`).
       @physical_capacity = Math.max(capacity - Math.min(@run_states_ahead, capacity.to_i64).to_i32, 1)
-      @state_room = Math.min(@physical_capacity, FIRST_STATE_ROOM)
+      @state_room = @physical_capacity <= WHOLE_ROOM_STATES ? @physical_capacity : FIRST_STATE_ROOM
       @list_of_states = Array(Program::State).new(@state_room)
       if PRESIZED_TRANSITIONS <= transition_bound <= @limits.max_program_states
         @ledger.charge_array(transition_bound, sizeof(Program::Transition), "the program transitions", 0)
@@ -144,8 +145,12 @@ module Mica::Regex
       @list_of_trie_states = [] of Int32
     end
 
-    # The states the state list starts with room for (see `@state_room`).
-    private FIRST_STATE_ROOM = 64
+    # The states the state list starts with room for when the bound is
+    # larger than `WHOLE_ROOM_STATES` (see `@state_room`); a list bound to
+    # at most that many states gets its whole room at once, which costs
+    # less than growing it.
+    private FIRST_STATE_ROOM  =   64
+    private WHOLE_ROOM_STATES = 2048
 
     # A program bound to have at least this many transitions gets its
     # transition list allocated once, at the bound, rather than grown.
@@ -994,7 +999,8 @@ module Mica::Regex
     # lives. The compiler alone holds the list, and never shifts it.
     private def trim_states : Nil
       states = @list_of_states
-      return if states.size + TRIM_SLACK_STATES >= @state_room
+      spare = @state_room - states.size
+      return if spare < TRIM_MIN_SPARE_STATES || spare < states.size // 4
       exact = Array(Program::State).new(states.size)
       exact.concat(states)
       GC.free(states.to_unsafe.as(Void*))
@@ -1013,8 +1019,10 @@ module Mica::Regex
       @list_of_transitions = exact
     end
 
-    # Spare room in the state list below this many states is kept.
-    private TRIM_SLACK_STATES = 4
+    # Spare room in the state list below this many states (1 KiB), or below
+    # a quarter of the states, is kept: copying the list costs more than
+    # the room.
+    private TRIM_MIN_SPARE_STATES = 64
 
     # Frees the compiler and the scratch lists the program does not keep
     # (its stacks, its class trie, the trie's states and the visited
