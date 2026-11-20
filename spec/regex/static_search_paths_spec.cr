@@ -1,9 +1,12 @@
 require "../spec_helper"
+require "../../src/mica/regex/static/write_the_source"
 
 # Milestone S2's static search paths: the literal prefilter with anchored
 # candidate searches, and the bounded backtracker that reads groups (and
-# finds a match's start) where the one-pass DFA cannot. Each must give the
-# runtime engine's answers, stay linear, and allocate nothing.
+# finds a match's start) where the one-pass DFA cannot; the start-byte scan
+# with anchored tries; and (milestone S3) tables read over UTF-8 decoder
+# states. Each must give the runtime engine's answers, stay linear, and
+# allocate nothing.
 private LITERAL_RUN  = Mica::Regex.static("abc[a-z]*Z")
 private RARE_LITERAL = Mica::Regex.static("Sherlock Holmes")
 private FOLDED       = Mica::Regex.static("Sherlock Holmes", ignore_case: true)
@@ -12,6 +15,9 @@ private HOST_PORT    = Mica::Regex.static(".*:(\\d+)")
 private LAST_DIGIT   = Mica::Regex.static("([a-z]*)[a-z]*(\\d)")
 private ALTERNATING  = Mica::Regex.static("((?:ab|a)*)(c)")
 private WORDY_NUMBER = Mica::Regex.static("([a-z]+)-(\\d+)")
+private COMMA_SPACES = Mica::Regex.static(",\\s*")
+private TWO_STARTS   = Mica::Regex.static("[ab]\\d{3}")
+private WORDS_HOLMES = Mica::Regex.static("\\w+\\s+Holmes")
 private LIMITS       = Mica::Regex::SearchLimits::TRUSTED_INPUT
 
 private def runtime(source : String, options = Mica::Regex::CompileOptions::None) : Mica::Regex::Expression
@@ -121,6 +127,75 @@ describe "Mica::Regex.static search paths" do
       before = GC.stats.total_bytes
       100.times { HOST_PORT.search_groups(haystack) { |groups| groups.byte_end(1) } }
       (GC.stats.total_bytes - before).should eq(0)
+    end
+  end
+
+  describe "the start-byte scan" do
+    it "finds the runtime engine's matches with an anchored try at each start byte" do
+      {
+        {COMMA_SPACES, ",\\s*"},
+        {TWO_STARTS, "[ab]\\d{3}"},
+      }.each do |pattern, source|
+        expression = runtime(source)
+        {"", ",", "a,b, c,\t\n d", "1, 2,3 ,", "aaa b12 a123 b9999", "é,é ,  é" * 5 + "a12é b345"}.each do |haystack|
+          (0..haystack.bytesize).each do |offset|
+            next if offset < haystack.bytesize && haystack.byte_at(offset) & 0xC0 == 0x80
+            expected = expression.search_span(haystack, offset, limits: LIMITS)
+            {source, haystack, offset, pattern.search_span(haystack, offset, limits: LIMITS)}
+              .should eq({source, haystack, offset, expected})
+            pattern.matches?(haystack, offset, limits: LIMITS).should eq(!expected.nil?)
+          end
+        end
+      end
+    end
+
+    it "stays linear when the anchored tries keep failing" do
+      # Every "a" starts a try that reads up to three digits and fails: the
+      # failed tries hand the search to the DFAs once they read more than
+      # the haystack.
+      haystack = "a12" * 30_000
+      TWO_STARTS.search_span(haystack, limits: per_byte(8)).should be_nil
+      TWO_STARTS.matches?(haystack, limits: per_byte(8)).should be_false
+      TWO_STARTS.search_span(haystack + "b123", limits: per_byte(8)).should eq(Mica::Regex::Span.new(90_000, 90_004))
+    end
+
+    it "allocates nothing" do
+      haystack = "a, b,c ,  d" * 50
+      COMMA_SPACES.search_span(haystack)
+      before = GC.stats.total_bytes
+      100.times { COMMA_SPACES.each_span(haystack) { |span| span.byte_end } }
+      (GC.stats.total_bytes - before).should eq(0)
+    end
+  end
+
+  describe "tables read over UTF-8 decoder states" do
+    it "holds a pattern whose byte-class rows are too wide for the static limits" do
+      WORDS_HOLMES.static?.should be_true
+      tables = Mica::Regex::Static::BuildTheTables.new("\\w+\\s+Holmes", Mica::Regex::CompileOptions::None).perform
+      tables.should be_a(Mica::Regex::Static::PatternTables)
+      if tables.is_a?(Mica::Regex::Static::PatternTables)
+        class_count = tables.list_of_classes.max + 1
+        # Fewer columns than byte classes: columns are shared.
+        tables.forward.edge_symbol.should be < class_count
+        tables.reverse.edge_symbol.should be < class_count
+        written = IO::Memory.new
+        Mica::Regex::Static::WriteTheSource.new(tables, written).perform
+        written.to_s.should start_with("static\n")
+      end
+    end
+
+    it "gives the runtime engine's answers on Unicode text" do
+      expression = runtime("\\w+\\s+Holmes")
+      {"Sherlock Holmes", "Шерлок Holmes", "x  Holmes", "Ωμέγα\tHolmes Holmes", "é Holmes", "Holmes",
+       "αβγ δεζ Holmesian", "日本語 Holmes 日本"}.each do |haystack|
+        (0..haystack.bytesize).each do |offset|
+          next if offset < haystack.bytesize && haystack.byte_at(offset) & 0xC0 == 0x80
+          expected = expression.search_span(haystack, offset, limits: LIMITS)
+          {haystack, offset, WORDS_HOLMES.search_span(haystack, offset, limits: LIMITS)}
+            .should eq({haystack, offset, expected})
+          WORDS_HOLMES.matches?(haystack, offset, limits: LIMITS).should eq(!expected.nil?)
+        end
+      end
     end
   end
 end

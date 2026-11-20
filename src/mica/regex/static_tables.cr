@@ -8,6 +8,16 @@ module Mica::Regex
   # match), then the other match states up to `special_limit`, then
   # (forward and reverse) the accelerated states up to `accel_limit`, then
   # the rest.
+  #
+  # `classes` maps each byte to its column. It is the pattern's byte
+  # classes, or, in a table built over UTF-8 decoder states (see
+  # `Static::DecoderAlphabet`), a map whose columns are shared by classes
+  # that no state reads at the same decoder state (a byte between
+  # characters, or inside one); the haystack is valid UTF-8, so a state
+  # never reads a byte its decoder state cannot have. `edge_symbol` (and
+  # the one after it, the final line feed) and `word_offset` (added to a
+  # non-ASCII byte's column inside a Unicode word character) are the
+  # columns past the classes.
   struct StaticDirection(T)
     getter shift : Int32
     getter relevant_flags : Int32
@@ -17,9 +27,13 @@ module Mica::Regex
     getter table : Slice(T)
     getter starts : Slice(T)
     getter accel_bytes : Slice(Int32)
+    getter classes : Slice(UInt8)
+    getter edge_symbol : Int32
+    getter word_offset : Int32
 
     def initialize(*, @shift : Int32, @relevant_flags : Int32, @context_mask : Int32, @special_limit : Int32,
-                   @accel_limit : Int32, @table : Slice(T), @starts : Slice(T), @accel_bytes : Slice(Int32))
+                   @accel_limit : Int32, @table : Slice(T), @starts : Slice(T), @accel_bytes : Slice(Int32),
+                   @classes : Slice(UInt8), @edge_symbol : Int32, @word_offset : Int32)
     end
 
     # The index into `starts` for state flags *flags*: the bits of

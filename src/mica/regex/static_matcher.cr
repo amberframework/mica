@@ -58,6 +58,9 @@ module Mica::Regex
     DEAD       = 0
     DEAD_MATCH = 1
     DEAD_LIMIT = 2
+    # The `start_scan` of a pattern whose searches do not scan for start
+    # bytes (`StaticByteScan::SKIP_ASCII` is -1).
+    NO_START_SCAN = -2
 
     getter source : String
     getter options : CompileOptions
@@ -71,12 +74,13 @@ module Mica::Regex
     @required_bytes : Slice(UInt8)
     # The fewest bytes a match spans (`StartFilter#minimum_bytes`).
     @minimum_bytes : Int32
+    # The `StaticByteScan` code for the bytes a match can start with, or
+    # `NO_START_SCAN` (see `find_at_start_bytes`).
+    @start_scan : Int32
     @unicode_words : Bool
     @final_lf : Bool
     @anchored_start : Bool
     @budget_states : Int32
-    @word_offset : Int32
-    @edge_symbol : Int32
     # Where the forward start states of a search from the start of the
     # text sit in `StaticDirection#starts` (the unanchored one, then the
     # anchored one).
@@ -88,10 +92,8 @@ module Mica::Regex
                    @forward : StaticDirection(F), @reverse : StaticDirection(R), @program : StaticProgram(N),
                    @one_pass : StaticOnePass, @unicode_words : Bool, @final_lf : Bool, @anchored_start : Bool,
                    @budget_states : Int32, @slot_count : Int32, @prefilter : StaticPrefilter = StaticPrefilter.none,
-                   @required_bytes : Slice(UInt8) = Slice(UInt8).empty, @minimum_bytes : Int32 = 0)
-      class_count = @classes.max.to_i32 + 1
-      @edge_symbol = class_count
-      @word_offset = class_count + 2
+                   @required_bytes : Slice(UInt8) = Slice(UInt8).empty, @minimum_bytes : Int32 = 0,
+                   @start_scan : Int32 = NO_START_SCAN)
       @scratch_words = @slot_count > 2 ? StaticScratch.words_for(@program.size, @slot_count) : @slot_count
       @text_start_index = @forward.start_index(LazyDFA::TEXT_EDGE) * 2
     end
@@ -219,7 +221,7 @@ module Mica::Regex
       meter = StaticMeter.new(counters, limits, @budget_states, haystack.bytesize, deadline)
       # The deadline is read before the haystack is, as on the runtime
       # engine.
-      meter.enforce_deadline(0)
+      meter.enforce_deadline(0) if deadline
       # Validation reads every byte once, one operation per byte, in
       # windows the meter allows before each is read, so the deadline and
       # `max_work` stop it as they stop a scan.
@@ -227,14 +229,21 @@ module Mica::Regex
       meter
     end
 
+    @[AlwaysInline]
     private def start_allowed?(bytes : Bytes, byte_offset : Int32) : Bool
-      raise ArgumentError.new("Negative byte index: #{byte_offset}") if byte_offset < 0
-      return false if byte_offset > bytes.size
-      if byte_offset < bytes.size && bytes.unsafe_fetch(byte_offset) & 0xC0 == 0x80
-        raise ArgumentError.new("Byte index #{byte_offset} is inside a UTF-8 character")
+      if byte_offset < 0 || (byte_offset < bytes.size && bytes.unsafe_fetch(byte_offset) & 0xC0 == 0x80)
+        raise_offset_error(byte_offset)
       end
-      # Fewer bytes are left than any match spans.
+      # Past the end, or fewer bytes are left than any match spans.
       byte_offset <= bytes.size - @minimum_bytes
+    end
+
+    # Raises the `ArgumentError` for a *byte_offset* that is negative or
+    # inside a character (kept out of `start_allowed?`, which every call
+    # runs).
+    private def raise_offset_error(byte_offset : Int32) : NoReturn
+      raise ArgumentError.new("Negative byte index: #{byte_offset}") if byte_offset < 0
+      raise ArgumentError.new("Byte index #{byte_offset} is inside a UTF-8 character")
     end
 
     private def find_span(bytes : Bytes, byte_offset : Int32, meter : StaticMeter) : Span?
@@ -326,12 +335,14 @@ module Mica::Regex
     end
 
     # True when the search runs anchored at each prefilter candidate (see
-    # `find_at_candidates`): the pattern has a prefilter, is not anchored
-    # at its start, and the meter's allowance covers the most work such a
-    # search can make, so it never raises `max_work` where the DFAs alone
-    # would not.
+    # `find_at_candidates`) or at each start byte (see
+    # `find_at_start_bytes`): the pattern has a prefilter or a start scan,
+    # is not anchored at its start, and the meter's allowance covers the
+    # most work such a search can make, so it never raises `max_work` where
+    # the DFAs alone would not.
     private def candidate_search?(bytes : Bytes, byte_offset : Int32, meter : StaticMeter) : Bool
-      return false if @anchored_start || !@prefilter.present?
+      return false if @anchored_start
+      return false unless @prefilter.present? || @start_scan != NO_START_SCAN
       most = CANDIDATE_WORK_PER_BYTE * (bytes.size - byte_offset + 1) + FAILED_TRY_SLACK + 2
       meter.room >= most
     end
@@ -348,9 +359,13 @@ module Mica::Regex
     # take over (no match starts before it): once the failed tries have
     # read more bytes than the search covers (plus `FAILED_TRY_SLACK`), or
     # the prefilter proves ineffective. The work is then at most the
-    # bytes again, and the call stays linear.
+    # bytes again, and the call stays linear. That position is the start
+    # of the character the candidate falls in (an unverified candidate, a
+    # rare byte's position less its offset in the literal, can fall inside
+    # one), as the DFAs start between characters.
     private def find_at_candidates(bytes : Bytes, byte_offset : Int32, earliest : Bool,
                                    meter : StaticMeter) : {Int32, Int32}
+      return find_at_start_bytes(bytes, byte_offset, earliest, meter) unless @prefilter.present?
       prefilter = @prefilter
       scan = StaticPrefilterScan.new(prefilter, bytes)
       failed_cap = (bytes.size - byte_offset).to_i64 + FAILED_TRY_SLACK
@@ -360,15 +375,59 @@ module Mica::Regex
         candidate = scan.find(at, meter)
         return {NO_MATCH, NO_MATCH} if candidate < 0
         literal = scan.last_literal
-        return {RESUME, candidate} if literal < 0
+        return {RESUME, character_start(bytes, candidate)} if literal < 0
         return {candidate, candidate + prefilter.literal_size(literal)} if prefilter.exact?
         before = meter.operations
         finish = find_end(bytes, candidate, true, earliest, meter)
         return {candidate, finish} if finish >= 0
         failed += meter.operations - before
-        return {RESUME, candidate} if failed > failed_cap || scan.ineffective?
+        return {RESUME, character_start(bytes, candidate)} if failed > failed_cap || scan.ineffective?
         at = candidate + 1
       end
+    end
+
+    # The start of the character byte *at* falls in.
+    private def character_start(bytes : Bytes, at : Int32) : Int32
+      while 0 < at < bytes.size && bytes.unsafe_fetch(at) & 0xC0 == 0x80
+        at -= 1
+      end
+      at
+    end
+
+    # Searches anchored at each byte a match can start with, found with
+    # `StaticByteScan` and the pattern's `start_scan` code in windows the
+    # meter allows, one operation per byte read. No match starts at any
+    # other byte, so the first where an anchored match exists starts the
+    # leftmost match, and the reverse DFA is not needed: a pattern such as
+    # `,\s*` finds each match with one scan and one short anchored run.
+    # Returns as `find_at_candidates` does, `RESUME` once the failed tries
+    # have read more bytes than the search covers (plus
+    # `FAILED_TRY_SLACK`).
+    private def find_at_start_bytes(bytes : Bytes, byte_offset : Int32, earliest : Bool,
+                                    meter : StaticMeter) : {Int32, Int32}
+      code = @start_scan
+      last = bytes.size - @minimum_bytes
+      failed_cap = (bytes.size - byte_offset).to_i64 + FAILED_TRY_SLACK
+      failed = 0_i64
+      at = byte_offset
+      while at <= last
+        window = meter.readable(Math.min(last + 1 - at, CHUNK_BYTES), at)
+        stop = at + window
+        candidate = StaticByteScan.forward(bytes, at, stop, code)
+        if candidate == stop
+          meter.charge(window, at)
+          at = stop
+          next
+        end
+        meter.charge(candidate - at + 1, at)
+        before = meter.operations
+        finish = find_end(bytes, candidate, true, earliest, meter)
+        return {candidate, finish} if finish >= 0
+        failed += meter.operations - before
+        return {RESUME, candidate} if failed > failed_cap
+        at = candidate + 1
+      end
+      {NO_MATCH, NO_MATCH}
     end
 
     # Searches forward from *start* for the end of the leftmost-first
@@ -379,11 +438,11 @@ module Mica::Regex
       direction = @forward
       shift = direction.shift
       table = direction.table.to_unsafe
-      classes = @classes.to_unsafe
+      classes = direction.classes.to_unsafe
       special_limit = direction.special_limit
       accel_limit = direction.accel_limit
       words = @unicode_words
-      word_offset = @word_offset
+      word_offset = direction.word_offset
       starts_at = if start == 0
                     @text_start_index
                   else
@@ -456,7 +515,7 @@ module Mica::Regex
       end
       if at == size - 1 && limit == size - 1
         meter.charge(1, at)
-        current = table[current.unsafe_shl(shift) &+ @edge_symbol &+ 1].to_i32
+        current = table[current.unsafe_shl(shift) &+ direction.edge_symbol &+ 1].to_i32
         at += 1
         if current < special_limit
           if current >= DEAD_LIMIT || current == DEAD_MATCH
@@ -466,7 +525,7 @@ module Mica::Regex
           return last_end if current < DEAD_LIMIT
         end
       end
-      current = table[current.unsafe_shl(shift) &+ @edge_symbol].to_i32
+      current = table[current.unsafe_shl(shift) &+ direction.edge_symbol].to_i32
       last_end = size if current < special_limit && current != DEAD
       last_end
     end
@@ -479,11 +538,11 @@ module Mica::Regex
       direction = @reverse
       shift = direction.shift
       table = direction.table.to_unsafe
-      classes = @classes.to_unsafe
+      classes = direction.classes.to_unsafe
       special_limit = direction.special_limit
       accel_limit = direction.accel_limit
       words = @unicode_words
-      word_offset = @word_offset
+      word_offset = direction.word_offset
       flags = 0
       if finish == size
         flags = LazyDFA::TEXT_EDGE
@@ -548,7 +607,7 @@ module Mica::Regex
         end
         meter.charge(chunk_start - at, at)
       end
-      symbol = lower_bound > 0 ? symbol_at(bytes, lower_bound - 1) : @edge_symbol
+      symbol = lower_bound > 0 ? reverse_symbol_at(bytes, lower_bound - 1) : direction.edge_symbol
       current = table[current.unsafe_shl(shift) &+ symbol].to_i32
       last_start = lower_bound if current < special_limit && current != DEAD
       last_start
@@ -569,10 +628,11 @@ module Mica::Regex
       flags
     end
 
-    private def symbol_at(bytes : Bytes, at : Int32) : Int32
+    # The reverse table's column for the byte at *at*.
+    private def reverse_symbol_at(bytes : Bytes, at : Int32) : Int32
       byte = bytes.unsafe_fetch(at)
-      symbol = @classes.unsafe_fetch(byte).to_i32
-      symbol += @word_offset if @unicode_words && byte >= 0x80 && LazyDFA.wide_char(bytes, at)[2]
+      symbol = @reverse.classes.unsafe_fetch(byte).to_i32
+      symbol += @reverse.word_offset if @unicode_words && byte >= 0x80 && LazyDFA.wide_char(bytes, at)[2]
       symbol
     end
 

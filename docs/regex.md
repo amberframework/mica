@@ -369,7 +369,6 @@ O(m·c·L) as on the runtime engine. A path that can do more work than
 the DFAs alone (the candidate search, the required-byte scans, the
 backtracker) runs only when the allowance left covers its most work, so
 it never raises `max_work` where the DFAs would finish.
-A
 
 **How it works.** The macro runs `src/mica/regex/static/emit_static_pattern.cr`
 (Crystal's `run`), which compiles the pattern with the runtime compiler
@@ -380,7 +379,21 @@ match or accelerated one, and writes the tables as `Slice.literal`s:
 
 - entries are state ids, `UInt8` when the DFA has at most 255 states and
   `UInt16` otherwise; a row is a power of two wide, so a transition is a
-  shift and an add;
+  shift and an add. Each direction carries its own map from byte to
+  column;
+- (S3) a table too wide for the limits with a column per byte class is
+  read over UTF-8 decoder states instead
+  (`Static::BuildTheDecoderProduct`). A search reads valid UTF-8 from a
+  character boundary, so each byte comes at a known decoder state: going
+  forward, between characters (ASCII or a lead byte) or inside one (a
+  continuation byte); going backward, between characters (ASCII or a
+  character's last byte) or inside one. A DFA state reached at two
+  decoder states becomes two states, and byte classes that no state reads
+  at the same decoder state share a column. `\w+\s+Holmes` goes from 131
+  columns (rows of 256) to 67 forward and 105 backward (rows of 128), and
+  its tables from 736,256 to 368,896 bytes. The search loop is the same
+  (one class map, one shift); a state between characters keeps its
+  acceleration, and a state inside a character has none;
 - a state that loops on all but a few bytes is skipped with `memchr` (one
   exit byte) or 8 bytes at a time (up to three ASCII exit bytes, or all
   non-ASCII bytes), forward and backward;
@@ -396,6 +409,14 @@ match or accelerated one, and writes the tables as `Slice.literal`s:
   no reverse scan; an exact literal set needs no DFA at all. Failed tries
   that read more than the haystack hand the search to the DFAs, so a call
   stays linear;
+- a pattern whose matches start with one of at most three bytes (ASCII,
+  or one byte of any value), and no prefilter of longer literals, scans
+  for those bytes (`memchr`, or 8 bytes at a time) and runs the forward
+  DFA anchored at each, as at prefilter candidates: the first anchored
+  match is the leftmost one, with no reverse scan. A prefilter whose
+  literals are one byte each (`,` in `,\s*`) becomes such a scan, as the
+  byte found needs no check. Failed tries that read more than the
+  haystack hand the search to the DFAs, as with a prefilter;
 - without a prefilter, a search first looks for the ASCII bytes every
   match contains (`StartFilter#list_of_required_bytes`) with `memchr`,
   unless the forward DFA's start states already skip that fast, and a
@@ -420,10 +441,14 @@ size. The type of a static constant names its widths:
 `Mica::Regex.static(/\A[0-9]+\z/)` is a
 `StaticPattern(UInt8, UInt8, UInt8, 2)`.
 
-**Limits and the fallback.** The static path holds a pattern when each
-DFA has at most 4,096 states, the two tables take at most 512 KiB, the
-capture pass needs at most 64 KiB of stack, its NFA numbers fit `UInt16`,
-and it has no `\G`. Any other pattern becomes a `StaticFallback` with the
+**Limits and the fallback.** The static path holds a pattern when the two
+tables take at most 512 KiB (with a column per byte class, or read over
+UTF-8 decoder states where that is smaller), their state ids fit
+`UInt16`, the capture pass needs at most 64 KiB of stack, its NFA numbers
+fit `UInt16`, and it has no `\G`. A DFA is explored until its table, with
+a column per byte class and `UInt16` ids, would pass 1 MiB (4,096 states
+for a 128-column row, 16,384 for a 32-column one), so a pattern far
+outside the limits is turned away quickly. Any other pattern becomes a `StaticFallback` with the
 same methods on the runtime engine's allocation-free API, so the call
 site stays the same, and the compiler prints why:
 
@@ -1494,5 +1519,8 @@ exception, within the work budget, deterministically.
 - The ECMA-262 and XSD parsers (R6, R7) and `\X` (R9).
 - Static patterns (S2): the literal prefilter and anchored candidate search
   on the static path, and a static bounded backtracker for capture passes
-  that are not one-pass; (S3) compressed tables so patterns with large
-  Unicode classes (`\w`, `\b`, `(?i)`) fit the static limits.
+  that are not one-pass; (S3) tables read over UTF-8 decoder states,
+  which hold `\w+\s+Holmes` and a few other wide patterns; patterns with
+  large Unicode classes and counted repetition (`\b\w+\b`, `\p{L}{8,13}`)
+  still pass 512 KiB, and would need columns per decoder state or rows
+  without padding (see the S3 study, regex-bench/S3).

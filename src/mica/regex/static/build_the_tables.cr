@@ -1,11 +1,16 @@
 require "../../regex"
+require "./build_the_decoder_product"
 
 module Mica::Regex::Static
   # The tables of one direction's complete DFA, as `WriteTheSource` writes
   # them into the application's source. Entries are state ids, and the row
   # of state `s` starts at `s << shift` (rows are a power of two at least
-  # the symbol count). States are numbered dead first (0 the dead state, 1
-  # the dead state that reports a match), then the other match states,
+  # the symbol count). A byte's column is `list_of_columns[byte]` (the byte
+  # classes, or the columns of a table read over UTF-8 decoder states, see
+  # `BuildTheDecoderProduct`), the edge columns start at `edge_symbol` and
+  # the Unicode-word columns at `word_offset`. States are numbered dead
+  # first (0 the dead state, 1 the dead state that reports a match), then
+  # the other match states,
   # then the accelerated states, then the rest, so the search loop tells
   # every state that needs a look by one comparison against `accel_limit`.
   # `list_of_accel_bytes` holds each accelerated state's `StaticByteScan`
@@ -19,7 +24,10 @@ module Mica::Regex::Static
     context_mask : Int32,
     special_limit : Int32,
     accel_limit : Int32,
-    list_of_accel_bytes : Array(Int32) do
+    list_of_accel_bytes : Array(Int32),
+    list_of_columns : Array(Int32),
+    edge_symbol : Int32,
+    word_offset : Int32 do
     # The largest state id, which picks the table's integer width.
     def largest_entry : Int32
       state_count - 1
@@ -83,7 +91,15 @@ module Mica::Regex::Static
     minimum_length : Int32,
     list_of_pair_tests : Array(UInt64),
     list_of_narrow_tests : Array(UInt64),
-    list_of_dense_tests : Array(UInt64)
+    list_of_dense_tests : Array(UInt64) do
+    # True when every literal is one byte (`,` in `,\s*`): the literals are
+    # then the bytes a match starts with, and a start scan
+    # (`StaticMatcher#find_at_start_bytes`) finds them with no literal to
+    # verify.
+    def one_byte_literals? : Bool
+      list_of_literal_ends.each_with_index.all? { |literal_end, index| literal_end == index + 1 }
+    end
+  end
 
   # Everything one static pattern needs at run time.
   record PatternTables,
@@ -97,6 +113,7 @@ module Mica::Regex::Static
     prefilter : PrefilterTables?,
     list_of_required_bytes : Array(Int32),
     minimum_bytes : Int32,
+    start_scan : Int32,
     unicode_words : Bool,
     final_lf : Bool,
     anchored_start : Bool,
@@ -116,10 +133,15 @@ module Mica::Regex::Static
   # as `PatternTables`; a pattern the static path cannot hold returns a
   # `Refusal` naming why.
   class BuildTheTables
-    # The most states one direction's DFA may have.
-    MAX_DFA_STATES = 4_096
+    # The most states one direction's table may have: its ids fit `UInt16`.
+    MAX_DFA_STATES = UInt16::MAX.to_i32 + 1
     # The most bytes the two transition tables may take together.
     MAX_TABLE_BYTES = 512 * 1024
+    # The most bytes one direction's table may reach, in rows of every
+    # symbol with `UInt16` ids, while its DFA is explored: twice the limit,
+    # as a table read over UTF-8 decoder states (`BuildTheDecoderProduct`)
+    # can take half the bytes.
+    EXPLORE_TABLE_BYTES = 2 * MAX_TABLE_BYTES
     # The most 32-bit words the capture pass's stack scratch may take
     # (64 KiB).
     MAX_SCRATCH_WORDS = 16_384
@@ -132,7 +154,11 @@ module Mica::Regex::Static
 
     getter states_explored = 0
 
-    def initialize(@source : String, @options : CompileOptions)
+    # With *always_decoder_columns*, every table is read over UTF-8 decoder
+    # states (see `BuildTheDecoderProduct`), not only one that is too wide
+    # otherwise: the static differential runs that way to cover the layout
+    # with every pattern.
+    def initialize(@source : String, @options : CompileOptions, @always_decoder_columns : Bool = false)
     end
 
     def perform : PatternTables | Refusal
@@ -148,10 +174,21 @@ module Mica::Regex::Static
       byte_classes = ByteClasses.new(program)
       forward_dfa = LazyDFA.new(program, byte_classes, false)
       reverse_dfa = LazyDFA.new(program, byte_classes, true)
-      forward = explore(program, forward_dfa, byte_classes, accelerate: true)
-      return forward if forward.is_a?(Refusal)
-      reverse = explore(program, reverse_dfa, byte_classes, accelerate: true)
-      return reverse if reverse.is_a?(Refusal)
+      explored_forward = explore(program, forward_dfa)
+      return explored_forward if explored_forward.is_a?(Refusal)
+      explored_reverse = explore(program, reverse_dfa)
+      return explored_reverse if explored_reverse.is_a?(Refusal)
+      forward = plain_tables(explored_forward, byte_classes)
+      reverse = plain_tables(explored_reverse, byte_classes)
+      if @always_decoder_columns
+        forward = decoder_tables(explored_forward, byte_classes)
+        reverse = decoder_tables(explored_reverse, byte_classes)
+      elsif table_bytes_of(forward) + table_bytes_of(reverse) > MAX_TABLE_BYTES
+        # Too wide: each direction read over UTF-8 decoder states, where
+        # that takes fewer bytes.
+        forward = narrower(forward, decoder_tables(explored_forward, byte_classes))
+        reverse = narrower(reverse, decoder_tables(explored_reverse, byte_classes))
+      end
       table_bytes = table_bytes_of(forward) + table_bytes_of(reverse)
       if table_bytes > MAX_TABLE_BYTES
         return refuse("its tables take #{table_bytes} bytes, over the static limit of #{MAX_TABLE_BYTES}")
@@ -172,9 +209,14 @@ module Mica::Regex::Static
       end
       list_of_classes = Array(Int32).new(256) { |byte| byte_classes.class_of(byte.to_u8) }
       anchored_start = SearchPlan.anchored_start?(program)
+      prefilter = anchored_start ? nil : prefilter_of(program)
+      start_filter = StartFilter.new(program)
+      start_scan = start_scan_of(start_filter, anchored_start, prefilter)
+      prefilter = nil unless start_scan == StaticMatcher::NO_START_SCAN
       PatternTables.new(source: @source, options: @options, list_of_classes: list_of_classes, forward: forward,
-        reverse: reverse, nfa: nfa, one_pass: one_pass, prefilter: anchored_start ? nil : prefilter_of(program),
-        list_of_required_bytes: required_bytes_of(program, forward), minimum_bytes: StartFilter.new(program).minimum_bytes,
+        reverse: reverse, nfa: nfa, one_pass: one_pass, prefilter: prefilter,
+        list_of_required_bytes: required_bytes_of(program, forward), minimum_bytes: start_filter.minimum_bytes,
+        start_scan: start_scan,
         unicode_words: forward_dfa.unicode_words?, final_lf: forward_dfa.final_lf?,
         anchored_start: anchored_start, program_state_count: program.state_count,
         slot_count: program.slot_count, scratch_words: scratch_words)
@@ -196,9 +238,23 @@ module Mica::Regex::Static
       Refusal.new(@source, @options, reason)
     end
 
-    # Builds every state of *dfa* reachable from any start state.
-    private def explore(program : Program, dfa : LazyDFA, byte_classes : ByteClasses,
-                        accelerate : Bool) : DirectionTables | Refusal
+    # One direction's DFA, explored: every state reachable from a start
+    # state, `symbols` transitions each (state-major), and the start states
+    # in `StaticDirection#starts` order.
+    record ExploredDirection,
+      dfa : LazyDFA,
+      list_of_transitions : Array(Int32),
+      state_count : Int32,
+      symbols : Int32,
+      list_of_start_ids : Array(Int32),
+      list_of_match : Array(Bool),
+      relevant_flags : Int32,
+      context_mask : Int32
+
+    # Builds every state of *dfa* reachable from any start state; refuses
+    # once the table, in rows of every symbol with `UInt16` ids, would pass
+    # `EXPLORE_TABLE_BYTES`, or its ids would not fit `UInt16`.
+    private def explore(program : Program, dfa : LazyDFA) : ExploredDirection | Refusal
       pool = CachePool.new(max_bytes: Int64::MAX // 4, max_cache_bytes: Int64::MAX // 8)
       cache = DFACache.reserve?(dfa, pool) { DFABuilder.new(dfa.node_count) }
       return refuse("no DFA cache could be reserved") unless cache
@@ -218,6 +274,7 @@ module Mica::Regex::Static
           list_of_start_ids << id
         end
       end
+      state_cap = Math.min(MAX_DFA_STATES, EXPLORE_TABLE_BYTES // (2 * row_width(symbols)))
       transitions = [] of Int32
       list_of_pending = list_of_start_ids.uniq
       known = Set(Int32).new(list_of_pending)
@@ -229,7 +286,7 @@ module Mica::Regex::Static
           target = cache.transition(dfa, id, symbol, meter)
           return refuse("the DFA gave up while it was explored") if target < 0
           highest = target if target > highest
-          return refuse("its #{dfa.reverse? ? "reverse" : "forward"} DFA has more than #{MAX_DFA_STATES} states") if highest >= MAX_DFA_STATES
+          return refuse("its #{dfa.reverse? ? "reverse" : "forward"} DFA has more than #{state_cap} states") if highest >= state_cap
           required = (highest + 1) * symbols
           transitions.concat(Array(Int32).new(required - transitions.size, 0)) if transitions.size < required
           transitions[id * symbols + symbol] = target
@@ -240,31 +297,95 @@ module Mica::Regex::Static
       state_count = highest + 1
       transitions.concat(Array(Int32).new(state_count * symbols - transitions.size, 0)) if transitions.size < state_count * symbols
       @states_explored += state_count
-      renumber(cache, dfa, byte_classes, transitions, state_count, symbols, list_of_start_ids, relevant, context_mask,
-        accelerate)
+      marks = cache.list_of_marks
+      list_of_match = Array(Bool).new(state_count) { |id| id > LazyDFA::DEAD_MATCH && marks[id] & LazyDFA::MARK_MATCH != 0 }
+      ExploredDirection.new(dfa: dfa, list_of_transitions: transitions, state_count: state_count, symbols: symbols,
+        list_of_start_ids: list_of_start_ids, list_of_match: list_of_match, relevant_flags: relevant,
+        context_mask: context_mask)
+    end
+
+    # The columns of a row of *symbols* symbols: the next power of two.
+    private def row_width(symbols : Int32) : Int32
+      symbols <= 1 ? 1 : 1 << (symbols - 1).bit_length
+    end
+
+    # The table of *explored* with a column per byte class.
+    private def plain_tables(explored : ExploredDirection, byte_classes : ByteClasses) : DirectionTables
+      dfa = explored.dfa
+      transitions = explored.list_of_transitions
+      symbols = explored.symbols
+      list_of_weights = Array(Int32).new(symbols, 0)
+      byte_classes.class_count.times { |class_index| list_of_weights[class_index] = byte_classes.class_size(class_index) }
+      list_of_accel = Array(Int32?).new(explored.state_count) do |id|
+        next nil if id <= LazyDFA::DEAD_MATCH || explored.list_of_match[id]
+        acceleration_of(id, transitions, symbols, byte_classes, dfa)
+      end
+      list_of_columns = Array(Int32).new(256) { |byte| byte_classes.class_of(byte.to_u8) }
+      renumber(explored, transitions, explored.state_count, symbols, explored.list_of_start_ids, explored.list_of_match,
+        list_of_accel, Array(Array(Int32)).new(explored.state_count, list_of_weights), list_of_columns,
+        byte_classes.class_count, byte_classes.class_count + 2)
+    end
+
+    # The table of *explored* read over UTF-8 decoder states (see
+    # `BuildTheDecoderProduct`). A state between characters keeps its DFA
+    # state's acceleration: its scan stops at an ASCII byte or at every
+    # non-ASCII byte, so it stops between characters, where the state is
+    # read. A state inside a character is not accelerated.
+    private def decoder_tables(explored : ExploredDirection, byte_classes : ByteClasses) : DirectionTables
+      dfa = explored.dfa
+      product = BuildTheDecoderProduct.new(explored.list_of_transitions, explored.symbols, explored.list_of_start_ids,
+        byte_classes, dfa).perform
+      accel_by_dfa_id = {} of Int32 => Int32?
+      list_of_match = Array(Bool).new(product.state_count) { |id| explored.list_of_match[product.list_of_dfa_ids[id]] }
+      list_of_accel = Array(Int32?).new(product.state_count) do |id|
+        dfa_id = product.list_of_dfa_ids[id]
+        next nil if id <= LazyDFA::DEAD_MATCH || list_of_match[id]
+        next nil unless product.list_of_decoder_states[id] == BuildTheDecoderProduct::BETWEEN
+        accel_by_dfa_id.fetch(dfa_id) do
+          accel_by_dfa_id[dfa_id] = acceleration_of(dfa_id, explored.list_of_transitions, explored.symbols, byte_classes, dfa)
+        end
+      end
+      weights_by_decoder_state = {} of Int32 => Array(Int32)
+      list_of_weights = Array(Array(Int32)).new(product.state_count) do |id|
+        decoder_state = product.list_of_decoder_states[id]
+        weights_by_decoder_state[decoder_state] ||= begin
+          list_of_column_weights = Array(Int32).new(product.symbols, 0)
+          256.times do |byte|
+            role = BuildTheDecoderProduct.utf8_role(byte)
+            next unless BuildTheDecoderProduct.readable?(dfa.reverse?, decoder_state, role)
+            list_of_column_weights[product.list_of_columns[byte]] += 1
+          end
+          list_of_column_weights
+        end
+      end
+      renumber(explored, product.list_of_transitions, product.state_count, product.symbols, product.list_of_start_ids,
+        list_of_match, list_of_accel, list_of_weights, product.list_of_columns, product.edge_symbol, product.word_offset)
+    end
+
+    # The one of *plain* and *decoder* that takes fewer bytes.
+    private def narrower(plain : DirectionTables, decoder : DirectionTables) : DirectionTables
+      table_bytes_of(decoder) < table_bytes_of(plain) ? decoder : plain
     end
 
     # Orders the states dead, match, accelerated, rest, and writes the
     # table with state-id entries in rows of `1 << shift`.
-    private def renumber(cache : DFACache, dfa : LazyDFA, byte_classes : ByteClasses, transitions : Array(Int32),
-                         state_count : Int32, symbols : Int32, list_of_start_ids : Array(Int32), relevant : Int32,
-                         context_mask : Int32, accelerate : Bool) : DirectionTables
-      marks = cache.list_of_marks
+    private def renumber(explored : ExploredDirection, transitions : Array(Int32), state_count : Int32, symbols : Int32,
+                         list_of_start_ids : Array(Int32), list_of_match : Array(Bool), list_of_accel : Array(Int32?),
+                         list_of_weights : Array(Array(Int32)), list_of_columns : Array(Int32), edge_symbol : Int32,
+                         word_offset : Int32) : DirectionTables
       match_ids = [] of Int32
       accel_ids = [] of Int32
-      accel_byte_by_id = {} of Int32 => Int32
       rest_ids = [] of Int32
       (LazyDFA::DEAD_MATCH + 1...state_count).each do |id|
-        if marks[id] & LazyDFA::MARK_MATCH != 0
+        if list_of_match[id]
           match_ids << id
-        elsif accelerate && (accel = acceleration_of(id, transitions, symbols, byte_classes, dfa))
+        elsif list_of_accel[id]
           accel_ids << id
-          accel_byte_by_id[id] = accel
         else
           rest_ids << id
         end
       end
-      rest_ids = in_chains(rest_ids, transitions, symbols, byte_classes)
+      rest_ids = in_chains(rest_ids, transitions, symbols, list_of_weights)
       order = [LazyDFA::DEAD, LazyDFA::DEAD_MATCH] + match_ids + accel_ids + rest_ids
       new_id = Array(Int32).new(state_count, 0)
       order.each_with_index { |id, index| new_id[id] = index }
@@ -279,10 +400,11 @@ module Mica::Regex::Static
       starts = list_of_start_ids.map { |id| new_id[id] }
       special_limit = 2 + match_ids.size
       accel_limit = special_limit + accel_ids.size
-      accel_bytes = accel_ids.map { |id| accel_byte_by_id[id] }
+      accel_bytes = accel_ids.map { |id| list_of_accel[id] || 0 }
       DirectionTables.new(shift: shift, state_count: state_count, list_of_entries: entries, list_of_starts: starts,
-        relevant_flags: relevant, context_mask: context_mask, special_limit: special_limit, accel_limit: accel_limit,
-        list_of_accel_bytes: accel_bytes)
+        relevant_flags: explored.relevant_flags, context_mask: explored.context_mask, special_limit: special_limit,
+        accel_limit: accel_limit, list_of_accel_bytes: accel_bytes, list_of_columns: list_of_columns,
+        edge_symbol: edge_symbol, word_offset: word_offset)
     end
 
     # The bytes every match contains (`StartFilter#list_of_required_bytes`),
@@ -296,13 +418,34 @@ module Mica::Regex::Static
       StartFilter.new(program).list_of_required_bytes.map(&.to_i32)
     end
 
+    # The `StaticByteScan` code that finds the bytes a match can start with
+    # (`StartFilter#starts?`), so a search tries the forward DFA anchored at
+    # each of them and knows the match's start without the reverse DFA (see
+    # `StaticMatcher#find_at_start_bytes`); a pattern that gets one keeps
+    # no prefilter. It is `StaticMatcher::NO_START_SCAN` for a pattern
+    # anchored at its start, one with a prefilter of longer literals (which
+    # finds its candidates its own way), one that can match empty, and for
+    # start bytes more than `StaticByteScan::MAX_SCAN_BYTES`, or more than
+    # one with a non-ASCII byte among them.
+    private def start_scan_of(start_filter : StartFilter, anchored_start : Bool, prefilter : PrefilterTables?) : Int32
+      return StaticMatcher::NO_START_SCAN if anchored_start || start_filter.minimum_bytes == 0
+      return StaticMatcher::NO_START_SCAN if prefilter && !prefilter.one_byte_literals?
+      list_of_start_bytes = (0..255).select { |byte| start_filter.starts?(byte.to_u8) }
+      return StaticMatcher::NO_START_SCAN if list_of_start_bytes.empty?
+      return list_of_start_bytes.first if list_of_start_bytes.size == 1
+      if list_of_start_bytes.size > StaticByteScan::MAX_SCAN_BYTES || list_of_start_bytes.any? { |byte| byte >= 0x80 }
+        return StaticMatcher::NO_START_SCAN
+      end
+      StaticByteScan.encode(list_of_start_bytes, false)
+    end
+
     # *list_of_ids* reordered so a state's main successor (the one most
     # byte values lead to, past the dead states and itself) comes right
     # after it where it can: `[0-9a-f]{8}-` becomes states numbered one
     # after another, and the search loop follows such a chain with loads
     # that do not wait on each other (see `StaticMatcher#find_end`).
     private def in_chains(list_of_ids : Array(Int32), transitions : Array(Int32), symbols : Int32,
-                          byte_classes : ByteClasses) : Array(Int32)
+                          list_of_weights : Array(Array(Int32))) : Array(Int32)
       members = list_of_ids.to_set
       placed = Set(Int32).new
       ordered = [] of Int32
@@ -310,20 +453,23 @@ module Mica::Regex::Static
         current = id
         while members.includes?(current) && placed.add?(current)
           ordered << current
-          current = main_successor(current, transitions, symbols, byte_classes)
+          current = main_successor(current, transitions, symbols, list_of_weights[current])
         end
       end
       ordered
     end
 
     # The successor of state *id* the most byte values lead to, past the
-    # dead states and *id* itself, or -1.
-    private def main_successor(id : Int32, transitions : Array(Int32), symbols : Int32, byte_classes : ByteClasses) : Int32
+    # dead states and *id* itself, or -1. *list_of_weights* holds the bytes
+    # each column stands for at the state.
+    private def main_successor(id : Int32, transitions : Array(Int32), symbols : Int32,
+                               list_of_weights : Array(Int32)) : Int32
       bytes_by_target = Hash(Int32, Int32).new(0)
-      byte_classes.class_count.times do |class_index|
-        target = transitions[id * symbols + class_index]
+      list_of_weights.each_with_index do |weight, column|
+        next if weight == 0
+        target = transitions[id * symbols + column]
         next if target <= LazyDFA::DEAD_MATCH || target == id
-        bytes_by_target[target] += byte_classes.class_size(class_index)
+        bytes_by_target[target] += weight
       end
       best = bytes_by_target.max_by? { |target, count| {count, -target} }
       best ? best[0] : -1

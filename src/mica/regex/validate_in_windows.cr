@@ -14,6 +14,15 @@ module Mica::Regex
     def perform : Nil
       bytes = @bytes
       at = 0
+      # A haystack the meter allows in one window (a line, a form field):
+      # one pass, with no window to place.
+      if bytes.size > 0 && @meter.readable(bytes.size, at) == bytes.size
+        if offset = Core::UTF8.first_invalid_offset(bytes)
+          raise Mica::EncodingError.new("The haystack is not valid UTF-8", Core::Position.new(offset.to_i64))
+        end
+        @meter.charge(bytes.size, at)
+        return
+      end
       while at < bytes.size
         stop = window_end_at_a_character(at, at + @meter.readable(bytes.size - at, at))
         if offset = Core::UTF8.first_invalid_offset(bytes[at, stop - at])

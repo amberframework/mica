@@ -68,7 +68,7 @@ module Mica::Regex::Static
       write_prefilter(tables.prefilter)
       @output << ",\n  required_bytes: "
       write_slice("UInt8", tables.list_of_required_bytes)
-      @output << ", minimum_bytes: " << tables.minimum_bytes
+      @output << ", minimum_bytes: " << tables.minimum_bytes << ", start_scan: " << tables.start_scan
       @output << "))\n"
     end
 
@@ -81,7 +81,9 @@ module Mica::Regex::Static
       write_slice(type, tables.list_of_starts)
       @output << ",\n    accel_bytes: "
       write_slice("Int32", tables.list_of_accel_bytes)
-      @output << ')'
+      @output << ",\n    classes: "
+      write_slice("UInt8", tables.list_of_columns)
+      @output << ", edge_symbol: " << tables.edge_symbol << ", word_offset: " << tables.word_offset << ')'
     end
 
     private def write_program(type : String, nfa : NfaTables?) : Nil
