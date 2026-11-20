@@ -116,8 +116,9 @@ module Mica::Regex
     # within a byte or two, where the run costs more than it saves.
     #
     # It reads one cell per byte class, not per byte: the DFA is built on a
-    # program's first search, where 256 reads per state cost more than the
-    # search (about 15 us for the 27 states of `(a+)|(b+)|...|(z+)`).
+    # program's first search, and reading 256 cells per state there made
+    # the first search of `(?:(a+)|(b+)|...|(z+))` over 60 KB take about
+    # 43 us where per-class reads take about 35 us.
     private def loops_without_edge_work?(state : Int32) : Bool
       row = state * @class_count
       looping_bytes = 0
