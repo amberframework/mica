@@ -50,6 +50,7 @@ module Mica::Regex
     @reverse : StaticDirection(R)
     @program : StaticProgram(N)
     @one_pass : StaticOnePass
+    @prefilter : StaticPrefilter
     @unicode_words : Bool
     @final_lf : Bool
     @anchored_start : Bool
@@ -62,7 +63,7 @@ module Mica::Regex
     def initialize(*, @source : String, @options : CompileOptions, @classes : Slice(UInt8),
                    @forward : StaticDirection(F), @reverse : StaticDirection(R), @program : StaticProgram(N),
                    @one_pass : StaticOnePass, @unicode_words : Bool, @final_lf : Bool, @anchored_start : Bool,
-                   @budget_states : Int32, @slot_count : Int32)
+                   @budget_states : Int32, @slot_count : Int32, @prefilter : StaticPrefilter = StaticPrefilter.none)
       class_count = @classes.max.to_i32 + 1
       @edge_symbol = class_count
       @word_offset = class_count + 2
@@ -82,6 +83,11 @@ module Mica::Regex
       meter = open(counters.to_unsafe, haystack, limits, deadline, validate)
       bytes = haystack.to_slice
       return false unless start_allowed?(bytes, byte_offset)
+      if candidate_search?(bytes, byte_offset, meter)
+        start, resume = find_at_candidates(bytes, byte_offset, true, meter)
+        return start >= 0 unless start == RESUME
+        byte_offset = resume
+      end
       find_end(bytes, byte_offset, @anchored_start, true, meter) >= 0
     end
 
@@ -169,12 +175,77 @@ module Mica::Regex
 
     private def find_span(bytes : Bytes, byte_offset : Int32, meter : StaticMeter) : Span?
       return nil unless start_allowed?(bytes, byte_offset)
+      if candidate_search?(bytes, byte_offset, meter)
+        start, finish = find_at_candidates(bytes, byte_offset, false, meter)
+        return start >= 0 ? Span.new(start, finish) : nil unless start == RESUME
+        byte_offset = finish
+      end
       anchored = @anchored_start
       finish = find_end(bytes, byte_offset, anchored, false, meter)
       return nil if finish < 0
       start = anchored ? byte_offset : find_start(bytes, finish, byte_offset, meter)
       raise Mica::Error.new("internal error: the reverse DFA found no start for #{finish}") if start < 0
       Span.new(start, finish)
+    end
+
+    # The start `find_at_candidates` returns when the search continues on
+    # the forward and reverse DFAs from the position it returns.
+    RESUME = -2
+    # The bytes failed anchored tries may read beyond the bytes the search
+    # covers before the search continues on the DFAs (room for
+    # `CandidateSearch::MAX_TRIES` short tries near the end of the
+    # haystack, as on the runtime engine).
+    FAILED_TRY_SLACK = CandidateSearch::MAX_TRIES.to_i64 * (CandidateSearch::TRY_REACH + 1)
+    # The most operations per remaining byte a search at candidates can
+    # make: the scan reads each byte once, the failed tries at most the
+    # bytes again (plus `FAILED_TRY_SLACK`), and a search that continues on
+    # the DFAs reads them twice more.
+    CANDIDATE_WORK_PER_BYTE = 4_i64
+
+    # True when the search runs anchored at each prefilter candidate (see
+    # `find_at_candidates`): the pattern has a prefilter, is not anchored
+    # at its start, and the meter's allowance covers the most work such a
+    # search can make, so it never raises `max_work` where the DFAs alone
+    # would not.
+    private def candidate_search?(bytes : Bytes, byte_offset : Int32, meter : StaticMeter) : Bool
+      return false if @anchored_start || !@prefilter.present?
+      most = CANDIDATE_WORK_PER_BYTE * (bytes.size - byte_offset + 1) + FAILED_TRY_SLACK + 2
+      meter.room >= most
+    end
+
+    # Searches anchored at each position where the prefilter finds a
+    # literal: every match starts with a prefix literal, so the first
+    # candidate where an anchored match exists starts the leftmost match,
+    # and its end is that match's end, with no reverse scan. When the
+    # literals are the whole matches (`StaticPrefilter#exact?`), the
+    # literal found is the match.
+    #
+    # Returns the match's start and end, `NO_MATCH` as the start, or
+    # `RESUME` and the position from which the forward and reverse DFAs
+    # take over (no match starts before it): once the failed tries have
+    # read more bytes than the search covers (plus `FAILED_TRY_SLACK`), or
+    # the prefilter proves ineffective. The work is then at most the
+    # bytes again, and the call stays linear.
+    private def find_at_candidates(bytes : Bytes, byte_offset : Int32, earliest : Bool,
+                                   meter : StaticMeter) : {Int32, Int32}
+      prefilter = @prefilter
+      scan = StaticPrefilterScan.new(prefilter, bytes)
+      failed_cap = (bytes.size - byte_offset).to_i64 + FAILED_TRY_SLACK
+      failed = 0_i64
+      at = byte_offset
+      while true
+        candidate = scan.find(at, meter)
+        return {NO_MATCH, NO_MATCH} if candidate < 0
+        literal = scan.last_literal
+        return {RESUME, candidate} if literal < 0
+        return {candidate, candidate + prefilter.literal_size(literal)} if prefilter.exact?
+        before = meter.operations
+        finish = find_end(bytes, candidate, true, earliest, meter)
+        return {candidate, finish} if finish >= 0
+        failed += meter.operations - before
+        return {RESUME, candidate} if failed > failed_cap || scan.ineffective?
+        at = candidate + 1
+      end
     end
 
     # Searches forward from *start* for the end of the leftmost-first
@@ -197,6 +268,8 @@ module Mica::Regex
       at = start
       wide_start = wide_end = 0
       wide_word = false
+      # Where self-loop runs may start again (see `LazyDFA::RUN_BACKOFF`).
+      runs_from = 0
       while at < limit
         chunk_end = at + meter.readable(Math.min(limit - at, CHUNK_BYTES), at)
         chunk_start = at
@@ -207,8 +280,25 @@ module Mica::Regex
             wide_start, wide_end, wide_word = LazyDFA.wide_char(bytes, at) unless wide_start <= at < wide_end
             symbol &+= word_offset if wide_word
           end
-          current = table[(current << shift) &+ symbol].to_i32
+          entry = table[(current << shift) &+ symbol]
           at &+= 1
+          if entry == current && at >= runs_from && !words &&
+             (entry >= accel_limit || (!earliest && DEAD_LIMIT <= entry < special_limit))
+            # A state that loops to itself (`.*`, `[^"]*`, the start state
+            # between possible starts) keeps its row, so the loads of the
+            # run no longer wait on each other (`LazyDFA#find_end` does the
+            # same). In a match state each byte of the run ends a match, so
+            # the last one read ends the latest. A short run pays more for
+            # leaving this loop than it saves, so after one the search steps
+            # byte by byte for `LazyDFA::RUN_BACKOFF` bytes.
+            run_start = at
+            row = current << shift
+            while at < chunk_end && table[row &+ classes[bytes.unsafe_fetch(at)]] == entry
+              at &+= 1
+            end
+            runs_from = at + LazyDFA::RUN_BACKOFF if at - run_start < LazyDFA::SHORT_RUN
+          end
+          current = entry.to_i32
           next if current >= accel_limit
           if current >= special_limit
             at = StaticByteScan.forward(bytes, at, chunk_end, direction.accel_bytes.unsafe_fetch(current - special_limit))

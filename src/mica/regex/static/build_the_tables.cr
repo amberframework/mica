@@ -61,6 +61,28 @@ module Mica::Regex::Static
     list_of_ascii_loops : Array(Int32),
     class_count : Int32
 
+  # The literal prefilter a static pattern searches with (see
+  # `StaticPrefilter`): the runtime engine's `Prefilter` for the
+  # pattern's prefix literals, its choices written out as tables. The
+  # pair tests take `StaticPrefilter::WORDS_PER_TEST` words each.
+  record PrefilterTables,
+    kind : Int32,
+    exact : Bool,
+    list_of_literal_bytes : Array(Int32),
+    list_of_literal_ends : Array(Int32),
+    list_of_starting_with : Array(UInt64),
+    list_of_words : Array(UInt64),
+    list_of_word_masks : Array(UInt64),
+    needle : Int32,
+    needle_offset : Int32,
+    pair_gap : Int32,
+    mask_width : Int32,
+    list_of_masks : Array(UInt64),
+    minimum_length : Int32,
+    list_of_pair_tests : Array(UInt64),
+    list_of_narrow_tests : Array(UInt64),
+    list_of_dense_tests : Array(UInt64)
+
   # Everything one static pattern needs at run time.
   record PatternTables,
     source : String,
@@ -70,6 +92,7 @@ module Mica::Regex::Static
     reverse : DirectionTables,
     nfa : NfaTables?,
     one_pass : OnePassTables?,
+    prefilter : PrefilterTables?,
     unicode_words : Bool,
     final_lf : Bool,
     anchored_start : Bool,
@@ -144,9 +167,11 @@ module Mica::Regex::Static
         one_pass = one_pass_of(program, byte_classes)
       end
       list_of_classes = Array(Int32).new(256) { |byte| byte_classes.class_of(byte.to_u8) }
+      anchored_start = SearchPlan.anchored_start?(program)
       PatternTables.new(source: @source, options: @options, list_of_classes: list_of_classes, forward: forward,
-        reverse: reverse, nfa: nfa, one_pass: one_pass, unicode_words: forward_dfa.unicode_words?, final_lf: forward_dfa.final_lf?,
-        anchored_start: SearchPlan.anchored_start?(program), program_state_count: program.state_count,
+        reverse: reverse, nfa: nfa, one_pass: one_pass, prefilter: anchored_start ? nil : prefilter_of(program),
+        unicode_words: forward_dfa.unicode_words?, final_lf: forward_dfa.final_lf?,
+        anchored_start: anchored_start, program_state_count: program.state_count,
         slot_count: program.slot_count, scratch_words: scratch_words)
     end
 
@@ -289,6 +314,46 @@ module Mica::Regex::Static
       OnePassTables.new(list_of_steps: steps, list_of_cells: cells, list_of_match_edges: match_edges,
         list_of_edge_slots: edges.map(&.slots), list_of_edge_looks: edges.map(&.looks),
         list_of_ascii_loops: ascii_loops.map { |loops| loops ? 1 : 0 }, class_count: byte_classes.class_count)
+    end
+
+    # The runtime engine's prefilter for *program*'s prefix literals, as
+    # tables, or nil when it has none or needs none: a prefilter that finds
+    # up to three first bytes (`Prefilter::Kind::FirstBytes`) does what the
+    # forward DFA's start state does with `StaticByteScan`.
+    private def prefilter_of(program : Program) : PrefilterTables?
+      literal_set = program.literal_set || return nil
+      prefilter = Prefilter.new(literal_set)
+      return nil if prefilter.kind.first_bytes?
+      list_of_literals = literal_set.list_of_literals
+      list_of_bytes = [] of Int32
+      list_of_ends = [] of Int32
+      list_of_starting_with = Array(UInt64).new(256, 0_u64)
+      list_of_words = [] of UInt64
+      list_of_word_masks = [] of UInt64
+      list_of_literals.each_with_index do |literal, index|
+        literal.each { |byte| list_of_bytes << byte.to_i32 }
+        list_of_ends << list_of_bytes.size
+        list_of_starting_with[literal[0]] |= 1_u64 << index
+        word = 0_u64
+        literal.each_with_index { |byte, offset| word |= byte.to_u64 << (8 * offset) if offset < 8 }
+        list_of_words << (literal.size > 8 ? 0_u64 : word)
+        list_of_word_masks << (literal.size > 8 ? 0_u64 : (literal.size == 8 ? UInt64::MAX : (1_u64 << (8 * literal.size)) &- 1))
+      end
+      PrefilterTables.new(kind: prefilter.kind.value, exact: literal_set.exact?, list_of_literal_bytes: list_of_bytes,
+        list_of_literal_ends: list_of_ends, list_of_starting_with: list_of_starting_with, list_of_words: list_of_words,
+        list_of_word_masks: list_of_word_masks, needle: prefilter.list_of_needles.first?.try(&.to_i32) || 0,
+        needle_offset: prefilter.needle_offset, pair_gap: prefilter.pair_gap, mask_width: prefilter.mask_width,
+        list_of_masks: prefilter.masks.to_a, minimum_length: prefilter.minimum_length,
+        list_of_pair_tests: words_of(prefilter.list_of_pair_tests), list_of_narrow_tests: words_of(prefilter.list_of_narrow_tests),
+        list_of_dense_tests: words_of(prefilter.list_of_dense_tests))
+    end
+
+    # *list_of_tests* as `StaticPrefilter::WORDS_PER_TEST` words each.
+    private def words_of(list_of_tests : Array(PairTest)) : Array(UInt64)
+      list_of_tests.flat_map do |test|
+        [test.first_offset.to_u64, test.second_offset.to_u64, test.third_offset.to_u64, test.first_fold, test.first_lanes,
+         test.second_fold, test.second_lanes, test.third_fold, test.third_lanes]
+      end
     end
 
     private def flatten(program : Program) : NfaTables

@@ -21,6 +21,11 @@ module Mica::Regex
       @counters[0]
     end
 
+    # The operations the allowance has left.
+    def room : Int64
+      @counters[2] - @counters[0]
+    end
+
     # Raises `Mica::DeadlineExceededError` when the deadline has passed.
     def enforce_deadline(at : Int32) : Nil
       raise_deadline(at) if deadline_passed?

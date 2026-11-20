@@ -63,7 +63,10 @@ module Mica::Regex::Static
       write_one_pass(tables.one_pass)
       @output << ",\n  unicode_words: " << tables.unicode_words << ", final_lf: " << tables.final_lf
       @output << ", anchored_start: " << tables.anchored_start << ",\n"
-      @output << "  budget_states: " << tables.program_state_count << ", slot_count: " << tables.slot_count << "))\n"
+      @output << "  budget_states: " << tables.program_state_count << ", slot_count: " << tables.slot_count << ",\n"
+      @output << "  prefilter: "
+      write_prefilter(tables.prefilter)
+      @output << "))\n"
     end
 
     private def write_direction(type : String, tables : DirectionTables) : Nil
@@ -124,13 +127,40 @@ module Mica::Regex::Static
       @output << ')'
     end
 
+    private def write_prefilter(prefilter : PrefilterTables?) : Nil
+      unless prefilter
+        @output << "::Mica::Regex::StaticPrefilter.none"
+        return
+      end
+      @output << "::Mica::Regex::StaticPrefilter.new(kind: " << prefilter.kind << ", exact: " << prefilter.exact
+      @output << ", needle: " << prefilter.needle << ", needle_offset: " << prefilter.needle_offset
+      @output << ", pair_gap: " << prefilter.pair_gap << ", mask_width: " << prefilter.mask_width
+      @output << ", minimum_length: " << prefilter.minimum_length << ",\n    literal_bytes: "
+      write_slice("UInt8", prefilter.list_of_literal_bytes)
+      @output << ",\n    literal_ends: "
+      write_slice("Int32", prefilter.list_of_literal_ends)
+      {starting_with: prefilter.list_of_starting_with, words: prefilter.list_of_words,
+       word_masks: prefilter.list_of_word_masks, masks: prefilter.list_of_masks,
+       pair_tests: prefilter.list_of_pair_tests, narrow_tests: prefilter.list_of_narrow_tests,
+       dense_tests: prefilter.list_of_dense_tests}.each do |name, list_of_values|
+        @output << ",\n    " << name << ": "
+        write_slice("UInt64", list_of_values)
+      end
+      @output << ')'
+    end
+
     private def write_slice(type : String, list_of_values : Array(Int)) : Nil
       if list_of_values.empty?
         @output << "Slice(" << type << ").empty"
         return
       end
       @output << "Slice(" << type << ").literal("
-      list_of_values.join(@output, ", ")
+      # A 64-bit value past `Int64::MAX` needs its suffix.
+      suffix = type == "UInt64" ? "_u64" : ""
+      list_of_values.each_with_index do |value, index|
+        @output << ", " if index > 0
+        @output << value << suffix
+      end
       @output << ')'
     end
 
