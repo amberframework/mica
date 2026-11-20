@@ -97,15 +97,21 @@ module Mica::Regex
       @any_match_loop = @list_of_match_loops.any?
     end
 
-    # True when some byte leads from *state* back to it with no assertion
-    # and no slot.
+    # True when at least `WIDE_LOOP_BYTES` of the byte values lead from
+    # *state* back to it with no assertion and no slot (`.*`, `[^"]*`): a
+    # run there is likely long. A narrow loop (`\s+` between words) ends
+    # within a byte or two, where the run costs more than it saves.
     private def loops_without_edge_work?(state : Int32) : Bool
       row = state * @class_count
-      (0...@class_count).any? do |class_index|
-        step = @steps[row + class_index]
+      class_of = @byte_classes.table
+      (0..255).count do |byte|
+        step = @steps[row + class_of[byte]]
         step >= 0 && step & STEP_TAKES_EDGE == 0 && step >> 2 == row
-      end
+      end >= WIDE_LOOP_BYTES
     end
+
+    # See `loops_without_edge_work?`.
+    private WIDE_LOOP_BYTES = 64
 
     private def ascii_loop?(state : Int32) : Bool
       row = state * @class_count
@@ -210,7 +216,6 @@ module Mica::Regex
     #
     # With *stop*, a search still undecided when it reaches byte *stop*
     # returns `LazyDFA::GAVE_UP` there.
-    @[AlwaysInline]
     def search(haystack : Bytes, start : Int32, search_start : Int32, slots : Slice(Int64), scratch : Slice(Int64),
                meter : SearchMeter?, stop : Int32 = Int32::MAX) : {Int32, Int32}
       if @any_match_loop
@@ -344,9 +349,8 @@ module Mica::Regex
 
     # Where a run from *at* of bytes that lead back to the state at *row*
     # with no edge work stops, before *run_end*; *at* itself when the byte
-    # there leaves the state (see `search`). Kept out of the search loop,
-    # which it would slow for patterns that never reach it.
-    @[NoInline]
+    # there leaves the state (see `search`).
+    @[AlwaysInline]
     private def match_loop_end(haystack : Bytes, row : Int32, at : Int32, run_end : Int32) : Int32
       steps = @steps.to_unsafe
       class_of = @byte_classes.table
