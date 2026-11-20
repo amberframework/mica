@@ -52,6 +52,8 @@ module Mica::Regex
     # The lazily built parts are published through atomics, so a search
     # on another thread that sees one sees it fully built.
     @reverse = Atomic(LazyDFA?).new(nil)
+    # `ends_at_text_end?`, worked out on first use: 0 not yet, 1 yes, 2 no.
+    @ends_at_text_end = Atomic(Int32).new(0)
     @reverse_with_reversed_classes = Atomic(LazyDFA?).new(nil)
     # See `list_of_required_bytes_past_literals`.
     @required_bytes_past_literals = Atomic(Array(UInt8)?).new(nil)
@@ -95,7 +97,7 @@ module Mica::Regex
       # A program with class runs (`Program::ClassRun`) writes its states
       # out here, once, so the plan's engines read each state from one
       # array (`Program#state_at`); its first searches built nothing.
-      @program.list_of_states
+      @program.materialized_states
       @short_searches = Atomic(Int32).new(@program.first_search_count)
       @backtracked_starts = Atomic(Int32).new(@program.first_searches_ended? ? FirstSearch::SEARCHES : 0)
       @byte_classes = ByteClasses.new(@program)
@@ -159,7 +161,8 @@ module Mica::Regex
     # `StartOfText` assertion before it reads a byte or matches.
     def self.anchored_start?(program : Program) : Bool
       visited = VisitedStates.new(program.state_count)
-      list_of_pending = [program.start_state]
+      list_of_pending = OffHeapList(Int32).new(8)
+      list_of_pending << program.start_state
       while index = list_of_pending.pop?
         next unless visited.add?(index)
         state = program.state_at(index)
@@ -178,39 +181,100 @@ module Mica::Regex
         end
       end
       true
+    ensure
+      list_of_pending.try(&.free)
+      visited.try(&.free)
     end
 
     # The NFA states a walk from the start state has visited: bits on the
     # stack for a program of up to `SMALL_STATES` states (no allocation, as
-    # the first search of most programs needs), a set for a larger one.
+    # the first search of most programs needs), and for a larger one in a
+    # bitset outside the collector's heap, which `free` returns.
     private struct VisitedStates
       SMALL_STATES = 512
 
       @bits = StaticArray(UInt64, 8).new(0_u64)
-      @large : Set(Int32)? = nil
+      @large = OffHeapList(UInt64).new
 
       def initialize(state_count : Int32)
-        @large = Set(Int32).new if state_count > SMALL_STATES
+        @large.fill_to((state_count + 63) // 64, 0_u64) if state_count > SMALL_STATES
+      end
+
+      def free : Nil
+        @large.free
       end
 
       # Marks *index* visited; false when it already was.
       def add?(index : Int32) : Bool
-        if large = @large
-          return large.add?(index)
-        end
         word = index >> 6
         bit = 1_u64 << (index & 63)
+        unless @large.empty?
+          return false if @large.unsafe_fetch(word) & bit != 0
+          @large.unsafe_put(word, @large.unsafe_fetch(word) | bit)
+          return true
+        end
         return false if @bits[word] & bit != 0
         @bits[word] |= bit
         true
       end
     end
 
+    # True when every match ends at the end of the text, or before a line
+    # feed that ends it: every path from the start state to a match state
+    # passes `\z` (`EndOfText`) or `$` (`EndOfTextOrFinalNewline`), and
+    # a path past one of those can read at most that final line feed.
+    # Worked out on the first call (see `SearchPlan.ends_at_text_end?`).
+    def ends_at_text_end? : Bool
+      known = @ends_at_text_end.get(:relaxed)
+      return known == 1 unless known == 0
+      ends = SearchPlan.ends_at_text_end?(@program)
+      @ends_at_text_end.set(ends ? 1 : 2, :relaxed)
+      ends
+    end
+
+    # See the instance method. A program with no such assertion is
+    # answered by one pass over its states; otherwise a walk from the start
+    # state that stops at each of them must not reach a match state.
+    def self.ends_at_text_end?(program : Program) : Bool
+      ends_seen = false
+      program.each_distinct_state do |state, _|
+        ends_seen = true if state.kind.look? && SearchPlan.text_end_look?(state)
+      end
+      return false unless ends_seen
+      visited = VisitedStates.new(program.state_count)
+      list_of_pending = [program.start_state]
+      while index = list_of_pending.pop?
+        next unless visited.add?(index)
+        state = program.state_at(index)
+        case state.kind
+        when .match?
+          return false
+        when .split?
+          list_of_pending << state.next_state << state.alternate
+        when .save?, .byte_range?
+          list_of_pending << state.next_state
+        when .look?
+          list_of_pending << state.next_state unless SearchPlan.text_end_look?(state)
+        when .sparse?
+          state.alternate.times { |offset| list_of_pending << program.transition_at(index, state, offset).target }
+        end
+      end
+      true
+    end
+
+    # True when *state* (a look state) asserts the end of the text, or the
+    # end before a final line feed.
+    protected def self.text_end_look?(state : Program::State) : Bool
+      kind = Program::LookKind.new(state.argument)
+      kind.end_of_text? || kind.end_of_text_or_final_newline?
+    end
+
     # True when a path from *program*'s start state reaches a match state
     # through splits and group saves alone: no byte, and no assertion.
     def self.empty_match_everywhere?(program : Program) : Bool
       visited = VisitedStates.new(program.state_count)
-      list_of_pending = [program.start_state]
+      list_of_pending = OffHeapList(Int32).new(8)
+      list_of_pending << program.start_state
       while index = list_of_pending.pop?
         next unless visited.add?(index)
         state = program.state_at(index)
@@ -221,6 +285,9 @@ module Mica::Regex
         end
       end
       false
+    ensure
+      list_of_pending.try(&.free)
+      visited.try(&.free)
     end
 
     # The reverse lazy DFA (built on first use; replaced once by
@@ -261,7 +328,7 @@ module Mica::Regex
       return if @widen_refused.get == 1
       current = @reverse.get
       return if current && current.with_reversed_classes?
-      return if @program.list_of_class_blocks.empty?
+      return if @program.class_blocks.empty?
       # The widened DFA has at least the program's nodes; only when those fit
       # are the reversed classes counted.
       scratch_per_node = DFABuilder::BYTES_PER_STATE.to_i64 * 2

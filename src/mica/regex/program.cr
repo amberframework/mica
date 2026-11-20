@@ -78,20 +78,34 @@ module Mica::Regex
     # held as the class's block (a large class's `ClassMemo::Block`, shared
     # with every program, or an ASCII class's one byte state) rather than
     # as states: `x{n}` (`\p{L}{256}` is 256 copies of about 300 states).
-    # Copy k starts at
-    # `first_state + k * block size`; copy 0 leads to *exit*, and each
-    # later copy to the entry of the copy before it, as the compiler emits
-    # a counted item from the last copy back. Its `Sparse` states read
-    # shared table *table_id*. A copy's states are exactly the ones
-    # `Compiler#instantiate_shared` would have emitted (see `state_at`).
+    # Copy k starts at `first_state + k * stride`; copy 0 leads to *exit*,
+    # and each later copy to the entry of the copy before it, as the
+    # compiler emits a counted item from the last copy back. Its `Sparse`
+    # states read shared table *table_id*. A copy's states are exactly the
+    # ones `Compiler#instantiate_shared` would have emitted (see `state_at`).
+    #
+    # An *optional* run holds the optional copies of `x{n,m}`
+    # (`[\w.]{1,256}` has 255): each copy is the class's block followed by
+    # one `Split` state, so its stride is one more than the block. The
+    # split enters the copy's block (first, unless the repetition is
+    # *lazy*) or leaves to *exit*, and a copy's block leads to the split of
+    # the copy before it (copy 0's to *exit*): the states
+    # `Compiler#compile_counted_item` emits for those copies one by one, in
+    # the same order and numbering.
     #
     # *entry_targets*, for a large class's block, is its entry's target
     # for each byte (`ClassMemo::Block#entry_targets`).
-    record ClassRun, first_state : Int32, copies : Int32, list_of_block_states : Array(State), table_id : UInt8,
-      entry : Int32, exit : Int32, entry_targets : Slice(Int32)? = nil do
+    record ClassRun, first_state : Int32, copies : Int32, list_of_block_states : OffHeapList(State), table_id : UInt8,
+      entry : Int32, exit : Int32, entry_targets : Slice(Int32)? = nil, optional : Bool = false, lazy : Bool = false do
+      # The states one copy takes: the block, and an optional copy's split.
+      @[AlwaysInline]
+      def stride : Int32
+        list_of_block_states.size + (optional ? 1 : 0)
+      end
+
       # The states the run stands for.
       def size : Int32
-        copies * list_of_block_states.size
+        copies * stride
       end
 
       # The number after the run's last state.
@@ -99,19 +113,35 @@ module Mica::Regex
         first_state + size
       end
 
-      # The entry of the copy a match reads first (the last emitted).
+      # The state a match reads first: the entry of the last copy emitted,
+      # or an optional run's last split.
       def last_entry : Int32
+        return first_state + size - 1 if optional
         first_state + (copies - 1) * list_of_block_states.size + entry
+      end
+
+      # Where copy *copy*, which starts at *copy_first*, leaves its block to.
+      @[AlwaysInline]
+      def block_exit(copy : Int32, copy_first : Int32) : Int32
+        return exit if copy == 0
+        optional ? copy_first - 1 : copy_first - stride + entry
       end
 
       # State *index*, which must lie in the run.
       def state_at(index : Int32) : State
+        step = stride
         block_size = list_of_block_states.size
         relative = index - first_state
-        copy = relative // block_size
-        copy_first = first_state + copy * block_size
-        state = list_of_block_states.unsafe_fetch(relative - copy * block_size)
-        exit_target = copy == 0 ? exit : copy_first - block_size + entry
+        copy = relative // step
+        copy_first = first_state + copy * step
+        inner = relative - copy * step
+        if inner == block_size
+          into = copy_first + entry
+          preferred, other = lazy ? {exit, into} : {into, exit}
+          return State.new(StateKind::Split, 0_u8, 0_u8, preferred, other, 0)
+        end
+        state = list_of_block_states.unsafe_fetch(inner)
+        exit_target = block_exit(copy, copy_first)
         return state.copy_with(low: table_id, next_state: exit_target) if state.kind.sparse?
         target = state.next_state
         target = if target == ClassMemo::EXIT
@@ -129,37 +159,41 @@ module Mica::Regex
         block_size = list_of_block_states.size
         # A class of one state is not recorded (see `list_of_class_blocks`).
         return if block_size < 2
+        step = stride
         copies.times do |copy|
-          copy_first = first_state + copy * block_size
-          exit_target = copy == 0 ? exit : copy_first - block_size + entry
-          yield ClassBlock.new(copy_first, copy_first + block_size, copy_first + entry, exit_target)
+          copy_first = first_state + copy * step
+          yield ClassBlock.new(copy_first, copy_first + block_size, copy_first + entry, block_exit(copy, copy_first))
         end
       end
     end
 
-    # The states not in a `ClassRun`, in order.
-    @list_of_physical_states : Array(State)
-    # Every state and class block, once built (see `list_of_states`).
-    # Published with release ordering and read with acquire, so a thread
-    # that sees an array sees it fully built: on ARM64 a plain store could
-    # reach another core before the array's contents. The blocks are
-    # published first, so a thread that sees the states sees the blocks.
-    @materialized = Atomic(Array(State)?).new(nil)
-    @materialized_blocks = Atomic(Array(ClassBlock)?).new(nil)
+    # The states not in a `ClassRun`, in order. The program's state and
+    # transition lists sit outside the collector's heap (`OffHeapList`),
+    # as PCRE2 keeps its compiled code, and `finalize` frees them.
+    @list_of_physical_states : OffHeapList(State)
+    # Every state and class block, once built (see `list_of_states`): for
+    # a program without runs, the physical states and the recorded blocks
+    # themselves. `@materialized` is set with release ordering after both
+    # lists are written and read with acquire, so a thread that sees it set
+    # sees them fully built: on ARM64 a plain store could reach another
+    # core before the lists' contents.
+    @materialized = Atomic(Bool).new(false)
+    @all_states = OffHeapList(State).new
+    @all_blocks = OffHeapList(ClassBlock).new
     # The class blocks the compiler recorded outside runs.
-    @list_of_recorded_blocks : Array(ClassBlock)
+    @list_of_recorded_blocks : OffHeapList(ClassBlock)
     # The program's runs, in state order.
     getter list_of_runs : Array(ClassRun)
     # The states of the runs before each run (`run_state_at` turns a state
     # number past a run into an index in `@list_of_physical_states`).
-    @list_of_run_offsets : Array(Int32)
+    @list_of_run_offsets : OffHeapList(Int32)
     # The most runs one `run_state_at` reads (see `run_reads_per_state`).
     @run_reads_per_state : Int32
     @state_count : Int32
     # Guards `materialize` (made only for a program with runs).
     @materialize_mutex : Mutex? = nil
     # The ranges of every `Sparse` state.
-    getter list_of_transitions : Array(Transition)
+    @list_of_transitions : OffHeapList(Transition)
     # The state every search starts from.
     getter start_state : Int32
     # Capturing groups (group 0, the whole match, not included).
@@ -180,7 +214,7 @@ module Mica::Regex
     # The transition tables of the large classes the program uses, shared
     # with every program that uses them (`ClassMemo::Block`), so a copy
     # of `\w` emits its states but none of its transitions. Never changed.
-    getter list_of_shared_tables : Array(Array(Transition))
+    getter list_of_shared_tables : Array(OffHeapList(Transition))
 
     # For shared table n - 1, its block's entry targets
     # (`ClassMemo::Block#entry_targets`; empty, or past the list, for a
@@ -189,54 +223,104 @@ module Mica::Regex
     # Never changed.
     @list_of_entry_targets : Array(Slice(Int32))?
 
+    # The shared tables and runs of every program that has none (never
+    # changed: a compiler that adds one starts a list of its own).
+    NO_SHARED_TABLES = [] of OffHeapList(Transition)
+    NO_RUNS          = [] of ClassRun
+
     # The target in a shared table that stands for the state's
     # `next_state` (the state after the class).
     SHARED_EXIT = Int32::MIN
 
     # *list_of_states* holds every state outside *list_of_runs*.
-    def initialize(list_of_states : Array(State), @list_of_transitions : Array(Transition), @start_state : Int32,
+    def initialize(list_of_states : OffHeapList(State), @list_of_transitions : OffHeapList(Transition), @start_state : Int32,
                    @capture_count : Int32, @list_of_group_names : Array(Ast::GroupName), @options : CompileOptions,
                    @backtracker_allowance : Int64, @source_end : Ast::SourceEnd = Ast::SourceEnd::Closed,
                    @literal_set : LiteralSet? = nil,
-                   list_of_class_blocks : Array(ClassBlock) = [] of ClassBlock,
-                   @list_of_shared_tables : Array(Array(Transition)) = [] of Array(Transition),
-                   @list_of_runs : Array(ClassRun) = [] of ClassRun,
-                   @list_of_entry_targets : Array(Slice(Int32))? = nil)
+                   list_of_class_blocks : OffHeapList(ClassBlock) = OffHeapList(ClassBlock).new,
+                   @list_of_shared_tables : Array(OffHeapList(Transition)) = NO_SHARED_TABLES,
+                   @list_of_runs : Array(ClassRun) = NO_RUNS,
+                   @list_of_entry_targets : Array(Slice(Int32))? = nil,
+                   @list_of_owned_blocks : Array(ClassMemo::Block)? = nil)
       @list_of_physical_states = list_of_states
       @list_of_recorded_blocks = list_of_class_blocks
       @state_count = list_of_states.size + @list_of_runs.sum(&.size)
       offset = 0
-      @list_of_run_offsets = @list_of_runs.map do |run|
-        before = offset
+      @list_of_run_offsets = OffHeapList(Int32).new(@list_of_runs.size)
+      @list_of_runs.each do |run|
+        @list_of_run_offsets << offset
         offset += run.size
-        before
       end
       # A binary search over the runs, then the run it found.
       @run_reads_per_state = @list_of_runs.empty? ? 0 : @list_of_runs.size.bit_length + 1
+      # The program is reachable from its own plan, so its lists are freed
+      # by an owner outside that cycle (see `OffHeapOwner`). The lists and
+      # the blocks the memo did not keep (an ASCII class's run block, a
+      # repeated class), which the runs and tables above read, are freed
+      # with the program; nothing reads them without holding the program.
+      @owner.track(@list_of_physical_states.to_unsafe)
+      @owner.track(@list_of_transitions.to_unsafe)
+      @owner.track(@list_of_recorded_blocks.to_unsafe)
+      @owner.track(@list_of_run_offsets.to_unsafe)
+      @list_of_owned_blocks.try(&.each { |block| block.each_buffer { |buffer| @owner.track(buffer) } })
       if @list_of_runs.empty?
-        @materialized_blocks.set(list_of_class_blocks, :release)
-        @materialized.set(list_of_states, :release)
+        @all_states = list_of_states
+        @all_blocks = list_of_class_blocks
+        @materialized.set(true, :release)
       else
         @materialize_mutex = Mutex.new
       end
     end
 
-    # Every state, indexed by number. A program with runs (`ClassRun`)
-    # builds this on first use, which the plan makes (its first
-    # searches read states through `state_at` and build nothing).
-    @[AlwaysInline]
+    @owner = OffHeapOwner.new
+
+    # Every state, indexed by number, as a new array (for specs and
+    # diagnostics; the engines read `state_at`). A program with runs
+    # (`ClassRun`) builds its full list on first use, which the plan
+    # makes (its first searches read states through `state_at` and build
+    # nothing).
     def list_of_states : Array(State)
-      @materialized.get(:acquire) || materialize
+      materialized_states.to_a
     end
 
-    # The classes of more than one state, in emission order (built with
-    # `list_of_states`).
+    # The ranges of every `Sparse` state, as a new array (for specs).
+    def list_of_transitions : Array(Transition)
+      @list_of_transitions.to_a
+    end
+
+    # The classes of more than one state, in emission order, as a new
+    # array (for specs; built with the states).
     def list_of_class_blocks : Array(ClassBlock)
-      if blocks = @materialized_blocks.get(:acquire)
-        return blocks
-      end
-      materialize
-      @materialized_blocks.get(:acquire) || raise Mica::Error.new("internal error: the program's class blocks were not built")
+      class_blocks.to_a
+    end
+
+    # :nodoc:
+    # Every state, built on first use. The list sits outside the
+    # collector's heap and is freed with the program: read it only while
+    # holding the program.
+    def materialized_states : OffHeapList(State)
+      @materialized.get(:acquire) ? @all_states : materialize
+    end
+
+    # :nodoc:
+    # The class blocks (see `list_of_class_blocks`), with the same rule as
+    # `materialized_states`.
+    def class_blocks : OffHeapList(ClassBlock)
+      materialize unless @materialized.get(:acquire)
+      @all_blocks
+    end
+
+    # :nodoc:
+    # The first of the program's own transitions, with the same rule as
+    # `materialized_states`.
+    def transition_table : Pointer(Transition)
+      @list_of_transitions.to_unsafe
+    end
+
+    # :nodoc:
+    # The number of the program's own transitions.
+    def transition_count : Int32
+      @list_of_transitions.size
     end
 
     # State *index*, read without building `list_of_states`. Before the
@@ -244,8 +328,8 @@ module Mica::Regex
     # search over the runs: at most `run_reads_per_state` runs read.
     @[AlwaysInline]
     def state_at(index : Int32) : State
-      if states = @materialized.get(:acquire)
-        states.unsafe_fetch(index)
+      if @materialized.get(:acquire)
+        @all_states.unsafe_fetch(index)
       else
         run_state_at(index) { }
       end
@@ -260,8 +344,8 @@ module Mica::Regex
     # lookups as it bounds the visits.
     @[AlwaysInline]
     def state_at(index : Int32, meter : SearchMeter, at : Int32) : State
-      if states = @materialized.get(:acquire)
-        states.unsafe_fetch(index)
+      if @materialized.get(:acquire)
+        @all_states.unsafe_fetch(index)
       else
         run_state_at(index) { meter.charge(1, at) }
       end
@@ -278,14 +362,14 @@ module Mica::Regex
     # True while the program's runs have not been built into
     # `list_of_states` (for specs).
     def runs_pending? : Bool
-      @materialized.get(:acquire).nil?
+      !@materialized.get(:acquire)
     end
 
     # Yields every state with its number, in order, without building
     # `list_of_states`: a run's states are worked out from its block.
     def each_state(& : State, Int32 ->) : Nil
-      if states = @materialized.get(:acquire)
-        states.each_with_index { |state, index| yield state, index }
+      if @materialized.get(:acquire)
+        @all_states.each_with_index { |state, index| yield state, index }
         return
       end
       index = 0
@@ -315,8 +399,8 @@ module Mica::Regex
     # of a copy). Reads each physical state and each run's block once,
     # without building `list_of_states`.
     def each_distinct_state(& : State, Int32 ->) : Nil
-      if states = @materialized.get(:acquire)
-        states.each { |state| yield state, 1 }
+      if @materialized.get(:acquire)
+        @all_states.each { |state| yield state, 1 }
         return
       end
       @list_of_physical_states.each { |state| yield state, 1 }
@@ -324,6 +408,8 @@ module Mica::Regex
         run.list_of_block_states.each do |state|
           yield state.kind.sparse? ? state.copy_with(low: run.table_id) : state, run.copies
         end
+        # An optional run's splits (their targets are those of the first copy).
+        yield run.state_at(run.first_state + run.stride - 1), run.copies if run.optional
       end
     end
 
@@ -370,14 +456,12 @@ module Mica::Regex
 
     # Builds every state and class block from the physical states and the
     # runs, once; threads racing here wait for the first.
-    private def materialize : Array(State)
+    private def materialize : OffHeapList(State)
       mutex = @materialize_mutex || raise Mica::Error.new("internal error: a program without runs has every state")
       mutex.synchronize do
-        if built = @materialized.get(:acquire)
-          return built
-        end
-        states = Array(State).new(@state_count)
-        blocks = Array(ClassBlock).new(@list_of_recorded_blocks.size + @list_of_runs.sum(&.copies))
+        return @all_states if @materialized.get(:acquire)
+        states = OffHeapList(State).new(@state_count)
+        blocks = OffHeapList(ClassBlock).new(@list_of_recorded_blocks.size + @list_of_runs.sum(&.copies))
         physical = 0
         recorded = 0
         @list_of_runs.each do |run|
@@ -400,8 +484,11 @@ module Mica::Regex
           blocks << @list_of_recorded_blocks[recorded]
           recorded += 1
         end
-        @materialized_blocks.set(blocks, :release)
-        @materialized.set(states, :release)
+        @owner.track(states.to_unsafe)
+        @owner.track(blocks.to_unsafe)
+        @all_states = states
+        @all_blocks = blocks
+        @materialized.set(true, :release)
         states
       end
     end
@@ -409,7 +496,6 @@ module Mica::Regex
     # Published through an atomic, so a thread that sees the plan sees it
     # fully built.
     @plan = Atomic(SearchPlan?).new(nil)
-    @plan_mutex = Mutex.new
     # Single searches run on the backtracker so far (see `FirstSearch`),
     # or `FIRST_SEARCHES_ENDED`.
     @first_searches = Atomic(Int32).new(0)
@@ -465,14 +551,13 @@ module Mica::Regex
       @plan.get(:acquire) || build_plan
     end
 
+    # Threads racing here may each build a plan; the first to publish
+    # wins and the others drop theirs, so building takes no lock (and the
+    # program no mutex object).
     private def build_plan : SearchPlan
-      @plan_mutex.synchronize do
-        built = @plan.get
-        return built if built
-        built = SearchPlan.new(self)
-        @plan.set(built)
-        built
-      end
+      built = SearchPlan.new(self)
+      _, published = @plan.compare_and_set(nil, built)
+      published ? built : plan
     end
 
     # The ASCII bytes every match contains (see
@@ -710,7 +795,7 @@ module Mica::Regex
       high = state.argument + state.alternate
       linear_end = Math.min(high, low + SPARSE_LINEAR_READS)
       while low < linear_end
-        transition = table.unsafe_fetch(low)
+        transition = table[low]
         if byte <= transition.high
           return byte >= transition.low ? resolve(state_index, state, transition.target) : -1
         end
@@ -718,7 +803,7 @@ module Mica::Regex
       end
       while low < high
         middle = (low + high) >> 1
-        transition = table.unsafe_fetch(middle)
+        transition = table[middle]
         if transition.high < byte
           low = middle + 1
         elsif transition.low > byte
@@ -751,8 +836,10 @@ module Mica::Regex
     end
 
     @[AlwaysInline]
-    private def table_of(state : State) : Array(Transition)
-      state.low == 0 ? @list_of_transitions : @list_of_shared_tables[state.low.to_i32 - 1]
+    # The first transition of the table *state* reads (its own list or a
+    # shared table).
+    private def table_of(state : State) : Pointer(Transition)
+      state.low == 0 ? @list_of_transitions.to_unsafe : @list_of_shared_tables[state.low.to_i32 - 1].to_unsafe
     end
 
     @[AlwaysInline]

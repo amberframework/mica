@@ -71,7 +71,7 @@ module Mica::Regex
     PREVIOUS_UNICODE_WORD = 0x100 # the character read last was a Unicode word character (Unicode assertions)
     MATCH_BEHIND          = 0x200 # the closure before the last byte reached a match
     # A start state never carries `MATCH_BEHIND`, so its flags index a
-    # table of this many entries (see `DFACache#start_state`).
+    # table of this many entries (see `DFACache#start_entry`).
     START_FLAG_COUNT = MATCH_BEHIND
 
     # Per-state markers in `DFACache` (one byte per state).
@@ -91,10 +91,6 @@ module Mica::Regex
     # Entries per state in the transition table: one per class, then the
     # end of input, then (forward) a line feed that ends the haystack.
     getter stride : Int32
-    # A new state's row: every transition still to build (-1).
-    getter unbuilt_row : Array(Int32)
-    # A dead state's row: every transition to the dead state.
-    getter dead_row : Array(Int32)
     @reverse_nfa : ReverseNFA?
     @relevant_flags : Int32
     # The slot of each start's flags in a cache's start table, in two
@@ -178,8 +174,6 @@ module Mica::Regex
       # so a row offset leaves three low bits free for flags (see `find_end`).
       symbols = @unicode_words ? @word_offset + class_count : @word_offset
       @stride = (symbols + 7) & ~7
-      @unbuilt_row = Array(Int32).new(@stride, -1)
-      @dead_row = Array(Int32).new(@stride, SPECIAL)
       @reverse_nfa = @reverse ? ReverseNFA.new(@program, @with_reversed_classes) : nil
       line_start = looks.includes?(Program::LookKind::StartOfLine)
       text_start = looks.includes?(Program::LookKind::StartOfText)
@@ -252,10 +246,23 @@ module Mica::Regex
     end
 
     # The assertion kinds *program* uses.
-    def self.looks_used(program : Program) : Array(Program::LookKind)
-      list_of_kinds = [] of Program::LookKind
-      program.each_distinct_state { |state, _| list_of_kinds << Program::LookKind.new(state.argument) if state.kind.look? }
-      list_of_kinds.uniq!
+    def self.looks_used(program : Program) : LookSet
+      bits = 0_u32
+      program.each_distinct_state { |state, _| bits |= 1_u32 << state.argument if state.kind.look? }
+      LookSet.new(bits)
+    end
+
+    # :nodoc:
+    # A set of `Program::LookKind`s, one bit each.
+    record LookSet, bits : UInt32 do
+      def includes?(kind : Program::LookKind) : Bool
+        bits & (1_u32 << kind.value) != 0
+      end
+
+      def any?(& : Program::LookKind -> Bool) : Bool
+        Program::LookKind.each { |kind| return true if includes?(kind) && yield kind }
+        false
+      end
     end
 
     protected def self.unicode_word?(kind : Program::LookKind) : Bool
@@ -319,9 +326,8 @@ module Mica::Regex
                  scan : PrefilterScan?, meter : SearchMeter, stop : Int32 = Int32::MAX) : Int32
       size = haystack.size
       limit = @final_lf && size > start && haystack.unsafe_fetch(size - 1) == Look::LINE_FEED ? size - 1 : size
-      state = cache.start_state(self, start_flags(haystack, start, anchored), meter)
-      return GAVE_UP if state < 0
-      current = cache.entry_of(state)
+      current = cache.start_entry(self, start_flags(haystack, start, anchored), meter)
+      return GAVE_UP if current < 0
       last_end = NO_MATCH
       at = start
       bytes = haystack.to_unsafe
@@ -340,9 +346,8 @@ module Mica::Regex
           if candidate > at
             cache.note_bytes(candidate - at)
             at = candidate
-            state = cache.start_state(self, start_flags(haystack, at, anchored), meter)
-            return GAVE_UP if state < 0
-            current = cache.entry_of(state)
+            current = cache.start_entry(self, start_flags(haystack, at, anchored), meter)
+            return GAVE_UP if current < 0
           end
           scan = nil if scan.ineffective?
         end
@@ -451,9 +456,8 @@ module Mica::Regex
     # Returns the start, `NO_MATCH`, or `GAVE_UP`.
     def find_start(cache : DFACache, haystack : Bytes, finish : Int32, lower_bound : Int32,
                    meter : SearchMeter) : Int32
-      state = cache.start_state(self, reverse_start_flags(haystack, finish), meter)
-      return GAVE_UP if state < 0
-      current = cache.entry_of(state)
+      current = cache.start_entry(self, reverse_start_flags(haystack, finish), meter)
+      return GAVE_UP if current < 0
       last_start = NO_MATCH
       at = finish
       bytes = haystack.to_unsafe
@@ -601,9 +605,8 @@ module Mica::Regex
             next
           end
         end
-        state = cache.start_state(self, start_flags(haystack, origin, true), meter)
-        return {GAVE_UP, 0} if state < 0
-        current = cache.entry_of(state)
+        current = cache.start_entry(self, start_flags(haystack, origin, true), meter)
+        return {GAVE_UP, 0} if current < 0
         last_end = NO_MATCH
         at = origin
         table = cache.transition_table.to_unsafe

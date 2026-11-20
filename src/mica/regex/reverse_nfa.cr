@@ -46,7 +46,7 @@ module Mica::Regex
       node_count = program.state_count
       if reverse_classes
         closed = ReverseNFA.closed_blocks(program)
-        program.list_of_class_blocks.each_with_index do |block, index|
+        program.class_blocks.each_with_index do |block, index|
           next unless closed[index]
           node_count = ReverseNFA.reverse_class(program, block, node_count, list_of_class_edges, reversed)
         end
@@ -114,7 +114,7 @@ module Mica::Regex
     def self.widened_node_count(program : Program, limit : Int64) : Int64
       closed = closed_blocks(program)
       count = program.state_count.to_i64
-      program.list_of_class_blocks.each_with_index do |block, index|
+      program.class_blocks.each_with_index do |block, index|
         next unless closed[index]
         budget = REVERSED_NODES_PER_STATE * (block.end_state - block.first_state)
         if reversed_class = ReversedClass.for(program, block, budget)
@@ -130,7 +130,7 @@ module Mica::Regex
     # compile it again; a copy that led into the original's inner states
     # would lose its paths once those states have no reverse edges).
     protected def self.closed_blocks(program : Program) : Array(Bool)
-      blocks = program.list_of_class_blocks
+      blocks = program.class_blocks
       closed = Array(Bool).new(blocks.size, true)
       block_of = Array(Int32).new(program.state_count, -1)
       blocks.each_with_index do |block, index|

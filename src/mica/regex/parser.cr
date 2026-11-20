@@ -66,10 +66,11 @@ module Mica::Regex
     @list_of_group_names = [] of Ast::GroupName
     # The first entry of `@list_of_group_names` for each name and for each
     # group number, and every (name, number) pair recorded, so each new
-    # name is checked in constant time.
-    @first_entry_by_name = {} of String => Int32
-    @first_entry_by_number = {} of Int32 => Int32
-    @defined_pairs = Set({String, Int32}).new
+    # name is checked in constant time. Made with the first group name, so
+    # a pattern without one allocates none of them.
+    @first_entry_by_name : Hash(String, Int32)? = nil
+    @first_entry_by_number : Hash(Int32, Int32)? = nil
+    @defined_pairs : Set({String, Int32})? = nil
 
     # Parses *pattern* (validated as UTF-8 first). *options* are the
     # options in force at the start; *limits*, *ledger* and *meter* bound
@@ -688,29 +689,32 @@ module Mica::Regex
         syntax_error("too many named subpatterns (maximum #{MAX_NAME_COUNT})", @pos)
       end
       charge_work(3)
-      by_name = @first_entry_by_name[group_name]?
-      by_number = @first_entry_by_number[number]?
+      entry_by_name = @first_entry_by_name ||= {} of String => Int32
+      entry_by_number = @first_entry_by_number ||= {} of Int32 => Int32
+      defined_pairs = @defined_pairs ||= Set({String, Int32}).new
+      by_name = entry_by_name[group_name]?
+      by_number = entry_by_number[number]?
       if by_number && (by_name.nil? || by_number < by_name)
         syntax_error("different names for subpatterns of the same number are not allowed", @pos)
       end
       if by_name
         return if @list_of_group_names[by_name].capture_index == number
         syntax_error("two named subpatterns have the same name (PCRE2_DUPNAMES not set)", @pos) unless @dupnames
-        return if @defined_pairs.includes?({group_name, number})
+        return if defined_pairs.includes?({group_name, number})
       end
       @ledger.charge_append(sizeof(Ast::GroupName), "a group name", offset)
       @list_of_group_names << Ast::GroupName.new(group_name, number)
       index = @list_of_group_names.size - 1
       unless by_name
         @ledger.charge_hash_entry(sizeof(String) + sizeof(Int32), "a group name", offset)
-        @first_entry_by_name[group_name] = index
+        entry_by_name[group_name] = index
       end
       unless by_number
         @ledger.charge_hash_entry(sizeof(Int32) * 2, "a group name", offset)
-        @first_entry_by_number[number] = index
+        entry_by_number[number] = index
       end
       @ledger.charge_hash_entry(sizeof({String, Int32}), "a group name", offset)
-      @defined_pairs << {group_name, number}
+      defined_pairs << {group_name, number}
     end
 
     private def next_group_number(start : Int32) : Int32

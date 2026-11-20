@@ -12,9 +12,9 @@ module Mica::Regex
   # WARNING: A cache belongs to one search at a time.
   class DFACache
     # The transition table (see the class description).
-    getter transition_table : Array(Int32)
+    getter transition_table : OffHeapList(Int32)
     # One byte of `LazyDFA::MARK_*` bits per state.
-    getter list_of_marks : Array(UInt8)
+    getter list_of_marks : OffHeapList(UInt8)
     # How many times the cache has been cleared.
     getter clears = 0
     # True once a clear found the searches building a state for fewer than
@@ -51,12 +51,12 @@ module Mica::Regex
     # The keys of the states, one after another, and where each begins
     # (one entry more than there are states): a state costs no allocation
     # of its own, only growth of these lists (see `key_of`).
-    @list_of_key_values : Array(Int32)
-    @list_of_key_starts : Array(Int32)
+    @list_of_key_values : OffHeapList(Int32)
+    @list_of_key_starts : OffHeapList(Int32)
     # The states by key: an open-addressing table of state ids (`NO_STATE`
     # where empty), a power of two in size, never more than half full.
-    @list_of_state_slots : Array(Int32)
-    @start_states : Array(Int32)
+    @list_of_state_slots : OffHeapList(Int32)
+    @start_entries : OffHeapList(Int32)
     @builder : DFABuilder
     @bytes_used = 0_i64
     @reservation : CacheReservation
@@ -107,14 +107,29 @@ module Mica::Regex
     private NO_STATE = -1
 
     protected def initialize(@dfa : LazyDFA, @pool : CachePool, @reservation : CacheReservation, @builder : DFABuilder)
-      @transition_table = Array(Int32).new(Math.min(FIRST_STATES * @dfa.stride, FIRST_TABLE_ENTRIES))
-      @list_of_marks = Array(UInt8).new(FIRST_STATES)
-      @list_of_key_values = Array(Int32).new(FIRST_STATES * 2)
-      @list_of_key_starts = Array(Int32).new(FIRST_STATES + 1)
+      @transition_table = OffHeapList(Int32).new(Math.min(FIRST_STATES * @dfa.stride, FIRST_TABLE_ENTRIES))
+      @list_of_marks = OffHeapList(UInt8).new(FIRST_STATES)
+      @list_of_key_values = OffHeapList(Int32).new(FIRST_STATES * 2)
+      @list_of_key_starts = OffHeapList(Int32).new(FIRST_STATES + 1)
       @list_of_key_starts << 0
-      @list_of_state_slots = Array(Int32).new(FIRST_STATES * 2, NO_STATE)
-      @start_states = Array(Int32).new(@dfa.start_slot_count, -1)
+      @list_of_state_slots = OffHeapList(Int32).new(FIRST_STATES * 2, NO_STATE)
+      @start_entries = OffHeapList(Int32).new(@dfa.start_slot_count, -1)
+      growing_lists.each { |list| @owner.track(list) }
+      @owner.track(@start_entries.to_unsafe)
       reset_states
+    end
+
+    # The tables sit outside the collector's heap. The cache is reachable
+    # from its own program (through the plan's leases and its DFA), so an
+    # owner outside that cycle frees them (see `OffHeapOwner`); every
+    # growth that moves a list is recorded there (`add_state`).
+    @owner = OffHeapOwner.new
+
+    # The lists that grow, as `add_state` records them before and after.
+    private def growing_lists : StaticArray(Pointer(Void), 5)
+      StaticArray[@transition_table.to_unsafe.as(Void*), @list_of_marks.to_unsafe.as(Void*),
+        @list_of_key_values.to_unsafe.as(Void*), @list_of_key_starts.to_unsafe.as(Void*),
+        @list_of_state_slots.to_unsafe.as(Void*)]
     end
 
     # Bytes the builder's scratch space and the cache's fixed parts take.
@@ -161,15 +176,26 @@ module Mica::Regex
       @reservation.release_all
     end
 
-    # Returns the start state for *flags*, building it when needed, or
-    # `LazyDFA::GAVE_UP`.
-    def start_state(dfa : LazyDFA, flags : Int32, meter : SearchMeter) : Int32
+    # Returns the entry (see `entry_of`) of the start state for *flags*,
+    # building the state when needed, or `LazyDFA::GAVE_UP`. The table
+    # keeps entries rather than ids, so a search that starts often (an
+    # anchored try at each prefilter candidate) pays one load for its start.
+    def start_entry(dfa : LazyDFA, flags : Int32, meter : SearchMeter) : Int32
       slot = dfa.start_slot(flags)
-      cached = @start_states.unsafe_fetch(slot)
+      cached = @start_entries.unsafe_fetch(slot)
       return cached if cached >= 0
       id = intern(dfa.start_key(flags, @builder), meter)
-      @start_states[slot] = id if id >= 0
-      id
+      return id if id < 0
+      entry = entry_of(id)
+      @start_entries[slot] = entry
+      entry
+    end
+
+    # Returns the id of the start state for *flags* (see `start_entry`),
+    # or `LazyDFA::GAVE_UP`.
+    def start_state(dfa : LazyDFA, flags : Int32, meter : SearchMeter) : Int32
+      entry = start_entry(dfa, flags, meter)
+      entry < 0 ? entry : (entry & LazyDFA::ROW_MASK) // dfa.stride
     end
 
     # Builds the transition of *state* on *symbol*, records it, and returns
@@ -274,12 +300,13 @@ module Mica::Regex
     end
 
     private def add_state(key : Slice(Int32), cost : Int64) : Int32
+      before = growing_lists
       id = state_count
       @list_of_key_values.concat(key)
       @list_of_key_starts << @list_of_key_values.size
       place(id)
       # The dead states lead only to the dead state (entry 0 | SPECIAL).
-      @transition_table.concat(id <= LazyDFA::DEAD_MATCH ? @dfa.dead_row : @dfa.unbuilt_row)
+      @transition_table.fill_to(@transition_table.size + @dfa.stride, id <= LazyDFA::DEAD_MATCH ? LazyDFA::SPECIAL : -1)
       mark = 0_u8
       mark |= LazyDFA::MARK_MATCH if key.unsafe_fetch(0) & LazyDFA::MATCH_BEHIND != 0
       mark |= LazyDFA::MARK_DEAD if id <= LazyDFA::DEAD_MATCH
@@ -288,6 +315,8 @@ module Mica::Regex
       @bytes_used += cost
       @states_since_clear += 1
       @states_built += 1
+      after = growing_lists
+      before.each_with_index { |list, index| @owner.retrack(list, after[index]) }
       id
     end
 
@@ -347,7 +376,7 @@ module Mica::Regex
       @generation += 1
       @bytes_used = fixed_bytes
       @bytes_since_clear = 0_i64
-      @start_states.fill(-1)
+      @start_entries.fill(-1)
       if state_count == 0
         # Not the builder's key: a clear can run while `intern` holds it.
         dead = StaticArray[0]
@@ -371,20 +400,29 @@ module Mica::Regex
     # A state is visited (or a target) in the current build when its stamp
     # equals the current generation, so starting a build is one increment,
     # and each set takes 4 bytes per NFA state.
-    @visited_stamps : Array(UInt32)
+    @visited_stamps : OffHeapList(UInt32)
     @visit_generation = 0_u32
-    @target_stamps : Array(UInt32)
+    @target_stamps : OffHeapList(UInt32)
     @target_generation = 0_u32
-    @stack = [] of Int32
-    @outputs = [] of Int32
-    @key = [] of Int32
+    @stack = OffHeapList(Int32).new
+    @outputs = OffHeapList(Int32).new
+    @key = OffHeapList(Int32).new
 
     # The bytes of the two stamp tables per NFA state.
     BYTES_PER_STATE = 8
 
     def initialize(state_count : Int32)
-      @visited_stamps = Array(UInt32).new(state_count, 0_u32)
-      @target_stamps = Array(UInt32).new(state_count, 0_u32)
+      @visited_stamps = OffHeapList(UInt32).new(state_count, 0_u32)
+      @target_stamps = OffHeapList(UInt32).new(state_count, 0_u32)
+    end
+
+    # Returns the scratch lists to libc once the builder is unreachable.
+    def finalize
+      @visited_stamps.free
+      @target_stamps.free
+      @stack.free
+      @outputs.free
+      @key.free
     end
 
     # The most NFA states (or reverse NFA nodes) a DFA built here may have.
@@ -400,7 +438,7 @@ module Mica::Regex
 
     # The generation after *generation* for *stamps*, clearing them when
     # the counter wraps around.
-    protected def self.next_generation(stamps : Array(UInt32), generation : UInt32) : UInt32
+    protected def self.next_generation(stamps : OffHeapList(UInt32), generation : UInt32) : UInt32
       generation &+= 1
       return generation unless generation == 0
       stamps.fill(0_u32)

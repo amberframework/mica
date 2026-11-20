@@ -9,9 +9,12 @@ module Mica::Regex
   class ByteClasses
     # The number of classes (1 to 256).
     getter class_count : Int32
-    @class_of : StaticArray(UInt8, 256)
-    # The first byte of each class, in order (the first `class_count`).
-    @list_of_representatives : StaticArray(UInt8, 256)
+    # The class of each byte, then (from byte 256) the first byte of each
+    # class, in order (the first `class_count`): one 512-byte table from
+    # libc (`OffHeap`), so the object on the collector's heap is small;
+    # `finalize` frees it.
+    @class_of : Pointer(UInt8)
+    @list_of_representatives : Pointer(UInt8)
 
     def initialize(program : Program)
       boundaries = StaticArray(Bool, 257).new(false)
@@ -22,8 +25,9 @@ module Mica::Regex
       {% for range in [{0x0A, 0x0A}, {0x30, 0x39}, {0x41, 0x5A}, {0x5F, 0x5F}, {0x61, 0x7A}, {0x80, 0xBF}] %}
         ByteClasses.mark(pointerof(boundaries), {{range[0]}}, {{range[1]}})
       {% end %}
-      @class_of = StaticArray(UInt8, 256).new(0_u8)
-      @list_of_representatives = StaticArray(UInt8, 256).new(0_u8)
+      @class_of = OffHeap.pointer(UInt8, 512)
+      @class_of.clear(512)
+      @list_of_representatives = @class_of + 256
       current = 0
       (1..255).each do |byte|
         if boundaries[byte]
@@ -35,6 +39,10 @@ module Mica::Regex
       @class_count = current + 1
     end
 
+    def finalize
+      OffHeap.free(@class_of)
+    end
+
     # Marks the class boundaries *low* and *high* + 1 in *boundaries*.
     protected def self.mark(boundaries : StaticArray(Bool, 257)*, low : Int32, high : Int32) : Nil
       boundaries.value[low] = true
@@ -44,7 +52,7 @@ module Mica::Regex
     # Returns the class of *byte*.
     @[AlwaysInline]
     def class_of(byte : UInt8) : Int32
-      @class_of.unsafe_fetch(byte).to_i32
+      @class_of[byte].to_i32
     end
 
     # Returns the first byte of class *class_index*.
@@ -63,7 +71,7 @@ module Mica::Regex
     # :nodoc:
     # The byte-to-class table, for the search loops.
     def table : Pointer(UInt8)
-      @class_of.to_unsafe
+      @class_of
     end
   end
 end

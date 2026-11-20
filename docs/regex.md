@@ -698,6 +698,7 @@ it did in R2) picks the fastest correct path for each search:
 | 1 | **Required bytes**: no engine when the haystack lacks a byte every match reads (see "Required bytes") | `Auto` | one `memchr` pass per required byte, at most once per call |
 | 1 | **Literal search** | the pattern is a finite set of literals with no assertion (`LiteralSet#exact?`), and the search is not anchored | O(n) prefilter scan plus the literal bytes compared at each candidate |
 | 1 | **One-pass search**: span and groups in one pass | the pattern is one-pass and the search is anchored with groups wanted (once a search built the one-pass DFA, or when the forward DFA has read max(4096, 64·m) bytes undecided; a DFA with no left-out paths then reads to the match end), or the pattern has prefix literals: tried at each prefilter candidate (see "Short searches") | one transition per byte read |
+| 1 | **From the end of the text**: the reverse DFA from the end (and from before a final line feed) finds `s`, the forward DFA anchored at `s` finds `e` | every match ends at the end of the text or before a final line feed (each path to a match passes `\z` or a non-multiline `$`, as in `[ -~]*XYZ$`), unanchored, not `FirstLine` or `EndAnchored`; the required-byte scan is skipped for such a program | the match and the bytes the reverse DFA reads before it dies |
 | 1 | **Lazy DFAs**: forward for `e`, reverse for `s` | every program without `\G`, unless `FirstLine` or `EndAnchored` is set | one table read per byte; O(m) per state built |
 | 1 | **Forward DFA from each start** ("Short matches"): finds `s` for a program whose matches span at most 512 bytes while its reverse cache thrashes, and searches it while its forward cache thrashes | the program has a match bound | at most `longest` + 1 table reads per start |
 | 1 | **Pike VM**, span layout | otherwise, and whenever a lazy DFA gives up | O(m·(n + 1)) |
@@ -1197,9 +1198,20 @@ alone finds matches, in priority order at the leftmost candidate.
 | Searcher | When | How |
 |---|---|---|
 | Rare byte | one literal | `memchr` for its least common byte by a fixed frequency rank (non-ASCII lead bytes rank as common, continuation bytes as rare), then the literal is compared around it. When that byte is still common (the space or one of the eleven most common letters), it looks for a pair instead: the two least common bytes at their distance in the literal, eight positions per step in one 64-bit word and the least common of the rest as a third once the pair proves dense (`e` for `the`). When the byte turns out dense in the haystack (32 candidates less than 8 bytes apart on average, as a run of `b` makes for `b{30}a`), the scan switches to that pair for the rest of the haystack |
-| First bytes | at most three distinct first bytes, none of them common (the space, the eleven most common letters, a non-ASCII byte) | `memchr` for each, keeping where each was last found so no byte is read twice |
+| First bytes | at most three distinct first bytes, none of them common (the space, the eleven most common letters, a non-ASCII byte) | `memchr` for each, keeping where each was last found so no byte is read twice. Once 32 candidates of two or three first bytes came less than 256 bytes apart on average over the haystack (a quote in source code full of quotes), it reads eight bytes per step in one 64-bit word for all of them instead of a `memchr` call per byte per candidate |
 | Packed pairs | at most three distinct first bytes, one of them common, and literals that at most 8 pair tests cover | Each test is two bytes at fixed offsets from the start, each compared up to one bit: the ASCII case bit 0x20, or for a Cyrillic letter 0x20 in the continuation byte and 0x01 in the lead byte, so one test covers every case of `(?i)twain` or `(?i)шерлок` (`ſ` and `K`, two and three bytes long, take a test of their own). The tests are chosen per uncovered literal for the most literals per expected candidate, by a fixed per-byte weight; a pair common enough by that weight (`t` and `h` of `(?i)the`) also gets a narrow test with a third byte, the least common of the rest, which the scan switches to once 32 candidates over the haystack came less than 128 bytes apart on average (the switch holds for later calls over the same string); only then does it load three words per test. Eight positions per step in one 64-bit word; a flagged lane that fails verification leaves the scan in its word |
 | Packed (Teddy style) | up to 64 literals | three 256-entry masks, one per leading byte, a bit per literal; a position is a candidate when the masks share a bit, and only those literals are compared |
+
+A literal that another literal of a non-exact set begins (`'ASIA` where
+`'` is in the set too) is left out of the prefilter, as any candidate where
+it starts is one where the shorter literal starts.
+
+When an unanchored search runs anchored at each candidate (see "Short
+searches") and 64 tries in a row fail less than 512 bytes apart on
+average, the call hands the search to the unanchored forward DFA from the
+character after the last candidate tried: none of the tried candidates
+starts a match, and the DFA steps past a candidate that starts none
+without restarting. A program with `\G` (no forward DFA) keeps trying.
 
 Every candidate is verified before it is returned. The accelerators follow
 roadmap 6.2.2: they are consulted only while the forward DFA is in its

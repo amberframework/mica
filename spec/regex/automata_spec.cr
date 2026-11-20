@@ -167,7 +167,7 @@ describe "Mica::Regex R3 engines" do
       wide.list_of_shared_tables.size.should eq(1)
       wide.list_of_transitions.should be_empty
       other = program("x\\w")
-      other.list_of_shared_tables[0].should be(wide.list_of_shared_tables[0])
+      other.list_of_shared_tables[0].to_unsafe.should eq(wide.list_of_shared_tables[0].to_unsafe)
       # A small class keeps its transitions in the program's own list.
       program("[a-cx-z]").list_of_shared_tables.should be_empty
     end

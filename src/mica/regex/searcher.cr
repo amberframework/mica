@@ -107,7 +107,9 @@ module Mica::Regex
 
     @pike : PikeVM? = nil
     @backtracker : BoundedBacktracker? = nil
-    @span_slots = Slice(Int64).new(2, PikeVM::UNSET)
+    # The span slots and the capture slots share one buffer: the first two
+    # entries, then the program's slots.
+    @span_slots : Slice(Int64)
     @capture_slots : Slice(Int64)
     # The last first-line scan: it started at @line_scan_start and found
     # the line feed (or the haystack end) at @line_feed_at.
@@ -122,6 +124,9 @@ module Mica::Regex
     @one_pass_scratch : Slice(Int64)?
     @start_search_waste = 0_i64
     @start_search_off = false
+    # Where the search at starts handed the call to the span search (see
+    # `hand_over_dense_misses?`), or -1.
+    @handed_over_at = -1
     # True once a capped capture pass on the backtracker gave up in this
     # call (see `capped_capture_pass`).
     @capped_captures_off = false
@@ -144,7 +149,9 @@ module Mica::Regex
                    @engine : Engine = Engine::Auto, @cache_pool : CachePool = CachePool.default,
                    lease : SearchLease? = nil)
       @meter = SearchMeter.new(limits, @program.state_count, @haystack.bytesize, timeout)
-      @capture_slots = Slice(Int64).new(@program.slot_count, PikeVM::UNSET)
+      slots = Slice(Int64).new(2 + @program.slot_count, PikeVM::UNSET)
+      @span_slots = slots[0, 2]
+      @capture_slots = slots[2, @program.slot_count]
       if @engine.automata?
         plan = @plan = @program.plan
         attach(lease || plan.lease(@cache_pool))
@@ -425,8 +432,19 @@ module Mica::Regex
                                    captures : Bool) : Slice(Int64)?
       span = @span_slots
       want_captures = captures && @program.slot_count > 2
+      # Where the span search starts: past the candidates the search at
+      # starts has already ruled out, when it handed over (see
+      # `hand_over_dense_misses?`).
+      span_from = byte_index
+      unless (from_end = find_from_text_end(bytes, byte_index, anchored, end_anchored)).nil?
+        return nil unless from_end
+        return span unless want_captures
+        return capture_pass(bytes, byte_index, span[0].to_i32, span[1].to_i32, end_anchored)
+      end
       if start_search?(anchored, end_anchored, want_captures, bytes.size - byte_index)
+        @handed_over_at = -1
         found = find_at_starts(bytes, byte_index, anchored)
+        span_from = @handed_over_at if found.nil? && @handed_over_at > byte_index
         unless found.nil?
           return nil unless found
           return @capture_slots if @last_path.one_pass?
@@ -435,10 +453,47 @@ module Mica::Regex
         end
       end
       @groups_with_span = false
-      return nil unless find_span(bytes, byte_index, anchored, end_anchored, span, want_captures)
+      return nil unless find_span(bytes, span_from, anchored, end_anchored, span, want_captures)
       return span unless want_captures
       return @capture_slots if @groups_with_span
       capture_pass(bytes, byte_index, span[0].to_i32, span[1].to_i32, end_anchored)
+    end
+
+    # Finds the match of a program whose every match ends at the end of
+    # the text, or before a line feed that ends it
+    # (`SearchPlan#ends_at_text_end?`, as `[ -~]*XYZ$` does), from that end:
+    # the reverse DFA finds the leftmost start of a match ending at each of
+    # those two places, the lower of them starts the leftmost match, and
+    # the forward DFA anchored there finds its end. It reads the match and
+    # a few bytes, where a forward search reads the whole haystack first.
+    # Writes the span to the span slots and returns true, returns false
+    # when nothing matches, or nil when the search should take the other
+    # paths (it does not apply, or a DFA gave up).
+    private def find_from_text_end(bytes : Bytes, byte_index : Int32, anchored : Bool, end_anchored : Bool) : Bool?
+      return nil if anchored || end_anchored || !@engine.auto? || @dfa_gave_up || @program.options.first_line?
+      plan = @plan || return nil
+      return nil unless plan.ends_at_text_end?
+      forward = plan.forward || return nil
+      reverse = plan.reverse || return nil
+      lease = @lease || return nil
+      reverse_cache = lease.reverse_cache(reverse) || return nil
+      size = bytes.size
+      start = LazyDFA::NO_MATCH
+      {size, size - 1}.each do |finish|
+        next if finish < byte_index
+        next if finish < size && bytes.unsafe_fetch(finish) != Look::LINE_FEED
+        found = reverse.find_start(reverse_cache, bytes, finish, byte_index, @meter)
+        return nil if found == LazyDFA::GAVE_UP
+        start = found if found >= 0 && (start < 0 || found < start)
+      end
+      return false if start < 0
+      forward_cache = lease.forward_cache(forward) || return nil
+      finish = forward.find_end(forward_cache, bytes, start, true, false, nil, @meter)
+      return nil if finish < 0
+      @span_slots[0] = start.to_i64
+      @span_slots[1] = finish.to_i64
+      @last_path = Path::LazyDFA
+      true
     end
 
     # True when this search should run anchored at the positions where a
@@ -508,14 +563,45 @@ module Mica::Regex
       end
       scan = prefilter_scan(bytes, false) || return nil
       at = byte_index
+      misses = 0
       while true
         candidate = scan.find(at, @meter)
         return false if candidate < 0
         found = try_start(one_pass, forward, cache, bytes, candidate, byte_index)
         return found unless found == false
         return nil if @start_search_off || scan.ineffective?
+        misses += 1
+        return nil if misses == MISSED_TRIES && hand_over_dense_misses?(bytes, candidate, byte_index)
         at = candidate + 1
       end
+    end
+
+    # The failed tries in a row after which a search at starts whose
+    # candidates come close together (see `hand_over_dense_misses?`) goes
+    # to the unanchored forward DFA instead.
+    MISSED_TRIES = 64
+    # The most bytes per failed try, on average, for which the tries count
+    # as close together.
+    DENSE_MISS_BYTES = 512
+
+    # True, and the tries turn off for the rest of the call, when
+    # `MISSED_TRIES` failed tries from *byte_index* to the one at
+    # *candidate* came less than `DENSE_MISS_BYTES` apart on average. Each
+    # try restarts the anchored DFA at its candidate, which costs more than
+    # the unanchored forward DFA pays to step past a candidate that starts
+    # no match (it keeps its state, and takes the prefilter skip from its
+    # start state), so a haystack full of candidates and short of matches
+    # (a quote before a key, in source code full of quotes) is searched
+    # faster that way. Every match starts at a candidate, and none starts
+    # at those tried, so the span search goes on from the character after
+    # *candidate* (`@handed_over_at`) and reads no byte twice.
+    private def hand_over_dense_misses?(bytes : Bytes, candidate : Int32, byte_index : Int32) : Bool
+      return false if candidate - byte_index >= MISSED_TRIES * DENSE_MISS_BYTES
+      # Without a forward DFA (a program with `\G`) the span search runs the
+      # Pike VM, whose search start must stay the call's.
+      return false unless @plan.try(&.forward)
+      @handed_over_at = Math.min(candidate + Core::UTF8.sequence_length(bytes.unsafe_fetch(candidate)), bytes.size)
+      @start_search_off = true
     end
 
     # The anchored search with groups (see `start_search?`), on the
@@ -964,6 +1050,10 @@ module Mica::Regex
     # iteration call reads each byte at most once per required byte.
     private def required_byte_missing?(bytes : Bytes, byte_index : Int32) : Bool
       if @engine.auto? && (plan = @plan)
+        # A program whose matches all end at the end of the text is searched
+        # from there (`find_from_text_end`), which reads less than a
+        # `memchr` for a byte that only the last line holds.
+        return false if plan.ends_at_text_end?
         # Auto checks the rarest required byte at every search, as a
         # haystack may lack it past an earlier match. It looks for the
         # others (at most `StartFilter::MAX_REQUIRED_BYTES` in all) once per
