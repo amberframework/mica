@@ -56,7 +56,7 @@ module Mica::Regex
     # The states by key: an open-addressing table of state ids (`NO_STATE`
     # where empty), a power of two in size, never more than half full.
     @list_of_state_slots : OffHeapList(Int32)
-    @start_states : OffHeapList(Int32)
+    @start_entries : OffHeapList(Int32)
     @builder : DFABuilder
     @bytes_used = 0_i64
     @reservation : CacheReservation
@@ -113,9 +113,9 @@ module Mica::Regex
       @list_of_key_starts = OffHeapList(Int32).new(FIRST_STATES + 1)
       @list_of_key_starts << 0
       @list_of_state_slots = OffHeapList(Int32).new(FIRST_STATES * 2, NO_STATE)
-      @start_states = OffHeapList(Int32).new(@dfa.start_slot_count, -1)
+      @start_entries = OffHeapList(Int32).new(@dfa.start_slot_count, -1)
       growing_lists.each { |list| @owner.track(list) }
-      @owner.track(@start_states.to_unsafe)
+      @owner.track(@start_entries.to_unsafe)
       reset_states
     end
 
@@ -176,15 +176,26 @@ module Mica::Regex
       @reservation.release_all
     end
 
-    # Returns the start state for *flags*, building it when needed, or
-    # `LazyDFA::GAVE_UP`.
-    def start_state(dfa : LazyDFA, flags : Int32, meter : SearchMeter) : Int32
+    # Returns the entry (see `entry_of`) of the start state for *flags*,
+    # building the state when needed, or `LazyDFA::GAVE_UP`. The table
+    # keeps entries rather than ids, so a search that starts often (an
+    # anchored try at each prefilter candidate) pays one load for its start.
+    def start_entry(dfa : LazyDFA, flags : Int32, meter : SearchMeter) : Int32
       slot = dfa.start_slot(flags)
-      cached = @start_states.unsafe_fetch(slot)
+      cached = @start_entries.unsafe_fetch(slot)
       return cached if cached >= 0
       id = intern(dfa.start_key(flags, @builder), meter)
-      @start_states[slot] = id if id >= 0
-      id
+      return id if id < 0
+      entry = entry_of(id)
+      @start_entries[slot] = entry
+      entry
+    end
+
+    # Returns the id of the start state for *flags* (see `start_entry`),
+    # or `LazyDFA::GAVE_UP`.
+    def start_state(dfa : LazyDFA, flags : Int32, meter : SearchMeter) : Int32
+      entry = start_entry(dfa, flags, meter)
+      entry < 0 ? entry : (entry & LazyDFA::ROW_MASK) // dfa.stride
     end
 
     # Builds the transition of *state* on *symbol*, records it, and returns
@@ -365,7 +376,7 @@ module Mica::Regex
       @generation += 1
       @bytes_used = fixed_bytes
       @bytes_since_clear = 0_i64
-      @start_states.fill(-1)
+      @start_entries.fill(-1)
       if state_count == 0
         # Not the builder's key: a clear can run while `intern` holds it.
         dead = StaticArray[0]

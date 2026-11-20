@@ -71,7 +71,7 @@ module Mica::Regex
     PREVIOUS_UNICODE_WORD = 0x100 # the character read last was a Unicode word character (Unicode assertions)
     MATCH_BEHIND          = 0x200 # the closure before the last byte reached a match
     # A start state never carries `MATCH_BEHIND`, so its flags index a
-    # table of this many entries (see `DFACache#start_state`).
+    # table of this many entries (see `DFACache#start_entry`).
     START_FLAG_COUNT = MATCH_BEHIND
 
     # Per-state markers in `DFACache` (one byte per state).
@@ -298,9 +298,8 @@ module Mica::Regex
                  scan : PrefilterScan?, meter : SearchMeter, stop : Int32 = Int32::MAX) : Int32
       size = haystack.size
       limit = @final_lf && size > start && haystack.unsafe_fetch(size - 1) == Look::LINE_FEED ? size - 1 : size
-      state = cache.start_state(self, start_flags(haystack, start, anchored), meter)
-      return GAVE_UP if state < 0
-      current = cache.entry_of(state)
+      current = cache.start_entry(self, start_flags(haystack, start, anchored), meter)
+      return GAVE_UP if current < 0
       last_end = NO_MATCH
       at = start
       bytes = haystack.to_unsafe
@@ -319,9 +318,8 @@ module Mica::Regex
           if candidate > at
             cache.note_bytes(candidate - at)
             at = candidate
-            state = cache.start_state(self, start_flags(haystack, at, anchored), meter)
-            return GAVE_UP if state < 0
-            current = cache.entry_of(state)
+            current = cache.start_entry(self, start_flags(haystack, at, anchored), meter)
+            return GAVE_UP if current < 0
           end
           scan = nil if scan.ineffective?
         end
@@ -430,9 +428,8 @@ module Mica::Regex
     # Returns the start, `NO_MATCH`, or `GAVE_UP`.
     def find_start(cache : DFACache, haystack : Bytes, finish : Int32, lower_bound : Int32,
                    meter : SearchMeter) : Int32
-      state = cache.start_state(self, reverse_start_flags(haystack, finish), meter)
-      return GAVE_UP if state < 0
-      current = cache.entry_of(state)
+      current = cache.start_entry(self, reverse_start_flags(haystack, finish), meter)
+      return GAVE_UP if current < 0
       last_start = NO_MATCH
       at = finish
       bytes = haystack.to_unsafe
@@ -580,9 +577,8 @@ module Mica::Regex
             next
           end
         end
-        state = cache.start_state(self, start_flags(haystack, origin, true), meter)
-        return {GAVE_UP, 0} if state < 0
-        current = cache.entry_of(state)
+        current = cache.start_entry(self, start_flags(haystack, origin, true), meter)
+        return {GAVE_UP, 0} if current < 0
         last_end = NO_MATCH
         at = origin
         table = cache.transition_table.to_unsafe

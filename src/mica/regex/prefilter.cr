@@ -103,6 +103,8 @@ module Mica::Regex
 
     def initialize(@literal_set : LiteralSet)
       @literals = @literal_set.list_of_literals
+      # Only a literal search reads which literal starts at a candidate.
+      @literals = Prefilter.without_covered_literals(@literals) unless @literal_set.exact?
       @minimum_length = @literal_set.minimum_length
       @first_byte_slots = OffHeap.slice(UInt8, 256, 0_u8)
       slot_count = 1
@@ -184,6 +186,37 @@ module Mica::Regex
           @mask_width.times { |column| @masks[column * 256 + literal[column]] |= bit }
         end
       end
+    end
+
+    # :nodoc:
+    # Returns *list_of_literals* without each literal that another of them
+    # begins (`'ASIA` where `'` is in the set too), or *list_of_literals*
+    # itself when none is covered. A candidate where the longer literal
+    # starts is one where the shorter starts as well, so for a prefilter
+    # that only finds where some literal starts the longer one is never
+    # needed, and leaving it out spares `literal_at` its compare at every
+    # candidate. Literals are compared only with those of the same first
+    # byte (the set holds at most `LiteralSet::MAX_LITERALS`, one bit each).
+    def self.without_covered_literals(list_of_literals : Array(Bytes)) : Array(Bytes)
+      return list_of_literals if list_of_literals.size < 2
+      by_first_byte = StaticArray(UInt64, 256).new(0_u64)
+      list_of_literals.each_with_index { |literal, index| by_first_byte[literal[0]] |= 1_u64 << index }
+      covered = 0_u64
+      list_of_literals.each_with_index do |literal, index|
+        others = by_first_byte[literal[0]] & ~(1_u64 << index)
+        while others != 0
+          other = list_of_literals.unsafe_fetch(others.trailing_zeros_count.to_i32)
+          others &= others - 1
+          if other.size < literal.size && literal[0, other.size] == other
+            covered |= 1_u64 << index
+            break
+          end
+        end
+      end
+      return list_of_literals if covered == 0
+      list_of_kept = Array(Bytes).new(list_of_literals.size - covered.popcount)
+      list_of_literals.each_with_index { |literal, index| list_of_kept << literal if covered.bit(index) == 0 }
+      list_of_kept
     end
 
     # Sets the pair tests for `PackedPairs` (see `PairTest.cover`) and
@@ -510,6 +543,8 @@ module Mica::Regex
     # True once a rare-byte scan switched to its pair (see
     # `find_rare_byte`).
     @dense_switched = false
+    # True once a first-byte scan reads by words (see `first_bytes_dense?`).
+    @first_bytes_dense = false
     # The candidates verified and the bytes moved past over this haystack,
     # across the calls that kept the scan's positions, and whether the pair
     # search switched to its narrow tests (see `find_pairs`).
@@ -535,6 +570,7 @@ module Mica::Regex
       @packed_from = 0
       return if keep_positions
       @dense_switched = false
+      @first_bytes_dense = false
       @haystack_candidates = 0
       @haystack_skipped = 0_i64
       @narrowed = false
@@ -578,6 +614,7 @@ module Mica::Regex
     end
 
     private def find_first_bytes(from : Int32, meter : SearchMeter) : Int32
+      return find_first_bytes_in_words(from, meter) if @first_bytes_dense
       at = from
       while at < @haystack.size
         candidate = Int32::MAX
@@ -585,6 +622,74 @@ module Mica::Regex
           candidate = Math.min(candidate, next_needle(needle, @prefilter.list_of_needles[needle], at, meter))
         end
         return -1 if candidate == Int32::MAX
+        accepted = accept?(candidate, meter)
+        @first_bytes_dense = true if first_bytes_dense?
+        return candidate if accepted
+        at = candidate + 1
+      end
+      -1
+    end
+
+    # The average gap, in bytes, between the candidates of a first-byte
+    # scan below which it reads the haystack a word at a time (see
+    # `find_first_bytes_in_words`).
+    DENSE_FIRST_BYTES_GAP = 256
+
+    # True when this haystack has shown `GUARD_CANDIDATES` candidates for
+    # two or three first bytes less than `DENSE_FIRST_BYTES_GAP` bytes
+    # apart on average: a `memchr` per byte per candidate (a quote in
+    # source code full of quotes) then costs more in calls than it saves.
+    private def first_bytes_dense? : Bool
+      @prefilter.list_of_needles.size > 1 && @haystack_candidates >= GUARD_CANDIDATES &&
+        @haystack_skipped < @haystack_candidates.to_i64 * DENSE_FIRST_BYTES_GAP
+    end
+
+    # The first-byte search once its candidates proved dense: every first
+    # byte is looked for in each eight-byte word at once (`zero_lanes`),
+    # in windows of at most `CHARGE_CHUNK` bytes the meter allows before
+    # they are read, each byte read charged once.
+    private def find_first_bytes_in_words(from : Int32, meter : SearchMeter) : Int32
+      needles = @prefilter.list_of_needles
+      first = needles[0]
+      second = needles[1]
+      third = needles.size > 2 ? needles[2] : first
+      first_lanes = LANE_ONES &* first
+      second_lanes = LANE_ONES &* second
+      third_lanes = LANE_ONES &* third
+      bytes = @haystack.to_unsafe
+      size = @haystack.size
+      at = from
+      while at < size
+        window_start = at
+        stop = at + meter.readable(Math.min(CHARGE_CHUNK, size - at), at)
+        candidate = -1
+        while at + 8 <= stop
+          word = PrefilterScan.word_at(bytes + at)
+          hits = PrefilterScan.zero_lanes(word ^ first_lanes) | PrefilterScan.zero_lanes(word ^ second_lanes) |
+                 PrefilterScan.zero_lanes(word ^ third_lanes)
+          if hits != 0
+            # The lowest flagged lane is a true match (see `zero_lanes`).
+            candidate = at + hits.trailing_zeros_count // 8
+            break
+          end
+          at += 8
+        end
+        if candidate < 0
+          while at < stop
+            byte = bytes[at]
+            if byte == first || byte == second || byte == third
+              candidate = at
+              break
+            end
+            at += 1
+          end
+        end
+        if candidate < 0
+          meter.charge(stop - window_start, window_start)
+          at = stop
+          next
+        end
+        meter.charge(candidate - window_start + 1, window_start)
         return candidate if accept?(candidate, meter)
         at = candidate + 1
       end
