@@ -113,6 +113,14 @@ module Mica::Regex
       @any_match_loop = @list_of_match_loops.any?
     end
 
+    # :nodoc:
+    # The tables `Static::BuildTheTables` writes into an application's
+    # source: the steps, the edge index per cell, the match edge per state,
+    # the edges and the ASCII-loop flag per state.
+    def static_parts : {Array(Int32), Array(Int32), Array(Int32), Array(Edge), Array(Bool)}
+      {@steps, @table, @match_edges, @list_of_edges, @list_of_ascii_loops}
+    end
+
     # True when at least `WIDE_LOOP_BYTES` of the byte values lead from
     # *state* back to it with no assertion and no slot (`.*`, `[^"]*`): a
     # run there is likely long. A narrow loop (`\s+` between words) ends

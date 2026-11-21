@@ -2,7 +2,8 @@
 # Checks that Mica needs no regex engine and no C parsing library at run time.
 #
 # 1. No use of the standard library's Regex in the library source (src/).
-#    Mica::Regex is Mica's own engine, and comments may mention stdlib Regex.
+#    Mica::Regex is Mica's own engine, comments may mention stdlib Regex, and
+#    RegexLiteral (the macro AST node `Mica::Regex.static` reads) is no engine.
 # 2. A minimal Mica::XML program links only libgc (the Crystal garbage
 #    collector), libiconv (linked by the Crystal runtime itself, for
 #    String#encode; even `puts 1` links it) and libSystem.
@@ -23,7 +24,7 @@ out=$(cd "$out" && pwd)
 status=0
 
 stdlib_regex='Regex|=~|%r[({/]|\.(match|gsub|sub|scan)\('
-if grep -rnE "$stdlib_regex" src | sed -E 's/Mica::Regex//g' |
+if grep -rnE "$stdlib_regex" src | sed -E 's/Mica::Regex//g; s/RegexLiteral//g' |
   grep -vE '^[^:]+:[0-9]+:[[:space:]]*#' | grep -E "$stdlib_regex"; then
   echo "FAIL: stdlib Regex use in src/"
   status=1

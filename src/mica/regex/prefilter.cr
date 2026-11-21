@@ -275,7 +275,7 @@ module Mica::Regex
     # compared eight bytes at a time, the last word overlapping the one
     # before it, which also beats the call.
     @[AlwaysInline]
-    protected def self.literal_fits_at?(haystack : Bytes, at : Int32, literal : Bytes) : Bool
+    def self.literal_fits_at?(haystack : Bytes, at : Int32, literal : Bytes) : Bool
       size = literal.size
       return false if at + size > haystack.size
       if size > SHORT_LITERAL
@@ -825,7 +825,7 @@ module Mica::Regex
 
     # The eight bytes at *pointer* as one little-endian word (an unaligned
     # read).
-    protected def self.word_at(pointer : UInt8*) : UInt64
+    def self.word_at(pointer : UInt8*) : UInt64
       word = 0_u64
       pointerof(word).as(UInt8*).copy_from(pointer, 8)
       word
@@ -833,7 +833,7 @@ module Mica::Regex
 
     # The high bit of each lane of *word* that may be zero: every zero lane
     # is flagged, and a lane above a zero lane can be flagged too.
-    protected def self.zero_lanes(word : UInt64) : UInt64
+    def self.zero_lanes(word : UInt64) : UInt64
       (word &- LANE_ONES) & ~word & LANE_HIGHS
     end
 

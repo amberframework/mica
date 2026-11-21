@@ -276,6 +276,250 @@ Differences, all deliberate:
   Mica and `"<>héllo<> wörld<>"` in stdlib (milestone R5 fixes the stdlib
   side).
 
+### Allocation-free searches
+
+Three methods find matches without building a `MatchData`, for hot paths
+(routing, validation, tokenizing) that need positions rather than a match
+object:
+
+```crystal
+limits = Mica::Regex::SearchLimits::REQUEST
+date = Mica::Regex.compile("(\\d{4})-(\\d{2})", dialect: :crystal,
+  compile_limits: Mica::Regex::CompileLimits::TRUSTED_PATTERN)
+
+date.search_span("due 2026-11", limits: limits) # => Mica::Regex::Span(@byte_begin=4, @byte_end=11)
+date.search_groups("due 2026-11", limits: limits) { |groups| groups[2]? } # => "11"
+date.each_span("2026-11 2027-01", limits: limits) { |span| puts span.byte_begin }
+```
+
+- `search_span(haystack, byte_offset = 0, options, limits:, deadline:)`
+  returns a `Span` (`byte_begin`, `byte_end`, `bytesize`, `empty?`,
+  `text_in(haystack)`), a plain value, or nil.
+- `search_groups(haystack, byte_offset = 0, options, limits:, deadline:) { |groups| ... }`
+  yields a `Groups` (`size`, `matched?`, `byte_begin`, `byte_end`,
+  `span?`, `[]?`) and returns the block's value, or nil when nothing
+  matches. The offsets live in `Groups::STACK_SLOTS` (64) slots of a
+  `StaticArray` in the caller's stack frame (a pattern with more than 31
+  groups uses a heap buffer), so `Groups` is valid only inside the block.
+  Only `[]?` allocates: the `String` it returns.
+- `each_span(haystack, options, limits:, deadline:) { |span| ... }` yields
+  each match as `each_match` does (one character on after an empty
+  match), with one work allowance and one deadline for the whole call.
+
+They take the same search paths as `search` and `each_match` and raise
+what those raise. A warm call allocates nothing: the searcher, its
+workspaces and the lazy DFA caches are leased and pooled, so after an
+expression's first searches (which build its plan, its caches and, on the
+16th group read, the program's fewest-bytes table) `search_span`,
+`search_groups`, `each_span` and `matches?` make no heap allocation.
+`spec/regex/allocation_free_search_spec.cr` checks 0 bytes over 200 calls
+of each on Amber and rebar pattern shapes.
+
+## Static patterns
+
+`Mica::Regex.static` compiles a pattern while the application builds. Its
+DFA tables become read-only data in the binary, and its searches allocate
+nothing, ever: there is no compile at run time, no cache to warm, and no
+first search that builds anything.
+
+```crystal
+ROUTE_ID    = Mica::Regex.static(/\A[0-9]+\z/)
+SLUG        = Mica::Regex.static(/\A[a-z0-9]+(?:-[a-z0-9]+)*\z/)
+PLACEHOLDER = Mica::Regex.static(/\{\{\s*([a-z_]+)\s*\}\}/i)
+
+ROUTE_ID.matches?(params["id"])              # Bool
+if span = SLUG.search_span(path)             # Span?
+  slug = span.text_in(path)
+end
+PLACEHOLDER.search_groups(template) do |groups|
+  name = groups[1]?                          # allocates only this String
+end
+PLACEHOLDER.each_span(template) { |span| }   # one budget for the whole call
+```
+
+**The argument** is a regex literal (its `i`, `m` and `x` flags apply, `m`
+with Crystal's meaning, `Multiline | DotAll`) or a string literal, with
+`ignore_case: true` for `i` and other flags inline (`(?m)`). It must be
+known when the application builds; interpolation is a compile error.
+
+**Methods.** `matches?`, `search_span`, `search_groups` and `each_span`
+work as on `Expression` (see "Allocation-free searches"), with
+`byte_offset` positional and `limits:` defaulting to
+`SearchLimits::REQUEST`; `deadline:` is optional. They raise as the
+runtime engine does: `SearchLimitError` naming `max_work`,
+`Mica::DeadlineExceededError`, `Mica::EncodingError` for a haystack that is
+not valid UTF-8, and `ArgumentError` for a negative offset or one inside a
+character. `source`, `options`, `capture_count` and `static?` describe the
+pattern.
+
+**Guarantees.** The work allowance is `SearchLimits#work_budget` for the
+pattern's NFA state count, the formula the runtime engine uses, and every
+chunk of at most 4,096 bytes is allowed by the meter before it is read.
+The deadline is read when a call starts and at every 65,536-operation
+checkpoint. Validating the haystack costs one operation per byte, as on the
+runtime engine, and runs in the windows the meter allows, so a deadline
+stops it: under a 1 ms deadline a static search of 256 MiB of `é` raises
+within the runtime engine's bound
+(`spec/regex/static_validation_deadline_spec.cr`). `each_span` spends one
+allowance across the whole call.
+Every DFA state is built at compile time, so a static search runs in
+O(n) with no cache to thrash; the capture pass (one-pass DFA, else the
+bounded backtracker, else a Pike VM over the match span alone) is
+O(m·c·L) as on the runtime engine. A path that can do more work than
+the DFAs alone (the candidate search, the required-byte scans, the
+backtracker) runs only when the allowance left covers its most work, so
+it never raises `max_work` where the DFAs would finish.
+
+**How it works.** The macro runs `src/mica/regex/static/emit_static_pattern.cr`
+(Crystal's `run`), which compiles the pattern with the runtime compiler
+under `CompileLimits::TRUSTED_PATTERN`, explores its forward and reverse
+lazy DFAs to completion (every start state, every symbol), renumbers the
+states so one comparison per byte tells an ordinary state from a dead,
+match or accelerated one, and writes the tables as `Slice.literal`s:
+
+- entries are state ids, `UInt8` when the DFA has at most 255 states and
+  `UInt16` otherwise; a row is a power of two wide, so a transition is a
+  shift and an add. Each direction carries its own map from byte to
+  column;
+- (S3) a table too wide for the limits with a column per byte class is
+  read over UTF-8 decoder states instead
+  (`Static::BuildTheDecoderProduct`). A search reads valid UTF-8 from a
+  character boundary, so each byte comes at a known decoder state: going
+  forward, between characters (ASCII or a lead byte) or inside one (a
+  continuation byte); going backward, between characters (ASCII or a
+  character's last byte) or inside one. A DFA state reached at two
+  decoder states becomes two states, and byte classes that no state reads
+  at the same decoder state share a column. `\w+\s+Holmes` goes from 131
+  columns (rows of 256) to 67 forward and 105 backward (rows of 128), and
+  its tables from 736,256 to 368,896 bytes. The search loop is the same
+  (one class map, one shift); a state between characters keeps its
+  acceleration, and a state inside a character has none;
+- a state that loops on all but a few bytes is skipped with `memchr` (one
+  exit byte) or 8 bytes at a time (up to three ASCII exit bytes, or all
+  non-ASCII bytes), forward and backward;
+- a state's main successor (the one most byte values lead to) is numbered
+  right after it, so a chain such as `[0-9a-f]{8}-` is read with loads
+  that do not wait on each other, and a state that loops to itself
+  (`.*`, `\d+`) keeps its row through the run;
+- a pattern with prefix literals gets the runtime engine's prefilter
+  (`StaticPrefilter`: the rare-byte, pair and packed searches; literals
+  that start with at most three bytes need none, as the DFA's start
+  state skips to them). The forward DFA runs anchored at each verified
+  candidate, so the first anchored match is the leftmost one and there is
+  no reverse scan; an exact literal set needs no DFA at all. Failed tries
+  that read more than the haystack hand the search to the DFAs, so a call
+  stays linear;
+- a pattern whose matches start with one of at most three bytes (ASCII,
+  or one byte of any value), and no prefilter of longer literals, scans
+  for those bytes (`memchr`, or 8 bytes at a time) and runs the forward
+  DFA anchored at each, as at prefilter candidates: the first anchored
+  match is the leftmost one, with no reverse scan. A prefilter whose
+  literals are one byte each (`,` in `,\s*`) becomes such a scan, as the
+  byte found needs no check. Failed tries that read more than the
+  haystack hand the search to the DFAs, as with a prefilter;
+- on both kinds of candidate, one try reads at most 256 bytes
+  (`StaticMatcher::TRY_REACH`): a try still undecided there (a long
+  match, or a failure that reads far, as `(a|aa)*b` over a run of a's
+  makes every try do) hands the search to the DFAs from that candidate,
+  and so do failed tries that have read more than twice the bytes the
+  search moved past (plus 64), so tries that each read to the end of a
+  run cost the call at most one more pass;
+- without a prefilter, a search first looks for the ASCII bytes every
+  match contains (`StartFilter#list_of_required_bytes`) with `memchr`,
+  unless the forward DFA's start states already skip that fast, and a
+  haystack shorter than any match is rejected outright;
+- a pattern with groups also gets its one-pass DFA and its NFA (`UInt8` or
+  `UInt16` state numbers, with each `Sparse` state's target per byte
+  class) for a bounded backtracker and a Pike VM, whose scratch is a
+  `StaticArray(Int32, N)` on the caller's stack, N computed for the
+  pattern. The backtracker (RE2's BitState) marks visited (state,
+  position) pairs in a 16 Ki-bit bitset with a 1,024-job stack, follows
+  greedy byte loops and byte-state starts without a dispatch per byte,
+  and charges its visits when it ends. Run from the lowest start the
+  match can have, it finds the start with the groups, so `search_groups`
+  needs no reverse scan; on a haystack of at most 4,096 (state, position)
+  pairs it searches outright. A span too long for the bitset, or a search
+  that needs more jobs, goes to the Pike VM.
+
+The search code lives in `StaticMatcher(F, R, N)`, one per combination of
+forward, reverse and NFA widths, shared by every pattern with those
+widths; `StaticPattern(F, R, N, SCRATCH)` adds only the pattern's scratch
+size. The type of a static constant names its widths:
+`Mica::Regex.static(/\A[0-9]+\z/)` is a
+`StaticPattern(UInt8, UInt8, UInt8, 2)`.
+
+**Limits and the fallback.** The static path holds a pattern when the two
+tables take at most 512 KiB (with a column per byte class, or read over
+UTF-8 decoder states where that is smaller), their state ids fit
+`UInt16`, the capture pass needs at most 64 KiB of stack, its NFA numbers
+fit `UInt16`, and it has no `\G`. A DFA is explored until its table, with
+a column per byte class and `UInt16` ids, would pass 1 MiB (4,096 states
+for a 128-column row, 16,384 for a 32-column one), so a pattern far
+outside the limits is turned away quickly. Any other pattern becomes a `StaticFallback` with the
+same methods on the runtime engine's allocation-free API, so the call
+site stays the same, and the compiler prints why:
+
+```
+Mica::Regex.static: "\\p{L}{256}" stays on the runtime engine: its forward DFA has more than 4096 states
+```
+
+The runtime compiler checks a fallback pattern while the application
+builds, and the expression is compiled when the constant is first read.
+A pattern the runtime compiler rejects (a syntax error, an excluded
+construct, a compile limit) is a compile error at the call:
+
+```
+Error: Mica::Regex.static: lookahead is outside the Mica::Regex dialect (see docs/regex.md, "Excluded constructs") (byte 1)
+```
+
+The usual reason to fall back is a large Unicode class: `\w`, `\d`, `\b`,
+`\p{L}` and `(?i)` expand to UTF-8 automata, and `\w+\s+Holmes` needs
+736,256 bytes of tables. Writing the ASCII class (`[0-9]` for `\d`) keeps
+such a pattern static.
+
+**Proof.** `spec/regex/static_corpus_differential_spec.cr` searches every
+pattern of the benchmark corpora that the static path holds (Amber, ReDoS
+and rebar, written into `spec/regex/fixtures/static_corpus.cr` by
+`scripts/write_static_corpus.rb`) over the corpus's own haystacks, every
+string of up to three characters of the pattern's alphabet, and 64 random
+strings of its characters and literals. Every match, with every group's
+span, must agree with the runtime engine and with PCRE2 (through Crystal's
+`Regex`), on `search_groups`, `search_span`, `each_span` and `matches?`,
+and the static searches must allocate 0 bytes.
+`spec/regex/static_pattern_spec.cr` covers the API, the widths, the
+fallback, the limits and the compile error;
+`spec/regex/static_search_paths_spec.cr` checks the prefilter and
+backtracker paths against the runtime engine at every offset and over
+spans past the bitset, holds a run of failing candidates to a linear
+budget, and checks that both charge their work and allocate nothing.
+
+**Cost and speed** (S1 evidence, 2026-11-19, Apple M1 Max, `--release`):
+
+- Build: the build-time program takes 6.4 ms per static pattern at the
+  median (p90 12.9 ms, at most 80.9 ms over the 179 static corpus
+  patterns) and 89.6 ms per fallback, which explores until it passes a
+  limit. Crystal compiles the build-time program itself once per cache
+  (about 14 s on an empty cache, again on the second build, then reused).
+  An application holding the 26 Amber corpus patterns (25 static) rebuilds
+  in 1.98 s against 1.19 s with `Mica::Regex.compile` (release, warm cache).
+- Binary: that application's release binary grows by 986,016 bytes:
+  895,505 bytes of tables and about 90 KB of code (4 matcher width
+  combinations, 11 pattern types). A static corpus pattern's tables take
+  4,104 bytes at the median (p90 82,634 bytes, at most 424,072 bytes); 155
+  of 179 forward DFAs have UInt8 ids.
+- Searches, over the 402 benchmark cases the static path holds (two full
+  harness runs, geometric means): compile 119.4 ns against 4.22 us on
+  PCRE2-JIT and 2.73 us on the runtime engine (the harness's lookup; an
+  application reads a constant); a cold first search 6.41 us against
+  63.16 us and 24.16 us; a process's first search 56.91 us against
+  303.32 us and 136.44 us; a warm workload 30.37 us against 39.91 us and
+  22.15 us.
+- Where it is slower: the static path has no literal prefilter yet (rebar
+  `folly` and `opt/prefilter` literal searches, up to 2.6x PCRE2-JIT) and
+  reads groups that are not one-pass with a Pike VM where the runtime
+  engine uses its bounded backtracker (Amber `host-port`, 2.5x). Both are
+  milestone S2.
+
 ## Search limits
 
 `SearchLimits` bounds one call. The work allowance grows with the program
@@ -1292,3 +1536,10 @@ exception, within the work budget, deterministically.
   piece costs one array entry. Pieces number at most n + 1, so this is
   linear.
 - The ECMA-262 and XSD parsers (R6, R7) and `\X` (R9).
+- Static patterns (S2): the literal prefilter and anchored candidate search
+  on the static path, and a static bounded backtracker for capture passes
+  that are not one-pass; (S3) tables read over UTF-8 decoder states,
+  which hold `\w+\s+Holmes` and a few other wide patterns; patterns with
+  large Unicode classes and counted repetition (`\b\w+\b`, `\p{L}{8,13}`)
+  still pass 512 KiB, and would need columns per decoder state or rows
+  without padding (see the S3 study, regex-bench/S3).
