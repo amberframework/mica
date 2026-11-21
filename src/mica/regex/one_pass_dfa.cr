@@ -579,18 +579,22 @@ module Mica::Regex
     # A table of at most this many cells (one row per NFA state, the most
     # the DFA can have) counts as small (see `OnePassDFA.small?`).
     PRESIZED_TABLE_CELLS = 4096
-    # The rows the table starts with room for. Most one-pass DFAs have a few
-    # states where the program has dozens (each row is one NFA state the
-    # DFA could start a state from), so the table grows from here rather
-    # than starting at its largest, which the first search would allocate,
-    # and keep, in full.
+    # The rows a table past `RESERVED_TABLE_CELLS` starts with room for.
     FIRST_TABLE_ROWS = 4
+    # A table of at most this many cells at its largest (one row per NFA
+    # state) reserves them all at once: libc hands out room that costs
+    # nothing until it is written, the table then never moves as it
+    # grows (moving a table of tens of kilobytes a few times cost a first
+    # search more than building it), and `build` gives the unused room
+    # back. A larger table grows from `FIRST_TABLE_ROWS`.
+    RESERVED_TABLE_CELLS = 64 * 1024
 
     def initialize(@program : Program, @byte_classes : ByteClasses)
       @dfa_state_of = OffHeapList(Int32).new(@program.state_count, -1)
       @seen = OffHeapList(Int32).new(@program.state_count, -1)
-      rows = Math.min(@program.state_count, FIRST_TABLE_ROWS)
-      @table = OffHeapList(Int32).new(rows * @byte_classes.class_count)
+      most_cells = OnePassDFA.most_cells(@program, @byte_classes)
+      first_cells = Math.min(@program.state_count, FIRST_TABLE_ROWS) * @byte_classes.class_count
+      @table = OffHeapList(Int32).new(most_cells <= RESERVED_TABLE_CELLS ? most_cells.to_i32 : first_cells)
     end
 
     # Frees the lists the DFA does not keep, once `build` is done: the

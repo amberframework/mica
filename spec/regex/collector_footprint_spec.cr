@@ -39,6 +39,25 @@ private def fold_bounds_from_the_table(code_point : Int32, restricted : Bool) : 
   bounds
 end
 
+# The members of *first*..*last* with every fold partner the Unicode table
+# gives them (only partners on the same side of ASCII when *restricted*).
+private def folded_members_from_the_table(first : Int32, last : Int32, restricted : Bool) : Array(Int32)
+  members = Set(Int32).new
+  (first..last).each do |code_point|
+    members << code_point
+    Mica::Regex::Unicode.each_fold_partner(code_point) do |partner|
+      members << partner unless restricted && (partner < 0x80) != (code_point < 0x80)
+    end
+  end
+  members.to_a.sort
+end
+
+private def members_of(set : Mica::Regex::CodePointSet) : Array(Int32)
+  members = [] of Int32
+  set.each_range { |first, last| (first..last).each { |code_point| members << code_point } }
+  members
+end
+
 describe "Mica::Regex and the collector's heap" do
   describe "the tables every program shares" do
     it "keeps the node of an ASCII literal outside the collector's heap" do
@@ -93,6 +112,27 @@ describe "Mica::Regex and the collector's heap" do
       hir_root("(?i)\\[").should be_a(Mica::Regex::Hir::Literal)
       hir_root("(?i)`").should be_a(Mica::Regex::Hir::Literal)
       hir_root("(?i)\\{").should be_a(Mica::Regex::Hir::Literal)
+    end
+  end
+
+  describe "a case-insensitive class of ASCII ranges" do
+    it "folds every ASCII code point as the Unicode table folds it" do
+      0x80.times do |code_point|
+        escaped = "\\x{#{code_point.to_s(16)}}"
+        {false, true}.each do |restricted|
+          set = class_set("(?i#{restricted ? "r" : ""})[#{escaped}]")
+          members_of(set).should eq(folded_members_from_the_table(code_point, code_point, restricted))
+        end
+      end
+    end
+
+    it "folds a range on either side of a letter run and across the end of ASCII" do
+      { {0x40, 0x5B}, {0x60, 0x7B}, {0x5A, 0x61}, {0x41, 0x7A}, {0x00, 0x7F}, {0x6B, 0x80}, {0x7F, 0x17F}, {0x80, 0x17F} }.each do |first, last|
+        {false, true}.each do |restricted|
+          set = class_set("(?i#{restricted ? "r" : ""})[\\x{#{first.to_s(16)}}-\\x{#{last.to_s(16)}}]")
+          members_of(set).should eq(folded_members_from_the_table(first, last, restricted))
+        end
+      end
     end
   end
 

@@ -320,11 +320,33 @@ module Mica::Regex
       partner_bounds = OffHeapList(Int32).new
       begin
         (bounds.size // 2).times do |index|
-          visited = Unicode.each_folding_code_point(bounds[index * 2], bounds[index * 2 + 1]) do |code_point|
-            Unicode.each_fold_partner(code_point) do |partner|
-              next if restricted && (partner < 0x80) != (code_point < 0x80)
+          first = bounds[index * 2]
+          last = bounds[index * 2 + 1]
+          visited = 0
+          # The members within ASCII fold by `ASCII_FOLD_BOUNDS`, which
+          # holds what the Unicode table holds for them: a class of ASCII
+          # ranges then never reads that table.
+          if first < 0x80
+            Math.max(first, 0x41).upto(Math.min(last, 0x7A)) do |code_point|
+              letter = (code_point | 0x20) - 0x61
+              next unless 0 <= letter < 26
+              visited += 1
               context.charge_append(sizeof(Int32))
-              list_of_points << partner
+              list_of_points << (code_point ^ 0x20)
+              outside = ASCII_FOLD_BOUNDS[letter * 6 + 4]
+              next if restricted || outside == 0
+              context.charge_append(sizeof(Int32))
+              list_of_points << outside
+            end
+            first = 0x80
+          end
+          if first <= last
+            visited += Unicode.each_folding_code_point(first, last) do |code_point|
+              Unicode.each_fold_partner(code_point) do |partner|
+                next if restricted && partner < 0x80
+                context.charge_append(sizeof(Int32))
+                list_of_points << partner
+              end
             end
           end
           context.charge_work(visited + 1)
