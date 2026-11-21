@@ -191,6 +191,11 @@ module Mica::Regex
         byte_count += Core::UTF8.encoded_size(child.code_point)
         last += 1
       end
+      # One ASCII character is a byte of static data.
+      if byte_count == 1 && last == first + 1
+        child = list_of_children[first]
+        return {[LiteralEntry.new(ASCII_BYTES[child.code_point, 1], true)], last} if child.is_a?(Hir::Literal)
+      end
       bytes = Bytes.new(byte_count)
       offset = 0
       (first...last).each do |child_index|
@@ -200,6 +205,12 @@ module Mica::Regex
       end
       {[LiteralEntry.new(bytes, true)], last}
     end
+
+    # The 128 ASCII bytes in order: a one-character ASCII literal is a
+    # slice of them.
+    {% begin %}
+      private ASCII_BYTES = Slice(UInt8).literal({% for byte in 0..127 %}{{ byte }}_u8, {% end %})
+    {% end %}
 
     # The branches' entries in order. When they come to more than
     # `LiteralSet::MAX_LITERALS` (a few case-insensitive words, each of
@@ -251,9 +262,15 @@ module Mica::Regex
       result = Array(LiteralEntry).new(size)
       # Every new literal is a slice of one buffer, so a product of up to
       # `MAX_LITERALS` entries allocates once rather than once per entry.
-      right_bytes = right.sum(&.bytes.size)
-      buffer_size = left.sum { |entry| entry.exact? ? entry.bytes.size * right.size + right_bytes : 0 }
-      buffer = Bytes.new(buffer_size)
+      # A literal with an empty side is the other side's bytes as they are
+      # (`<` before a class, the first literal of a concatenation), so a
+      # product of such pairs alone allocates no buffer.
+      buffer_size = 0
+      left.each do |entry|
+        next unless entry.exact? && !entry.bytes.empty?
+        right.each { |suffix| buffer_size += entry.bytes.size + suffix.bytes.size unless suffix.bytes.empty? }
+      end
+      buffer = buffer_size == 0 ? Bytes.empty : Bytes.new(buffer_size)
       buffer_offset = 0
       left.each do |entry|
         unless entry.exact?
@@ -261,10 +278,16 @@ module Mica::Regex
           next
         end
         right.each do |suffix|
-          bytes = buffer[buffer_offset, entry.bytes.size + suffix.bytes.size]
-          buffer_offset += bytes.size
-          entry.bytes.copy_to(bytes)
-          suffix.bytes.copy_to(bytes + entry.bytes.size)
+          if entry.bytes.empty?
+            bytes = suffix.bytes
+          elsif suffix.bytes.empty?
+            bytes = entry.bytes
+          else
+            bytes = buffer[buffer_offset, entry.bytes.size + suffix.bytes.size]
+            buffer_offset += bytes.size
+            entry.bytes.copy_to(bytes)
+            suffix.bytes.copy_to(bytes + entry.bytes.size)
+          end
           if bytes.size > LiteralSet::MAX_LITERAL_BYTES
             result << LiteralEntry.new(bytes[0, LiteralSet::MAX_LITERAL_BYTES], false)
           else

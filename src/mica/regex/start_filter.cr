@@ -1,4 +1,47 @@
 module Mica::Regex
+  # :nodoc:
+  # Up to `StartFilter::MAX_REQUIRED_BYTES` ASCII bytes every match of a
+  # program contains, rarest first, held in one word: the bytes in its low
+  # three bytes, in order, and their count above them. A program keeps
+  # them in an atomic field, so finding them asks the collector for
+  # nothing.
+  #
+  # ```
+  # bytes = Mica::Regex::RequiredBytes::NONE.with('y'.ord.to_u8)
+  # bytes.size # => 1
+  # bytes[0]   # => 121
+  # ```
+  struct RequiredBytes
+    include Indexable(UInt8)
+
+    # No required byte.
+    NONE = new(0_u64)
+    # The word an atomic field holds before the bytes are found (its
+    # count is one no set of bytes has).
+    NOT_FOUND = UInt64::MAX
+
+    getter packed : UInt64
+
+    def initialize(@packed : UInt64)
+    end
+
+    def size : Int32
+      (@packed >> 24).to_i32
+    end
+
+    @[AlwaysInline]
+    def unsafe_fetch(index : Int) : UInt8
+      (@packed >> (index * 8)).to_u8!
+    end
+
+    # These bytes followed by *byte*; they hold fewer than
+    # `StartFilter::MAX_REQUIRED_BYTES`.
+    def with(byte : UInt8) : RequiredBytes
+      count = size
+      RequiredBytes.new((@packed & 0x00FF_FFFF_u64) | (byte.to_u64 << (count * 8)) | ((count + 1).to_u64 << 24))
+    end
+  end
+
   # What a match of a `Program` needs before any engine runs: the fewest
   # bytes it can span, and the bytes it can start with. `Expression` reads
   # it to answer a search over a short haystack that cannot match without
@@ -24,7 +67,7 @@ module Mica::Regex
     getter minimum_bytes : Int32
     # ASCII bytes every match contains, rarest first (at most
     # `MAX_REQUIRED_BYTES`).
-    getter list_of_required_bytes = [] of UInt8
+    getter list_of_required_bytes : RequiredBytes = RequiredBytes::NONE
     # One bit per byte value that can start a non-empty match.
     @start_bytes = StaticArray(UInt64, 4).new(0_u64)
     # The same bits one byte per value, for scans that test every byte
@@ -158,7 +201,7 @@ module Mica::Regex
     # `Program#required_bytes_for_first_search`), the analysis charges one
     # operation for each state and transition it reads, and for each run a
     # state read looks at, at haystack byte *at*, before it reads them.
-    def self.required_bytes(program : Program, meter : SearchMeter? = nil, at : Int32 = 0) : Array(UInt8)
+    def self.required_bytes(program : Program, meter : SearchMeter? = nil, at : Int32 = 0) : RequiredBytes
       seen = StaticArray(Bool, 128).new(false)
       # The candidates in the order the states hold them, kept sorted by
       # rank as they arrive (ties in arrival order), on the stack: there
@@ -183,13 +226,13 @@ module Mica::Regex
         ranks[place] = rank
         candidate_count += 1
       end
-      list_of_required = Array(UInt8).new(MAX_REQUIRED_BYTES)
+      list_of_required = RequiredBytes::NONE
       return list_of_required if candidate_count == 0
       list_of_candidates = candidates.to_slice[0, Math.min(candidate_count, MAX_REQUIRED_CANDIDATES)]
       avoided = avoided_on_the_way_to_a_match(program, list_of_candidates, meter, at)
       list_of_candidates.each_with_index do |byte, index|
         next if avoided.bit(index) == 1
-        list_of_required << byte
+        list_of_required = list_of_required.with(byte)
         break if list_of_required.size == MAX_REQUIRED_BYTES
       end
       list_of_required
@@ -202,41 +245,64 @@ module Mica::Regex
                                                    meter : SearchMeter?, at : Int32) : UInt8
       blocking = StaticArray(UInt8, 128).new(0_u8)
       list_of_candidates.each_with_index { |byte, index| blocking[byte] = 1_u8 << index }
-      marks = Array(UInt8).new(program.state_count, 0_u8)
-      list_of_pending = [program.start_state]
-      marks[program.start_state] = ((1 << list_of_candidates.size) - 1).to_u8
+      # The marks and the states to visit are scratch outside the
+      # collector's heap, freed when the pass ends or the meter stops it.
+      marks = OffHeap.pointer(UInt8, program.state_count)
+      marks.clear(program.state_count)
+      list_of_pending = OffHeapList(Int32).new(INITIAL_PENDING_STATES)
       at_match = 0_u8
-      while index = list_of_pending.pop?
-        here = marks[index]
-        state = if meter
-                  meter.charge(1, at)
-                  program.state_at(index, meter, at)
-                else
-                  program.state_at(index)
-                end
-        case state.kind
-        when .match?
-          at_match |= here
-        when .split?
-          mark(marks, list_of_pending, state.next_state, here)
-          mark(marks, list_of_pending, state.alternate, here)
-        when .save?, .look?
-          mark(marks, list_of_pending, state.next_state, here)
-        when .byte_range?
-          mark(marks, list_of_pending, state.next_state, here & ~blocked_by(blocking, state.low, state.high))
-        when .sparse?
-          if state.low != 0
-            mark(marks, list_of_pending, state.next_state, past_shared_class(program, index, state, here, blocking, meter, at))
-            next
-          end
-          state.alternate.times do |offset|
-            meter.charge(1, at) if meter
-            transition = program.transition_at(index, state, offset)
-            mark(marks, list_of_pending, transition.target, here & ~blocked_by(blocking, transition.low, transition.high))
+      begin
+        list_of_pending << program.start_state
+        marks[program.start_state] = ((1 << list_of_candidates.size) - 1).to_u8
+        while index = list_of_pending.pop?
+          here = marks[index]
+          state = if meter
+                    meter.charge(1, at)
+                    program.state_at(index, meter, at)
+                  else
+                    program.state_at(index)
+                  end
+          case state.kind
+          when .match?
+            at_match |= here
+          when .split?
+            mark_avoided(state.next_state, here)
+            mark_avoided(state.alternate, here)
+          when .save?, .look?
+            mark_avoided(state.next_state, here)
+          when .byte_range?
+            mark_avoided(state.next_state, here & ~blocked_by(blocking, state.low, state.high))
+          when .sparse?
+            if state.low != 0
+              mark_avoided(state.next_state, past_shared_class(program, index, state, here, blocking, meter, at))
+              next
+            end
+            state.alternate.times do |offset|
+              meter.charge(1, at) if meter
+              transition = program.transition_at(index, state, offset)
+              mark_avoided(transition.target, here & ~blocked_by(blocking, transition.low, transition.high))
+            end
           end
         end
+      ensure
+        OffHeap.free(marks)
+        list_of_pending.free
       end
       at_match
+    end
+
+    # The states `avoided_on_the_way_to_a_match` first has room to queue.
+    private INITIAL_PENDING_STATES = 32
+
+    # Adds *bits* to *target*'s marks, queuing it when it gained one (in
+    # `avoided_on_the_way_to_a_match`, whose scratch it names).
+    private macro mark_avoided(target, bits)
+      %target = {{target}}
+      %merged = marks[%target] | {{bits}}
+      unless %merged == marks[%target]
+        marks[%target] = %merged
+        list_of_pending << %target
+      end
     end
 
     # The candidates of *here* still avoided once the class that *state*
@@ -271,15 +337,6 @@ module Mica::Regex
     @[AlwaysInline]
     private def self.blocked_by(blocking : StaticArray(UInt8, 128), low : UInt8, high : UInt8) : UInt8
       low == high && low < 0x80 ? blocking[low] : 0_u8
-    end
-
-    # Adds *bits* to *target*'s marks, queuing it when it gained one.
-    @[AlwaysInline]
-    private def self.mark(marks : Array(UInt8), list_of_pending : Array(Int32), target : Int32, bits : UInt8) : Nil
-      merged = marks.unsafe_fetch(target) | bits
-      return if merged == marks.unsafe_fetch(target)
-      marks.unsafe_put(target, merged)
-      list_of_pending << target
     end
 
     # True when *byte* can follow the first byte of a match (every byte

@@ -102,9 +102,9 @@ describe "Mica::Regex required bytes" do
 
   describe "Program#list_of_required_bytes" do
     it_satisfies "REGEX-R3-required-bytes", "holds the rarest ASCII bytes every match reads" do
-      compiled_program("(a|aa)*c").list_of_required_bytes.should eq(['c'.ord.to_u8])
-      compiled_program("\\w+\\s+Holmes").list_of_required_bytes.should eq(['H', 'm', 'l'].map(&.ord.to_u8))
-      compiled_program("a(?:b|c:)d").list_of_required_bytes.should eq(['d', 'a'].map(&.ord.to_u8))
+      compiled_program("(a|aa)*c").list_of_required_bytes.to_a.should eq(['c'.ord.to_u8])
+      compiled_program("\\w+\\s+Holmes").list_of_required_bytes.to_a.should eq(['H', 'm', 'l'].map(&.ord.to_u8))
+      compiled_program("a(?:b|c:)d").list_of_required_bytes.to_a.should eq(['d', 'a'].map(&.ord.to_u8))
       compiled_program("x|y").list_of_required_bytes.should be_empty
       compiled_program("c?").list_of_required_bytes.should be_empty
     end
@@ -188,7 +188,7 @@ describe "Mica::Regex required bytes" do
       # within a 1,000-byte span's allowance (4,256), past a 200-byte one's
       # (1,056), though the states alone fit it.
       program.required_bytes_for_first_search(200).should be_nil
-      program.required_bytes_for_first_search(1_000).should eq(['z'.ord.to_u8])
+      program.required_bytes_for_first_search(1_000).try(&.to_a).should eq(['z'.ord.to_u8])
     end
   end
 

@@ -28,12 +28,34 @@ module Mica::Regex
   # A plan is shared by every search of its program; its lazily built
   # parts are built under a mutex.
   class SearchPlan
+    # `ends_at_text_end?`, worked out on first use: 0 not yet, 1 yes, 2 no.
+    @ends_at_text_end = Atomic(Int32).new(0)
     getter program : Program
     getter byte_classes : ByteClasses
     # The forward lazy DFA, or nil when the program needs the Pike VM.
     getter forward : LazyDFA?
     # The prefilter, or nil.
     getter prefilter : Prefilter?
+    # The lazily built parts are published through atomics, so a search
+    # on another thread that sees one sees it fully built.
+    @reverse = Atomic(LazyDFA?).new(nil)
+    @reverse_with_reversed_classes = Atomic(LazyDFA?).new(nil)
+    # See `list_of_required_bytes_past_literals`.
+    @required_bytes_past_literals = Atomic(UInt64).new(RequiredBytes::NOT_FOUND)
+    @one_pass = Atomic(OnePassDFA?).new(nil)
+    # Bytes the tries of searches at starts read on the forward DFA before
+    # the one-pass DFA was built (see `start_search_one_pass`).
+    @start_try_bytes = Atomic(Int64).new(0_i64)
+    # The last haystack a short search found to be valid UTF-8.
+    @short_validated = Atomic(String?).new(nil)
+    @short_match = Atomic(ShortMatch?).new(nil)
+    @start_filter = Atomic(StartFilter?).new(nil)
+    @mutex = Mutex.new
+    @list_of_idle_leases = [] of SearchLease
+    # The most recently returned lease, taken without the mutex.
+    @hot_lease = Atomic(SearchLease?).new(nil)
+    # The other four-byte fields and the flags follow, together, so the plan
+    # has no padding between its fields.
     # True when the prefilter alone finds matches (see `LiteralSet#exact?`).
     getter? literal_search : Bool
     # True when every match starts at the start of the text (each path from
@@ -49,19 +71,10 @@ module Mica::Regex
     # `.*` or `(a*)`): the leftmost match then starts at the search's
     # offset (see `anchored_at_offset?`).
     getter? empty_match_everywhere : Bool
-    # The lazily built parts are published through atomics, so a search
-    # on another thread that sees one sees it fully built.
-    @reverse = Atomic(LazyDFA?).new(nil)
-    # `ends_at_text_end?`, worked out on first use: 0 not yet, 1 yes, 2 no.
-    @ends_at_text_end = Atomic(Int32).new(0)
-    @reverse_with_reversed_classes = Atomic(LazyDFA?).new(nil)
-    # See `list_of_required_bytes_past_literals`.
-    @required_bytes_past_literals = Atomic(Array(UInt8)?).new(nil)
     # Set once `widen_reverse` found the widened DFA too large.
     @widen_refused = Atomic(Int32).new(0)
     # Match starts found by the backtracker (see `backtrack_start?`).
     @backtracked_starts : Atomic(Int32)
-    @one_pass = Atomic(OnePassDFA?).new(nil)
     # Set (after @one_pass) once the one-pass build ran, as its result may
     # be nil.
     @one_pass_built = Atomic(Int32).new(0)
@@ -70,9 +83,6 @@ module Mica::Regex
     # program ran without a plan (`FirstSearch`): a program searched that
     # often is searched again.
     @short_searches : Atomic(Int32)
-    # Bytes the tries of searches at starts read on the forward DFA before
-    # the one-pass DFA was built (see `start_search_one_pass`).
-    @start_try_bytes = Atomic(Int64).new(0_i64)
     # Unanchored short searches that ran out of tries (see `ShortSearch`).
     @short_declines = Atomic(Int32).new(0)
     # Candidate searches that ran out of tries (see `CandidateSearch`).
@@ -83,18 +93,10 @@ module Mica::Regex
     # Searches that skipped the candidate search (see
     # `candidate_searches_pay?`).
     @candidate_skips = Atomic(Int32).new(0)
-    # The last haystack a short search found to be valid UTF-8.
-    @short_validated = Atomic(String?).new(nil)
     # 1 once a caller read groups that a search had left to read later.
     @groups_read = Atomic(Int32).new(0)
     @fixed_match_bytes = Atomic(Int32).new(FIXED_LENGTH_UNKNOWN)
-    @short_match = Atomic(ShortMatch?).new(nil)
     @short_match_built = Atomic(Int32).new(0)
-    @start_filter = Atomic(StartFilter?).new(nil)
-    @mutex = Mutex.new
-    @list_of_idle_leases = [] of SearchLease
-    # The most recently returned lease, taken without the mutex.
-    @hot_lease = Atomic(SearchLease?).new(nil)
 
     def initialize(@program : Program)
       # A program with class runs (`Program::ClassRun`) writes its states
@@ -117,18 +119,22 @@ module Mica::Regex
     # that some prefix literal lacks (all of them without literals): a
     # prefilter candidate shows nothing of them, so a search with the
     # prefilter still checks they are present. Found on first use.
-    def list_of_required_bytes_past_literals : Array(UInt8)
-      if found = @required_bytes_past_literals.get(:acquire)
-        return found
-      end
+    def list_of_required_bytes_past_literals : RequiredBytes
+      packed = @required_bytes_past_literals.get(:acquire)
+      return RequiredBytes.new(packed) unless packed == RequiredBytes::NOT_FOUND
       list_of_bytes = @program.list_of_required_bytes
       if literal_set = @program.literal_set
         list_of_literals = literal_set.list_of_literals
-        list_of_bytes = list_of_bytes.reject { |byte| list_of_literals.all?(&.includes?(byte)) }
+        list_of_kept = RequiredBytes::NONE
+        list_of_bytes.each do |byte|
+          list_of_kept = list_of_kept.with(byte) unless list_of_literals.all?(&.includes?(byte))
+        end
+        list_of_bytes = list_of_kept
       end
-      # Threads racing here find the same bytes; the first to publish wins.
-      @required_bytes_past_literals.compare_and_set(nil, list_of_bytes)
-      @required_bytes_past_literals.get(:acquire) || list_of_bytes
+      # Threads racing here find the same bytes, so each publishes the
+      # same word.
+      @required_bytes_past_literals.set(list_of_bytes.packed, :release)
+      list_of_bytes
     end
 
     # True when a search from an offset may run anchored there, as the

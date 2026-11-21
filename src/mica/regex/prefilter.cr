@@ -46,14 +46,6 @@ module Mica::Regex
     # The distinct first bytes (`FirstBytes`), or the rare byte or pair
     # (`RareByte`).
     getter list_of_needles : OffHeapList(UInt8)
-    # For `RareByte`, where the rare byte (or the first of the pair) sits
-    # in the literal.
-    getter needle_offset : Int32
-    # For `RareByte` with a pair, how far the second byte of the pair sits
-    # after the first (0 without a pair).
-    getter pair_gap : Int32
-    # For `Packed`, how many leading bytes the masks cover (1 to 3).
-    getter mask_width : Int32
     # The pair tests the pair search runs (`PackedPairs`, or `RareByte`
     # with a pair), else empty.
     getter list_of_pair_tests : OffHeapList(PairTest)
@@ -67,8 +59,6 @@ module Mica::Regex
     # `PrefilterScan#find_rare_byte`); empty when the literal has one
     # distinct byte.
     getter list_of_dense_tests : OffHeapList(PairTest)
-    # The shortest literal's length (`LiteralSet#minimum_length`).
-    getter minimum_length : Int32
     @masks : Slice(UInt64)
     @literals : Array(Bytes)
     # For each byte, the slot in `@starting_with` of the literals that start
@@ -82,6 +72,18 @@ module Mica::Regex
     # `literal_at` compares it with one load (see `literal_fits_at?`).
     @list_of_words : Slice(UInt64)
     @list_of_word_masks : Slice(UInt64)
+    # The other four-byte fields follow, together, so the prefilter has
+    # no padding between its fields.
+    # For `RareByte`, where the rare byte (or the first of the pair) sits
+    # in the literal.
+    getter needle_offset : Int32
+    # For `RareByte` with a pair, how far the second byte of the pair sits
+    # after the first (0 without a pair).
+    getter pair_gap : Int32
+    # For `Packed`, how many leading bytes the masks cover (1 to 3).
+    getter mask_width : Int32
+    # The shortest literal's length (`LiteralSet#minimum_length`).
+    getter minimum_length : Int32
 
     # The most pair tests `PackedPairs` runs per step.
     MAX_PAIR_TESTS = 8

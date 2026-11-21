@@ -248,14 +248,14 @@ describe "Mica::Regex short searches" do
 
     it_satisfies "REGEX-R3-short-search", "rejects a short haystack without a byte every match contains" do
       host = planned_expression(".*:(\\d+)")
-      host.program.plan.start_filter.list_of_required_bytes.should eq([':'.ord.to_u8])
+      host.program.plan.start_filter.list_of_required_bytes.to_a.should eq([':'.ord.to_u8])
       host.match("amber-grant-345", limits: LIMITS).should be_nil
       host.match("example.com:4567", limits: LIMITS).try(&.[1]).should eq("4567")
-      planned_expression("a(?:b|c:)d").program.plan.start_filter.list_of_required_bytes.should eq(['d'.ord.to_u8, 'a'.ord.to_u8])
+      planned_expression("a(?:b|c:)d").program.plan.start_filter.list_of_required_bytes.to_a.should eq(['d'.ord.to_u8, 'a'.ord.to_u8])
       planned_expression("x|y").program.plan.start_filter.list_of_required_bytes.should be_empty
       # Both are required; `x` alone would not reject a run of x's.
       runs = planned_expression("(x+x+)+y")
-      runs.program.plan.start_filter.list_of_required_bytes.should eq(['x'.ord.to_u8, 'y'.ord.to_u8])
+      runs.program.plan.start_filter.list_of_required_bytes.to_a.should eq(['x'.ord.to_u8, 'y'.ord.to_u8])
       runs.match("x" * 200, limits: LIMITS).should be_nil
     end
 

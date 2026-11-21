@@ -105,7 +105,7 @@ describe "Mica::Regex per-call costs" do
   describe "required bytes past the prefix literals" do
     it_satisfies "REGEX-R3-required-bytes", "rejects a haystack that has the literal but lacks a byte past it" do
       expression = planned_expression("(x+x+)+y")
-      expression.program.plan.list_of_required_bytes_past_literals.should eq(['y'.ord.to_u8])
+      expression.program.plan.list_of_required_bytes_past_literals.to_a.should eq(['y'.ord.to_u8])
       expression.match("x" * 1024, limits: REQUEST, timeout: 1.second).should be_nil
       expression.match("x" * 1024 + "y", limits: REQUEST, timeout: 1.second).try(&.byte_end(0)).should eq(1025)
       planned_expression("abc").program.plan.list_of_required_bytes_past_literals.should be_empty

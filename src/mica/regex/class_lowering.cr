@@ -85,7 +85,7 @@ module Mica::Regex
         kept = @@written_sets[key]?
         return kept if kept && kept.range_count <= limits.max_class_ranges
         @@written_sets.clear if @@written_sets.size >= WRITTEN_CLASSES
-        @@written_sets[{items.dup, key[1], key[2], key[3], key[4]}] = set
+        @@written_sets[key] = set
       end
       set
     end

@@ -562,7 +562,7 @@ module Mica::Regex
 
     # The ASCII bytes every match contains (see
     # `StartFilter.required_bytes`), found on first use.
-    @required_bytes = Atomic(Array(UInt8)?).new(nil)
+    @required_bytes = Atomic(UInt64).new(RequiredBytes::NOT_FOUND)
 
     # The fewest bytes a match can read from each state (`UNREACHABLE` when
     # no match is reachable), found once, on first use, for a program of at
@@ -663,14 +663,21 @@ module Mica::Regex
     # :nodoc:
     # The ASCII bytes every match contains, rarest first (see
     # `StartFilter.required_bytes`; found once, on first use).
-    def list_of_required_bytes : Array(UInt8)
-      if found = @required_bytes.get(:acquire)
+    def list_of_required_bytes : RequiredBytes
+      if found = required_bytes_found?
         return found
       end
       found = StartFilter.required_bytes(self)
-      # Threads racing here find the same bytes; the first to publish wins.
-      @required_bytes.compare_and_set(nil, found)
-      @required_bytes.get(:acquire) || found
+      # Threads racing here find the same bytes, so each publishes the
+      # same word.
+      @required_bytes.set(found.packed, :release)
+      found
+    end
+
+    # The required bytes once some search found them, or nil.
+    private def required_bytes_found? : RequiredBytes?
+      packed = @required_bytes.get(:acquire)
+      packed == RequiredBytes::NOT_FOUND ? nil : RequiredBytes.new(packed)
     end
 
     # :nodoc:
@@ -687,8 +694,8 @@ module Mica::Regex
     # call's allowance or deadline before it reads more: at most
     # `required_bytes_analysis_bound(span_bytes)` operations.
     def required_bytes_for_first_search(span_bytes : Int32, meter : SearchMeter? = nil,
-                                        at : Int32 = 0) : Array(UInt8)?
-      if found = @required_bytes.get(:acquire)
+                                        at : Int32 = 0) : RequiredBytes?
+      if found = required_bytes_found?
         return found
       end
       # A large program with runs reads each state through its runs, which
@@ -697,9 +704,10 @@ module Mica::Regex
       allowance = REQUIRED_BYTES_BASE_EDGES + REQUIRED_BYTES_EDGES_PER_BYTE * span_bytes
       return nil unless edges_within?(allowance, meter, at)
       found = StartFilter.required_bytes(self, meter, at)
-      # Threads racing here find the same bytes; the first to publish wins.
-      @required_bytes.compare_and_set(nil, found)
-      @required_bytes.get(:acquire) || found
+      # Threads racing here find the same bytes, so each publishes the
+      # same word.
+      @required_bytes.set(found.packed, :release)
+      found
     end
 
     # :nodoc:
@@ -711,7 +719,7 @@ module Mica::Regex
     # run lookups too (`run_reads_per_state`); nothing once the bytes are
     # found.
     def required_bytes_analysis_bound(span_bytes : Int32) : Int64
-      return 0_i64 if @required_bytes.get(:acquire)
+      return 0_i64 if required_bytes_found?
       edges = REQUIRED_BYTES_BASE_EDGES + REQUIRED_BYTES_EDGES_PER_BYTE * span_bytes
       reads = 2_i64 + @run_reads_per_state
       edges * (2_i64 + StartFilter::MAX_REQUIRED_CANDIDATES * reads)
