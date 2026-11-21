@@ -261,12 +261,16 @@ it).
 the source of the hash): the Canterbury corpus (11 files) and the Silesia
 corpus (12 files, 212 MB), downloaded by
 `bench/deflate/scripts/fetch_corpus.rb`, which deletes a download whose
-sha256 differs and fails; and eight real HTTP response bodies committed
-under `bench/deflate/corpus/http/` (HTML and JSON at about 1 KiB, 16 KiB,
-64 KiB and 1 MiB; `parts.tsv` lists each URL and capture date, and
-`scripts/capture_http_bodies.rb` is how they were captured). Each file is
-compressed once by the system zlib at level 6 as gzip, zlib and raw
-DEFLATE, so a case is a file in one format: 93 cases.
+sha256 differs and fails; and seven real HTTP response bodies committed
+under `bench/deflate/corpus/http/` (HTML at about 1 KiB, 16 KiB, 64 KiB
+and 1 MiB, JSON at about 1 KiB, 16 KiB and 64 KiB; `parts.tsv` lists each
+URL and capture date, and `scripts/capture_http_bodies.rb` is how they
+were captured). Each file is compressed once by the system zlib at level 6
+as gzip, zlib and raw DEFLATE, so a case is a file in one format: 90
+cases. (The Z1 run of 2026-11-21 also measured a 1 MiB JSON body of
+joined Amber issue pages, 93 cases in all; it is not committed because
+the issue bodies quote git commit hashes that the pre-commit secret
+scanner reads as keys.)
 
 **Engines**, each measured in its own release-built process, one process
 at a time:
