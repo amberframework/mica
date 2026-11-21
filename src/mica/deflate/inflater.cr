@@ -366,7 +366,10 @@ module Mica::Deflate
     private def grow_output : Nil
       ceiling = @one_shot ? @limits.max_output_bytes + @result_start : STREAM_BUFFER.to_i64
       wanted = @out_capacity.to_i64 * 2
-      wanted = ceiling if wanted > ceiling
+      # Past half the ceiling, go straight to it: a buffer just under the
+      # ceiling would need one more nearly ceiling-sized copy, and the
+      # allocations would sum to about three times the ceiling, not two.
+      wanted = ceiling if wanted > ceiling // 2
       wanted = Int32::MAX.to_i64 - SLACK if wanted > Int32::MAX - SLACK
       return if wanted <= @out_capacity
       @out = GC.realloc(@out.as(Void*), (wanted + SLACK).to_u64).as(UInt8*)
@@ -547,7 +550,7 @@ module Mica::Deflate
       bytes = IO::Memory.new
       loop do
         byte = read_byte(field)
-        header_crc = CRC32.update(header_crc, Bytes[byte])
+        header_crc = CRC32.update(header_crc, pointerof(byte), 1)
         break if byte == 0
         metadata = add_metadata(metadata, 1)
         bytes.write_byte(byte)
@@ -638,7 +641,8 @@ module Mica::Deflate
       table = code_length_table
       index = 0
       while index < total
-        entry = decode_careful(table, CODE_LENGTH_MASK, HuffmanTable::CODE_LENGTH_ROOT, "the code lengths")
+        entry = decode_careful(table, CODE_LENGTH_MASK, HuffmanTable::CODE_LENGTH_ROOT, "the code lengths",
+          "code length")
         symbol = (entry >> 16).to_i32
         if symbol < 16
           lengths[index] = symbol.to_u8
@@ -684,7 +688,7 @@ module Mica::Deflate
     # Decodes one entry of *table* bit by bit with refills from the source.
     # Raises at an invalid code or when the source ends inside the code.
     # The returned entry's code bits are consumed (not its extra bits).
-    private def decode_careful(table : UInt32*, mask : UInt64, root : Int32, where : String,
+    private def decode_careful(table : UInt32*, mask : UInt64, root : Int32, where : String, code_name : String,
                                with_extra : Bool = false) : UInt32
       need_bits(15)
       entry = table[@bit_buffer & mask]
@@ -702,7 +706,7 @@ module Mica::Deflate
       if entry & HuffmanTable::EXCEPTIONAL != 0 && entry & HuffmanTable::END_OF_BLOCK == 0
         # Judged once the bits of the unused pattern are in, as zlib does.
         truncated(where) if length > @bit_count
-        malformed("Invalid Huffman code in #{where}")
+        malformed("Invalid #{code_name} code")
       end
       truncated(where) if length > @bit_count
       @bit_buffer = @bit_buffer.unsafe_shr(length)
@@ -773,7 +777,7 @@ module Mica::Deflate
         return false
       end
       entry = decode_careful(@literal_length_table, LITERAL_LENGTH_MASK, HuffmanTable::LITERAL_LENGTH_ROOT,
-        "a Huffman block", with_extra: true)
+        "a Huffman block", "literal/length", with_extra: true)
       if entry & HuffmanTable::LITERAL != 0
         output_limit_reached if @out_pos == limit
         @out[@out_pos] = (entry >> 16).to_u8!
@@ -785,7 +789,7 @@ module Mica::Deflate
         return true
       end
       length = (entry >> 16).to_i32 + take_bits(extra_bits_of(entry), "a length").to_i32
-      distance_entry = decode_careful(@distance_table, DISTANCE_MASK, HuffmanTable::DISTANCE_ROOT, "a distance",
+      distance_entry = decode_careful(@distance_table, DISTANCE_MASK, HuffmanTable::DISTANCE_ROOT, "a distance", "distance",
         with_extra: true)
       malformed("Invalid distance code") if distance_entry & HuffmanTable::EXCEPTIONAL != 0
       distance = (distance_entry >> 16).to_i32 + take_bits(extra_bits_of(distance_entry), "a distance").to_i32
