@@ -169,13 +169,22 @@ describe "Mica::Regex and the collector's heap" do
       list_of_sets = Array(Mica::Regex::CodePointSet).new(24) do |index|
         Mica::Regex::CodePointSet.from_bounds([0xF0000 + index * 7, 0xF0000 + index * 7 + 3])
       end
+      # The memo is shared by the whole run: the sets past its room (when
+      # other specs filled it) get a block of their own on every call.
+      room = Mica::Regex::ClassMemo::MAX_ENTRIES - Mica::Regex::ClassMemo.kept_count
       list_of_blocks = list_of_sets.map { |set| Mica::Regex::ClassMemo.block_for(set, ledger, meter) }
       list_of_sets.each_with_index do |set, index|
         again = Mica::Regex::ClassMemo.block_for(set, ledger, meter)
-        again.same_lists?(list_of_blocks[index]).should be_true
         again.entry.should eq(list_of_blocks[index].entry)
         equal = Mica::Regex::CodePointSet.from_bounds(set.list_of_bounds.to_a)
-        Mica::Regex::ClassMemo.block_for(equal, ledger, meter).same_lists?(list_of_blocks[index]).should be_true
+        by_equal = Mica::Regex::ClassMemo.block_for(equal, ledger, meter)
+        if index < room
+          again.same_lists?(list_of_blocks[index]).should be_true
+          by_equal.same_lists?(list_of_blocks[index]).should be_true
+        else
+          again.should eq(list_of_blocks[index])
+          by_equal.should eq(list_of_blocks[index])
+        end
       end
       list_of_blocks[0].same_lists?(list_of_blocks[1]).should be_false
     ensure

@@ -145,6 +145,12 @@ module Mica::Regex
       true
     end
 
+    # :nodoc:
+    # The number of blocks the memo keeps now (for the specs).
+    def self.kept_count : Int32
+      @@mutex.synchronize { @@block_indexes.size }
+    end
+
     def self.memoized?(set : CodePointSet) : Bool
       bounds = set.list_of_bounds
       bounds.size >= MIN_RANGES * 2 || (!bounds.empty? && bounds[-1] >= MIN_WIDE_CODE_POINT)
