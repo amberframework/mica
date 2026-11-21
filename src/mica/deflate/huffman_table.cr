@@ -10,7 +10,7 @@ module Mica::Deflate
   # | Bits  | Meaning |
   # |-------|---------|
   # | 0-7   | code bits this entry consumes |
-  # | 8-11  | extra bits (lengths, distances) or subtable index bits |
+  # | 8-11  | code bits (lengths, distances: bits 0-7 then hold code plus extra bits) or subtable index bits |
   # | 13    | `SUBTABLE`: bits 16-31 hold the subtable's start |
   # | 14    | `END_OF_BLOCK` |
   # | 15    | `EXCEPTIONAL`: end of block, subtable or invalid code |
@@ -27,7 +27,10 @@ module Mica::Deflate
     EXCEPTIONAL  = 0x0000_8000_u32
     END_OF_BLOCK = 0x0000_4000_u32
     SUBTABLE     = 0x0000_2000_u32
-    INVALID      = EXCEPTIONAL
+    # A bit pattern no code uses. It takes one bit, as zlib's unused
+    # entries do: they occur only in an empty code or a one-code code of
+    # length 1, so a decoder judges the pattern on that one bit.
+    INVALID = EXCEPTIONAL | 1_u32
 
     # Root bits per alphabet.
     LITERAL_LENGTH_ROOT = 10
@@ -127,9 +130,8 @@ module Mica::Deflate
           symbol = sorted[position].to_i32
           position += 1
           reversed = reverse(code, length)
-          entry = entry_for(alphabet, symbol)
           if length <= root
-            filled = entry | length.to_u32
+            filled = entry_for(alphabet, symbol, length)
             index = reversed
             step = 1 << length
             while index < root_size
@@ -158,7 +160,7 @@ module Mica::Deflate
                               (subtable_bits.to_u32 << 8) | root.to_u32
               current_prefix = prefix
             end
-            filled = entry | (length - root).to_u32
+            filled = entry_for(alphabet, symbol, length - root)
             index = reversed >> root
             step = 1 << (length - root)
             size = 1 << subtable_bits
@@ -176,29 +178,38 @@ module Mica::Deflate
       {Problem::None, written}
     end
 
-    # Returns the entry bits (all but the code length) for *symbol*.
-    private def self.entry_for(alphabet : Alphabet, symbol : Int32) : UInt32
+    # Returns the entry for *symbol* whose code takes *code_bits* bits at
+    # this level of the table.
+    private def self.entry_for(alphabet : Alphabet, symbol : Int32, code_bits : Int32) : UInt32
+      bits = code_bits.to_u32
       case alphabet
       in .code_length?
-        symbol.to_u32 << 16
+        (symbol.to_u32 << 16) | bits
       in .literal_length?
         if symbol < 256
-          LITERAL | (symbol.to_u32 << 16)
+          LITERAL | (symbol.to_u32 << 16) | bits
         elsif symbol == 256
-          EXCEPTIONAL | END_OF_BLOCK
+          EXCEPTIONAL | END_OF_BLOCK | bits
         elsif symbol <= 285
           index = symbol - 257
-          (LENGTH_BASES[index].to_u32 << 16) | (LENGTH_EXTRA[index].to_u32 << 8)
+          with_extra(LENGTH_BASES[index], LENGTH_EXTRA[index], bits)
         else
-          INVALID
+          EXCEPTIONAL | bits
         end
       in .distance?
         if symbol < 30
-          (DISTANCE_BASES[symbol].to_u32 << 16) | (DISTANCE_EXTRA[symbol].to_u32 << 8)
+          with_extra(DISTANCE_BASES[symbol], DISTANCE_EXTRA[symbol], bits)
         else
-          INVALID
+          EXCEPTIONAL | bits
         end
       end
+    end
+
+    # A length or distance entry: bits 0-7 hold the code bits plus the
+    # extra bits, bits 8-11 the code bits, so a decoder takes both with one
+    # shift and reads the extra value as `(bits & mask(total)) >> code`.
+    private def self.with_extra(base : UInt16, extra : UInt8, code_bits : UInt32) : UInt32
+      (base.to_u32 << 16) | (code_bits << 8) | (code_bits + extra.to_u32)
     end
 
     # Returns the low *length* bits of *code* in reverse order.

@@ -470,13 +470,15 @@ module Mica::Deflate
       header = Bytes.new(10)
       header.size.times do |index|
         header[index] = read_byte("the gzip header")
-        next unless index < 2 && header[index] != MAGIC[index]
-        malformed(@members > 0 ? "Trailing data after the last gzip member" : "Not a gzip stream (bad magic bytes)")
+        # Each byte is judged as it arrives, as zlib does.
+        if index < 2 && header[index] != MAGIC[index]
+          malformed(@members > 0 ? "Trailing data after the last gzip member" : "Not a gzip stream (bad magic bytes)")
+        end
+        malformed("Unknown compression method #{header[2]} in the gzip header") if index == 2 && header[2] != 8
+        malformed("Reserved gzip header flags are set") if index == 3 && header[3] & 0xE0 != 0
       end
       start_member
-      malformed("Unknown compression method #{header[2]} in the gzip header") unless header[2] == 8
       flags = header[3]
-      malformed("Reserved gzip header flags are set") unless flags & 0xE0 == 0
       header_crc = CRC32.update(0_u32, header)
       metadata = 0
       extra_field = nil
@@ -651,7 +653,8 @@ module Mica::Deflate
     # Decodes one entry of *table* bit by bit with refills from the source.
     # Raises at an invalid code or when the source ends inside the code.
     # The returned entry's code bits are consumed (not its extra bits).
-    private def decode_careful(table : UInt32*, mask : UInt64, root : Int32, where : String) : UInt32
+    private def decode_careful(table : UInt32*, mask : UInt64, root : Int32, where : String,
+                               with_extra : Bool = false) : UInt32
       need_bits(15)
       entry = table[@bit_buffer & mask]
       if entry & HuffmanTable::SUBTABLE != 0
@@ -662,8 +665,12 @@ module Mica::Deflate
         entry = table[(entry >> 16) + (@bit_buffer & sub_mask)]
       end
       length = (entry & 0xFF).to_i32
+      # A length or distance entry: consume its code bits only; the caller
+      # takes the extra bits.
+      length = ((entry >> 8) & 0xF).to_i32 if with_extra && entry & (HuffmanTable::LITERAL | HuffmanTable::EXCEPTIONAL) == 0
       if entry & HuffmanTable::EXCEPTIONAL != 0 && entry & HuffmanTable::END_OF_BLOCK == 0
-        truncated(where) if @io_done && @in_pos == @in_end && @bit_count < 15
+        # Judged once the bits of the unused pattern are in, as zlib does.
+        truncated(where) if length > @bit_count
         malformed("Invalid Huffman code in #{where}")
       end
       truncated(where) if length > @bit_count
@@ -735,7 +742,7 @@ module Mica::Deflate
         return false
       end
       entry = decode_careful(@literal_length_table, LITERAL_LENGTH_MASK, HuffmanTable::LITERAL_LENGTH_ROOT,
-        "a Huffman block")
+        "a Huffman block", with_extra: true)
       if entry & HuffmanTable::LITERAL != 0
         output_limit_reached if @out_pos == limit
         @out[@out_pos] = (entry >> 16).to_u8!
@@ -746,14 +753,20 @@ module Mica::Deflate
         @phase = Phase::BlockHeader
         return true
       end
-      length = (entry >> 16).to_i32 + take_bits(((entry >> 8) & 0xF).to_i32, "a length").to_i32
-      distance_entry = decode_careful(@distance_table, DISTANCE_MASK, HuffmanTable::DISTANCE_ROOT, "a distance")
+      length = (entry >> 16).to_i32 + take_bits(extra_bits_of(entry), "a length").to_i32
+      distance_entry = decode_careful(@distance_table, DISTANCE_MASK, HuffmanTable::DISTANCE_ROOT, "a distance",
+        with_extra: true)
       malformed("Invalid distance code") if distance_entry & HuffmanTable::EXCEPTIONAL != 0
-      distance = (distance_entry >> 16).to_i32 + take_bits(((distance_entry >> 8) & 0xF).to_i32, "a distance").to_i32
+      distance = (distance_entry >> 16).to_i32 + take_bits(extra_bits_of(distance_entry), "a distance").to_i32
       check_distance(distance)
       @copy_left = length
       @copy_distance = distance
       finish_copy(limit, capped)
+    end
+
+    # The extra bits of a length or distance entry.
+    private def extra_bits_of(entry : UInt32) : Int32
+      ((entry & 0xFF) - ((entry >> 8) & 0xF)).to_i32
     end
 
     private def check_distance(distance : Int32) : Nil
@@ -806,16 +819,18 @@ module Mica::Deflate
           bit_count &-= HuffmanTable::LITERAL_LENGTH_ROOT
           entry = literal_lengths[((entry >> 16) &+ (bit_buffer & (1_u64.unsafe_shl((entry >> 8) & 0xF) &- 1))).to_i32!]
         end
-        code_bits = entry & 0xFF
-        bit_buffer = bit_buffer.unsafe_shr(code_bits)
-        bit_count &-= code_bits
-
         if entry & HuffmanTable::LITERAL != 0
+          code_bits = entry & 0xFF
+          bit_buffer = bit_buffer.unsafe_shr(code_bits)
+          bit_count &-= code_bits
           out[out_pos] = (entry >> 16).to_u8!
           out_pos &+= 1
-          # A second literal from the same refill (at least 41 bits remain).
-          entry = literal_lengths[(bit_buffer & LITERAL_LENGTH_MASK).to_i32!]
-          if entry & HuffmanTable::LITERAL != 0
+          # Up to three more literals from the same refill: at least 41
+          # bits remain, and a literal found in the root table takes at
+          # most 10.
+          3.times do
+            entry = literal_lengths[(bit_buffer & LITERAL_LENGTH_MASK).to_i32!]
+            break unless entry & HuffmanTable::LITERAL != 0
             code_bits = entry & 0xFF
             bit_buffer = bit_buffer.unsafe_shr(code_bits)
             bit_count &-= code_bits
@@ -827,6 +842,9 @@ module Mica::Deflate
 
         if entry & HuffmanTable::EXCEPTIONAL != 0
           if entry & HuffmanTable::END_OF_BLOCK != 0
+            code_bits = entry & 0xFF
+            bit_buffer = bit_buffer.unsafe_shr(code_bits)
+            bit_count &-= code_bits
             @phase = Phase::BlockHeader
           else
             problem = 1
@@ -834,10 +852,10 @@ module Mica::Deflate
           break
         end
 
-        extra = (entry >> 8) & 0xF
-        length = ((entry >> 16) &+ (bit_buffer & (1_u64.unsafe_shl(extra) &- 1))).to_i32!
-        bit_buffer = bit_buffer.unsafe_shr(extra)
-        bit_count &-= extra
+        total = entry & 0xFF
+        length = ((entry >> 16) &+ ((bit_buffer & (1_u64.unsafe_shl(total) &- 1)) >> ((entry >> 8) & 0xF))).to_i32!
+        bit_buffer = bit_buffer.unsafe_shr(total)
+        bit_count &-= total
 
         entry = distances[(bit_buffer & DISTANCE_MASK).to_i32!]
         if entry & HuffmanTable::SUBTABLE != 0
@@ -849,13 +867,10 @@ module Mica::Deflate
           problem = 2
           break
         end
-        code_bits = entry & 0xFF
-        bit_buffer = bit_buffer.unsafe_shr(code_bits)
-        bit_count &-= code_bits
-        extra = (entry >> 8) & 0xF
-        distance = ((entry >> 16) &+ (bit_buffer & (1_u64.unsafe_shl(extra) &- 1))).to_i32!
-        bit_buffer = bit_buffer.unsafe_shr(extra)
-        bit_count &-= extra
+        total = entry & 0xFF
+        distance = ((entry >> 16) &+ ((bit_buffer & (1_u64.unsafe_shl(total) &- 1)) >> ((entry >> 8) & 0xF))).to_i32!
+        bit_buffer = bit_buffer.unsafe_shr(total)
+        bit_count &-= total
 
         if distance > out_pos &- lowest || distance > window
           problem = 3
