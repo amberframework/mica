@@ -190,11 +190,12 @@ module Mica::Regex
     end
 
     # Drops the references of collected members and returns how many it
-    # dropped. The list is rebuilt rather than compacted in place, so its
-    # buffer shrinks with it. The caller holds `@mutex`.
+    # dropped. The list is compacted in place, so a prune allocates
+    # nothing; its buffer stays at the size the list last reached, which
+    # `register` bounds. The caller holds `@mutex`.
     private def prune_collected_members : Int32
       count = @list_of_members.size
-      @list_of_members = @list_of_members.reject(&.value.nil?)
+      @list_of_members.reject!(&.value.nil?)
       count - @list_of_members.size
     end
 
