@@ -131,6 +131,22 @@ module StaticCorpus
     list_of_matches
   end
 
+  PCRE2_WORD = ::Regex.new("Awz")
+  MICA_WORD  = Mica::Regex.compile("Awz", dialect: :crystal, compile_limits: Mica::Regex::CompileLimits::TRUSTED_PATTERN)
+
+  # True when the PCRE2 this spec links reads `\w` differently from Mica
+  # on a character of *haystack*. Mica follows PCRE2 10.43 and later, where
+  # `\w` also matches nonspacing marks (Mn) and connector punctuation (Pc);
+  # older libraries (10.42 on Ubuntu 24.04) do not, so on such haystacks
+  # only the runtime engine is compared.
+  def self.pcre2_word_table_differs?(haystack : String) : Bool
+    return false if haystack.ascii_only?
+    haystack.each_char.any? do |char|
+      text = char.to_s
+      PCRE2_WORD.matches?(text) != MICA_WORD.matches?(text, limits: Mica::Regex::SearchLimits::TRUSTED_INPUT)
+    end
+  end
+
   # Every match of *haystack* on PCRE2, or nil when PCRE2 stops at one of
   # its own limits.
   def self.pcre2_matches(regex : ::Regex, haystack : String) : Array(Match)?
@@ -200,6 +216,9 @@ describe "Mica::Regex.static over the benchmark corpora" do
     # compare): only the ReDoS patterns and rebar's exponential-backtracking
     # case may do that.
     list_of_pcre2_limited = [] of String
+    # Haystacks the linked PCRE2 reads with an older `\w` table (see
+    # `StaticCorpus.pcre2_word_table_differs?`); none with PCRE2 10.43+.
+    list_of_older_word_tables = [] of String
     cases = 0
     list_of_static.each do |entry|
       options = entry.ignore_case? ? Mica::Regex::CompileOptions::IgnoreCase : Mica::Regex::CompileOptions::None
@@ -213,7 +232,9 @@ describe "Mica::Regex.static over the benchmark corpora" do
         list_of_spans = found.map { |match| Mica::Regex::Span.new(match[0], match[1]) }
         agrees = found == expected && entry.spans(haystack) == list_of_spans &&
                  entry.spans_by_each(haystack) == list_of_spans && entry.matches?(haystack) == !found.empty?
-        if pcre2 = StaticCorpus.pcre2_matches(regex, haystack)
+        if StaticCorpus.pcre2_word_table_differs?(haystack)
+          list_of_older_word_tables << entry.id
+        elsif pcre2 = StaticCorpus.pcre2_matches(regex, haystack)
           agrees &&= pcre2 == found
         else
           list_of_pcre2_limited << entry.id
@@ -225,6 +246,7 @@ describe "Mica::Regex.static over the benchmark corpora" do
     cases.should be > 450_000
     list_of_pcre2_limited.reject { |id| id.starts_with?("redos/") || id == "rebar/imported/rsc/no-exponential" }.should be_empty
     list_of_pcre2_limited.size.should be < 100
+    list_of_older_word_tables.size.should be < 100
   end
 
   it "allocates nothing per static search" do
