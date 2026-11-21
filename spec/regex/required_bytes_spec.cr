@@ -100,6 +100,28 @@ describe "Mica::Regex required bytes" do
     end
   end
 
+  describe "RequiredBytes" do
+    it "holds up to three bytes in order, in one word" do
+      none = Mica::Regex::RequiredBytes::NONE
+      none.size.should eq(0)
+      none.to_a.should be_empty
+      three = none.with(0xFF_u8).with(0_u8).with(0x7F_u8)
+      three.size.should eq(3)
+      three.to_a.should eq([0xFF_u8, 0_u8, 0x7F_u8])
+      three.packed.should_not eq(Mica::Regex::RequiredBytes::NOT_FOUND)
+      Mica::Regex::RequiredBytes.new(three.packed).to_a.should eq(three.to_a)
+    end
+
+    it "is found without a block from the collector" do
+      program = compiled_program("x[a-z]*@[a-z]*\\.[a-z]+")
+      Mica::Regex::StartFilter.required_bytes(program)
+      before = GC.stats.total_bytes
+      found = Mica::Regex::StartFilter.required_bytes(program)
+      (GC.stats.total_bytes - before).should eq(0)
+      found.should_not be_empty
+    end
+  end
+
   describe "Program#list_of_required_bytes" do
     it_satisfies "REGEX-R3-required-bytes", "holds the rarest ASCII bytes every match reads" do
       compiled_program("(a|aa)*c").list_of_required_bytes.to_a.should eq(['c'.ord.to_u8])
