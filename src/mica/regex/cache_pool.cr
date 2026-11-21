@@ -38,6 +38,9 @@ module Mica::Regex
     DEFAULT_MAX_CACHE_BYTES = 2_i64 * 1024 * 1024
     # The step in which a cache reserves memory.
     RESERVATION_BYTES = 64_i64 * 1024
+    # The smallest member-list size at which `register` drops the
+    # references of collected members.
+    PRUNE_FLOOR = 1024
 
     # The cap on the bytes all members of this pool hold.
     getter max_bytes : Int64
@@ -46,6 +49,12 @@ module Mica::Regex
     @reserved = Atomic(Int64).new(0_i64)
     @mutex = Mutex.new
     @list_of_members = [] of WeakRef(PoolMember)
+    # The member-list size at which `register` next drops the references
+    # of collected members (see `register`).
+    @prune_at = PRUNE_FLOOR
+    # Collected members `register` dropped since `reserve` last looked, so
+    # `reserve` still knows to collect garbage before it gives up.
+    @pruned_since_reserve = 0
     # Counts hand-backs, to order idle members by their last use.
     @clock = Atomic(Int64).new(0_i64)
 
@@ -111,9 +120,9 @@ module Mica::Regex
     def reserve(bytes : Int64) : Bool
       return true if try_reserve(bytes)
       freed = @mutex.synchronize do
-        count = @list_of_members.size
-        @list_of_members.reject! { |reference| reference.value.nil? }
-        count - @list_of_members.size
+        count = prune_collected_members + @pruned_since_reserve
+        @pruned_since_reserve = 0
+        count
       end
       return true if reserve_by_evicting(bytes)
       return false unless freed > 0
@@ -154,8 +163,39 @@ module Mica::Regex
 
     # :nodoc:
     # Records a new member of this pool, so it can be evicted when idle.
+    #
+    # Every lease registers, and a reference stays in the list after its
+    # member is collected, so the list is pruned here as well as in
+    # `reserve`: once it reaches `@prune_at`, the references of collected
+    # members are dropped and `@prune_at` becomes twice the size that
+    # remains (at least `PRUNE_FLOOR`). The list therefore never holds
+    # more than `PRUNE_FLOOR` or twice the members that were alive (or not
+    # yet collected) at the last prune, whatever the number of expressions
+    # ever compiled, and each registration costs amortized constant time.
     def register(member : PoolMember) : Nil
-      @mutex.synchronize { @list_of_members << WeakRef(PoolMember).new(member) }
+      @mutex.synchronize do
+        if @list_of_members.size >= @prune_at
+          @pruned_since_reserve += prune_collected_members
+          @prune_at = Math.max(PRUNE_FLOOR, @list_of_members.size * 2)
+        end
+        @list_of_members << WeakRef(PoolMember).new(member)
+      end
+    end
+
+    # :nodoc:
+    # The number of references the member list holds now, live or not
+    # (for the leak specs).
+    def member_count : Int32
+      @mutex.synchronize { @list_of_members.size }
+    end
+
+    # Drops the references of collected members and returns how many it
+    # dropped. The list is rebuilt rather than compacted in place, so its
+    # buffer shrinks with it. The caller holds `@mutex`.
+    private def prune_collected_members : Int32
+      count = @list_of_members.size
+      @list_of_members = @list_of_members.reject(&.value.nil?)
+      count - @list_of_members.size
     end
 
     # :nodoc:
