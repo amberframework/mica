@@ -592,7 +592,12 @@ scripts/generate_class_blocks.cr into `ClassMemo::Prebuilt`, static data
 a process decodes in one pass the first time a pattern uses the class,
 where building `\w` from its trie takes about 70 us and 150 KiB of
 short-lived allocation; a spec checks each against the block its set
-builds. A program copies only its states (one memory
+builds. A class that differs from one of them only in ASCII members
+(`(?i)[\w+\-.]`, `[^\W_]`) takes that block with its entry's ASCII
+transitions replaced, and a class of ASCII letters under `IgnoreCase`,
+which gains U+017F and U+212A, with or without `\d` (`(?i)[a-z\d\-]`,
+`(?i)[a-z]`), takes a block of `ClassMemo::PrebuiltFolded` the same way.
+A program copies only its states (one memory
 copy, relocated in place): their `Sparse` states read the class's
 transitions from one table shared by every program and copy
 (`Program#list_of_shared_tables`, targets relative to the reading state),
@@ -855,7 +860,9 @@ the match only removes matches.
 `Program#list_of_required_bytes` holds up to three ASCII bytes every match
 reads (`c` in `(a|aa)*c`, `H`, `m` and `l` in `\w+\s+Holmes`), the rarest
 first, found once per program in one pass over the NFA (assertions taken
-as passing, so the set never claims too much). Before any engine runs, an
+as passing, so the set never claims too much; a large class is stepped
+over at its entry, as a path through it of two bytes or more reads no
+ASCII byte). Before any engine runs, an
 `Auto` search looks for the rarest with `memchr` from its offset, and for
 the others once per haystack, as its first search there starts (past
 256 bytes from its offset, where a scan is cheaper than the engine), and
