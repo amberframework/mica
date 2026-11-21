@@ -264,7 +264,10 @@ module Mica::Deflate
         @in_pos -= keep_from
         @in_end = kept
       end
-      if @in_end == buffer.size && buffer.size < INPUT_BUFFER
+      # Once the stream has outrun the buffer, double it (up to
+      # INPUT_BUFFER): small bodies keep a small buffer, long streams get
+      # large reads.
+      if buffer.size < INPUT_BUFFER && @in_base + @in_end >= buffer.size
         grown = Bytes.new(GC.malloc_atomic(buffer.size.to_u64 * 2).as(UInt8*), buffer.size * 2)
         grown.copy_from(buffer.to_unsafe, @in_end)
         @input_buffer = buffer = grown
@@ -278,6 +281,15 @@ module Mica::Deflate
       end
       @in_end += count
       true
+    end
+
+    # Returns true when a streaming decoder should read more before its
+    # fast loop: fewer than `INPUT_LOW_WATER` bytes (or a quarter of a
+    # smaller buffer) remain and the source has not ended.
+    private def input_running_low? : Bool
+      buffer = @input_buffer
+      return false if buffer.nil? || @io_done
+      @in_end - @in_pos < Math.min(INPUT_LOW_WATER, buffer.size // 4)
     end
 
     # Makes sure the bit buffer holds at least *count* bits (at most 56).
@@ -743,7 +755,7 @@ module Mica::Deflate
         if @copy_left > 0
           return unless finish_copy(limit, capped)
         end
-        if !@one_shot && @in_end - @in_pos < INPUT_LOW_WATER && !@io_done
+        if input_running_low?
           refill_input
         end
         if @in_end - @in_pos >= 8 && limit - @out_pos >= MAX_MATCH
