@@ -131,8 +131,8 @@ module StaticCorpus
     list_of_matches
   end
 
-  PCRE2_WORD = ::Regex.new("Awz")
-  MICA_WORD  = Mica::Regex.compile("Awz", dialect: :crystal, compile_limits: Mica::Regex::CompileLimits::TRUSTED_PATTERN)
+  PCRE2_WORD = ::Regex.new("\\A\\w\\z")
+  MICA_WORD  = Mica::Regex.compile("\\A\\w\\z", dialect: :crystal, compile_limits: Mica::Regex::CompileLimits::TRUSTED_PATTERN)
 
   # True when the PCRE2 this spec links reads `\w` differently from Mica
   # on a character of *haystack*. Mica follows PCRE2 10.43 and later, where
@@ -219,6 +219,8 @@ describe "Mica::Regex.static over the benchmark corpora" do
     # Haystacks the linked PCRE2 reads with an older `\w` table (see
     # `StaticCorpus.pcre2_word_table_differs?`); none with PCRE2 10.43+.
     list_of_older_word_tables = [] of String
+    StaticCorpus::PCRE2_WORD.matches?("a").should be_true
+    StaticCorpus.pcre2_word_table_differs?("a_1 ").should be_false
     cases = 0
     list_of_static.each do |entry|
       options = entry.ignore_case? ? Mica::Regex::CompileOptions::IgnoreCase : Mica::Regex::CompileOptions::None
