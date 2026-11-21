@@ -108,7 +108,7 @@ module Mica::Deflate
 
       offsets = StaticArray(Int32, 16).new(0)
       (1...15).each { |length| offsets[length + 1] = offsets[length] + counts[length] }
-      sorted = StaticArray(UInt16, 320).new(0_u16)
+      sorted = uninitialized StaticArray(UInt16, 320)
       count.times do |symbol|
         length = lengths[symbol]
         next if length == 0
@@ -116,8 +116,14 @@ module Mica::Deflate
         offsets[length] += 1
       end
 
-      root_size.times { |index| table[index] = INVALID }
-      written = root_size
+      # A complete code writes every entry itself; only an incomplete one
+      # (a single 1-bit code) leaves patterns that must read as invalid.
+      complete = left == 0
+      written = 0
+      unless complete
+        root_size.times { |index| table[index] = INVALID }
+        written = root_size
+      end
       root_mask = root_size - 1
       next_free = root_size
       current_prefix = -1
@@ -154,8 +160,10 @@ module Mica::Deflate
               subtable_start = next_free
               next_free += 1 << bits
               raise Mica::Error.new("internal error: Huffman table overflow") if next_free > capacity
-              (1 << bits).times { |index| table[subtable_start + index] = INVALID }
-              written += 1 << bits
+              unless complete
+                (1 << bits).times { |index| table[subtable_start + index] = INVALID }
+                written += 1 << bits
+              end
               table[prefix] = EXCEPTIONAL | SUBTABLE | (subtable_start.to_u32 << 16) |
                               (subtable_bits.to_u32 << 8) | root.to_u32
               current_prefix = prefix
