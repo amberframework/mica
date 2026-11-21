@@ -9,7 +9,7 @@ module Mica::Regex
   # nothing. The values may be references: the collector scans a fiber's
   # stack as it scans an array.
   #
-  # Make one with `Regex.scratch_stack`, in the method that uses it: the
+  # Make one with `Mica::Regex.scratch_stack`, in the method that uses it: the
   # stack is valid until that method returns.
   #
   # ```

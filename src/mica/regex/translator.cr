@@ -11,7 +11,7 @@ module Mica::Regex
       # stack never holds more results than there are nodes.
       capacity = Math.max(pattern.node_count, 1)
       ledger.charge_array(capacity, sizeof(Hir::Node), "the translation stack", pattern.root.offset)
-      list_of_results = Regex.scratch_stack(Hir::Node, capacity)
+      list_of_results = Mica::Regex.scratch_stack(Hir::Node, capacity)
       Ast.each_post_order(pattern.root, pattern.node_count, ledger) do |node, child_count|
         offset = node.offset
         meter.enforce { Core::Position.new(offset.to_i64) } if meter.charge(1)
@@ -83,7 +83,7 @@ module Mica::Regex
     # The `Hir` node of each ASCII literal, shared by every translation:
     # nodes are never changed after they are made, and most patterns are
     # mostly ASCII literals, so these are made once rather than once per
-    # character. They are static objects (see `Regex.static_object`): a
+    # character. They are static objects (see `Mica::Regex.static_object`): a
     # node holds one number, so the table costs the collector's heap
     # nothing, at program start or in a translation.
     @@ascii_literal_storage = uninitialized StaticArray(ReferenceStorage(Hir::Literal), ASCII_LITERAL_COUNT)

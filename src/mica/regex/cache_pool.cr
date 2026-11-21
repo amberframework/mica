@@ -74,9 +74,9 @@ module Mica::Regex
     # The pool every program starts with, its lock and its member list are
     # static objects, so a program that links Mica starts with the same
     # collector heap as one that does not.
-    Regex.static_object(first_default_mutex, Mutex)
-    Regex.static_object(first_default_members, Array(WeakRef(PoolMember)))
-    Regex.static_object(first_default, CachePool, DEFAULT_MAX_BYTES, DEFAULT_MAX_CACHE_BYTES, @@first_default_mutex,
+    Mica::Regex.static_object(first_default_mutex, Mutex)
+    Mica::Regex.static_object(first_default_members, Array(WeakRef(PoolMember)))
+    Mica::Regex.static_object(first_default, CachePool, DEFAULT_MAX_BYTES, DEFAULT_MAX_CACHE_BYTES, @@first_default_mutex,
       @@first_default_members)
 
     # Held in an atomic so a pool configured on one thread is seen whole

@@ -29,8 +29,8 @@ module Mica::Regex
 
     # Static objects, so a program that never reverses a class pays nothing
     # for them.
-    Regex.static_object(mutex, Mutex)
-    Regex.static_object(memo, Hash(Array(Int32), ReversedClass?))
+    Mica::Regex.static_object(mutex, Mutex)
+    Mica::Regex.static_object(memo, Hash(Array(Int32), ReversedClass?))
 
     # Returns the reversed class of *block*, or nil when the block is not a
     # plain class (only byte states, every edge inside the block or to its

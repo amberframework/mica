@@ -47,8 +47,8 @@ module Mica::Regex
     # are at most two per escape and property, so the table stays small.
     # The lock and the tables are static objects, so a program that never
     # compiles a class pays nothing for them.
-    Regex.static_object(shared_mutex, Mutex)
-    Regex.static_object(shared_sets, Hash({Ast::ClassItem, Bool}, CodePointSet))
+    Mica::Regex.static_object(shared_mutex, Mutex)
+    Mica::Regex.static_object(shared_sets, Hash({Ast::ClassItem, Bool}, CodePointSet))
 
     # The most items a class may have for its lowering to be kept in
     # `@@written_sets`, and the most classes kept there.
@@ -90,7 +90,7 @@ module Mica::Regex
       set
     end
 
-    Regex.static_object(written_sets, Hash(WrittenClassKey, CodePointSet))
+    Mica::Regex.static_object(written_sets, Hash(WrittenClassKey, CodePointSet))
 
     # The ranges, the bounds merged from them and the fold partners are
     # scratch outside the collector's heap, freed when the set is made;
@@ -98,7 +98,7 @@ module Mica::Regex
     private def self.lower_items(char_class : Ast::CharClass, dialect : Dialect, limits : CompileLimits,
                                  ledger : AllocationLedger, meter : Core::WorkMeter) : CodePointSet
       ledger.charge_object(instance_sizeof(Context), "a class lowering", char_class.offset)
-      context = Regex.stack_object(Context, char_class.offset, limits, ledger, meter)
+      context = Mica::Regex.stack_object(Context, char_class.offset, limits, ledger, meter)
       options = char_class.options
       folding = options.ignore_case? && !dialect.xsd?
       restricted = options.caseless_restrict? && dialect.crystal?
@@ -270,7 +270,7 @@ module Mica::Regex
     def self.union_of(list_of_sets : Array(CodePointSet), limits : CompileLimits, ledger : AllocationLedger,
                       meter : Core::WorkMeter, offset : Int32) : CodePointSet
       ledger.charge_object(instance_sizeof(Context), "a class union", offset)
-      context = Regex.stack_object(Context, offset, limits, ledger, meter)
+      context = Mica::Regex.stack_object(Context, offset, limits, ledger, meter)
       context.charge_array(list_of_sets.size, sizeof(RangeStream))
       list_of_streams = list_of_sets.map do |set|
         context.charge_stream
@@ -287,8 +287,8 @@ module Mica::Regex
       matches_newline ? @@any_character : @@any_character_but_newline
     end
 
-    Regex.static_object(any_character, CodePointSet, Slice(Int32).literal(0, 0x10FFFF))
-    Regex.static_object(any_character_but_newline, CodePointSet,
+    Mica::Regex.static_object(any_character, CodePointSet, Slice(Int32).literal(0, 0x10FFFF))
+    Mica::Regex.static_object(any_character_but_newline, CodePointSet,
       Slice(Int32).literal(0, 0x09, 0x0B, 0x10FFFF))
 
     # Sorts *list_of_ranges* in place and merges overlapping and adjacent

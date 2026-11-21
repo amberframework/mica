@@ -252,7 +252,7 @@ module Mica::Regex
     def self.each_post_order(root : Node, node_count : Int32, ledger : AllocationLedger, & : Node, Int32 ->) : Nil
       capacity = Math.max(node_count, 1)
       ledger.charge_array(capacity, sizeof({Node, Bool}), "a traversal stack", root.offset)
-      stack = Regex.scratch_stack({Node, Bool}, capacity)
+      stack = Mica::Regex.scratch_stack({Node, Bool}, capacity)
       stack << {root, false}
       until stack.empty?
         node, expanded = stack.pop

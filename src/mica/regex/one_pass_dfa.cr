@@ -45,7 +45,7 @@ module Mica::Regex
     def self.build(program : Program, byte_classes : ByteClasses) : OnePassDFA?
       return nil if program.state_count > MAX_STATES || program.slot_count > MAX_SLOTS
       # The builder serves this call alone, from its stack frame.
-      builder = Regex.stack_object(OnePassBuilder, program, byte_classes)
+      builder = Mica::Regex.stack_object(OnePassBuilder, program, byte_classes)
       begin
         builder.build
       ensure

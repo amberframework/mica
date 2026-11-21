@@ -690,9 +690,9 @@ module Mica::Regex
     end
 
     # The line breaks of `\R` other than `\r`.
-    Regex.static_object(other_line_breaks, CodePointSet, Slice(Int32).literal(0x0A, 0x0C, 0x85, 0x85, 0x2028, 0x2029))
+    Mica::Regex.static_object(other_line_breaks, CodePointSet, Slice(Int32).literal(0x0A, 0x0C, 0x85, 0x85, 0x2028, 0x2029))
     # The line breaks of `\R` under `(*BSR_ANYCRLF)` other than `\r`.
-    Regex.static_object(line_feed_only, CodePointSet, Slice(Int32).literal(0x0A, 0x0A))
+    Mica::Regex.static_object(line_feed_only, CodePointSet, Slice(Int32).literal(0x0A, 0x0A))
 
     # Compiles *set* (see `compile_class`) and records its states as a
     # `Program::ClassBlock` when they are more than one.

@@ -112,8 +112,8 @@ module Mica::Regex
     # kept, from `FIRST_KEPT_BLOCKS`: a block holds no reference the
     # collector follows, and a table entry of a set and a number is a
     # fraction of the size of one that holds the block.
-    Regex.static_object(mutex, Mutex)
-    Regex.static_object(block_indexes, Hash(Key, Int32))
+    Mica::Regex.static_object(mutex, Mutex)
+    Mica::Regex.static_object(block_indexes, Hash(Key, Int32))
     @@kept_blocks = Pointer(Block).null
     @@kept_block_room = 0
 

@@ -41,8 +41,8 @@ module Mica::Regex
     # `COMPILE_WORK_BUDGET`).
     def self.check(pattern : String | Bytes, *, dialect : Dialect, compile_limits : CompileLimits,
                    options : CompileOptions = CompileOptions::None, meter : Core::WorkMeter? = nil) : Report
-      work_meter = meter || Regex.stack_object(Core::WorkMeter, COMPILE_WORK_BUDGET)
-      ledger = Regex.stack_object(AllocationLedger, compile_limits.max_compile_bytes)
+      work_meter = meter || Mica::Regex.stack_object(Core::WorkMeter, COMPILE_WORK_BUDGET)
+      ledger = Mica::Regex.stack_object(AllocationLedger, compile_limits.max_compile_bytes)
       charge_fixed_objects(ledger, meter)
       parsed, estimate = front_half(pattern, dialect, compile_limits, options, ledger, work_meter)
       Translator.translate(parsed, dialect, ledger, work_meter)
@@ -65,8 +65,8 @@ module Mica::Regex
     # Parses, checks and translates *pattern*, returning its `Hir`.
     def self.translate(pattern : String | Bytes, *, dialect : Dialect, compile_limits : CompileLimits,
                        options : CompileOptions = CompileOptions::None, meter : Core::WorkMeter? = nil) : Hir::Pattern
-      work_meter = meter || Regex.stack_object(Core::WorkMeter, COMPILE_WORK_BUDGET)
-      ledger = Regex.stack_object(AllocationLedger, compile_limits.max_compile_bytes)
+      work_meter = meter || Mica::Regex.stack_object(Core::WorkMeter, COMPILE_WORK_BUDGET)
+      ledger = Mica::Regex.stack_object(AllocationLedger, compile_limits.max_compile_bytes)
       charge_fixed_objects(ledger, meter)
       parsed, _estimate = front_half(pattern, dialect, compile_limits, options, ledger, work_meter)
       Translator.translate(parsed, dialect, ledger, work_meter)
@@ -81,8 +81,8 @@ module Mica::Regex
     # meter's units. `Expression.new` is the public way in.
     def self.compile(pattern : String | Bytes, *, dialect : Dialect, compile_limits : CompileLimits,
                      options : CompileOptions = CompileOptions::None, meter : Core::WorkMeter? = nil) : Program
-      work_meter = meter || Regex.stack_object(Core::WorkMeter, COMPILE_WORK_BUDGET)
-      ledger = Regex.stack_object(AllocationLedger, compile_limits.max_compile_bytes)
+      work_meter = meter || Mica::Regex.stack_object(Core::WorkMeter, COMPILE_WORK_BUDGET)
+      ledger = Mica::Regex.stack_object(AllocationLedger, compile_limits.max_compile_bytes)
       charge_fixed_objects(ledger, meter)
       parsed, estimate = front_half(pattern, dialect, compile_limits, options, ledger, work_meter)
       hir = Translator.translate(parsed, dialect, ledger, work_meter)
@@ -97,10 +97,10 @@ module Mica::Regex
     # Parses *pattern* into its syntax tree (no class lowering or preflight).
     def self.parse(pattern : String | Bytes, *, dialect : Dialect, compile_limits : CompileLimits,
                    options : CompileOptions = CompileOptions::None, meter : Core::WorkMeter? = nil) : Ast::Pattern
-      work_meter = meter || Regex.stack_object(Core::WorkMeter, COMPILE_WORK_BUDGET)
-      ledger = Regex.stack_object(AllocationLedger, compile_limits.max_compile_bytes)
+      work_meter = meter || Mica::Regex.stack_object(Core::WorkMeter, COMPILE_WORK_BUDGET)
+      ledger = Mica::Regex.stack_object(AllocationLedger, compile_limits.max_compile_bytes)
       charge_fixed_objects(ledger, meter)
-      parser = Regex.stack_object(Parser, pattern_bytes(pattern, dialect, work_meter), options, compile_limits, ledger, work_meter)
+      parser = Mica::Regex.stack_object(Parser, pattern_bytes(pattern, dialect, work_meter), options, compile_limits, ledger, work_meter)
       parser.parse
     ensure
       ledger.try(&.free_owned_blocks)
@@ -109,7 +109,7 @@ module Mica::Regex
     private def self.front_half(pattern : String | Bytes, dialect : Dialect, limits : CompileLimits,
                                 options : CompileOptions, ledger : AllocationLedger,
                                 meter : Core::WorkMeter) : {Ast::Pattern, Int64}
-      parser = Regex.stack_object(Parser, pattern_bytes(pattern, dialect, meter), options, limits, ledger, meter)
+      parser = Mica::Regex.stack_object(Parser, pattern_bytes(pattern, dialect, meter), options, limits, ledger, meter)
       parsed = parser.parse
       estimate = Preflight.estimate(parsed, dialect, limits, ledger, meter, lower_sets: true)
       meter.enforce_deadline { Core::Position.new(0_i64) }
