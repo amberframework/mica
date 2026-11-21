@@ -170,7 +170,7 @@ module Mica::Regex
       Prebuilt::LIST_OF_ENTRIES.each do |prebuilt|
         set_id, negated, range_count, entry, state_count, transition_count, offset = prebuilt
         next unless bounds.size == range_count * 2
-        next unless static_set?(bounds, set_id, negated, meter)
+        next unless static_set?(bounds, prebuilt_ranges(set_id, range_count), negated, meter)
         list_of_states, list_of_transitions = decode_prebuilt(state_count, transition_count, offset, ledger, meter)
         return finished_block(list_of_states, list_of_transitions, entry, ledger)
       end
@@ -188,7 +188,9 @@ module Mica::Regex
 
     # Returns the block of a set whose members past ASCII are exactly those of
     # a prebuilt set (or its complement), as `(?i)[\w+\-.]` and `[^\W_]` are
-    # `\w`'s, else nil. The block is the prebuilt one with the entry's ASCII
+    # `\w`'s, `[$+<=>\p{P}]` is `\p{P}`'s, `.`, `[^"]` and every other
+    # class that leaves out ASCII characters only are `\p{Any}`'s, and
+    # `(?i)[a-z0-9.+-]` is `(?i)[a-z]`'s, else nil. The block is the prebuilt one with the entry's ASCII
     # transitions replaced by the set's ASCII ranges: the trie of the set has
     # the prebuilt set's nodes past the entry, and the builder emits the entry
     # last, so `build` makes exactly this block (a spec checks them equal).
@@ -199,14 +201,14 @@ module Mica::Regex
       return nil if bounds.empty? || bounds[-1] < ASCII_END
       # Ranges that reach past ASCII: the set must have as many as the
       # prebuilt set, which has between `range_count - MAX_ASCII_RANGES` and
-      # `range_count`. Checked first, so a set that is no variant (`[^']`,
-      # which a process-cold first compile meets) is turned away without
-      # reading the static tables: their first read costs page faults.
+      # `range_count`. Checked first, so a set that is no variant
+      # (`[a-zà-ÿ]`) is turned away without reading the static tables:
+      # their first read costs page faults.
       ranges_past_ascii = range_count_past_ascii(bounds)
       Prebuilt::LIST_OF_ENTRIES.each do |prebuilt|
         set_id, negated, range_count, entry, state_count, transition_count, offset = prebuilt
         next unless range_count - MAX_ASCII_RANGES <= ranges_past_ascii <= range_count
-        next unless same_past_ascii?(bounds, set_id, negated, meter)
+        next unless same_past_ascii?(bounds, prebuilt_ranges(set_id, range_count), negated, meter)
         list_of_states, list_of_transitions = decode_prebuilt(state_count, transition_count, offset, ledger, meter,
           spare_transitions: ascii_range_count(bounds))
         replaced = replace_ascii_transitions(list_of_states, list_of_transitions, entry, bounds, ledger)
@@ -220,11 +222,19 @@ module Mica::Regex
       nil
     end
 
-    # True when *bounds* and static set *set_id* (its complement when
+    # The ranges of the set a prebuilt block was generated for: those of
+    # static set *set_id*, or, for a negative id, the *range_count* ranges of
+    # `Prebuilt::WRITTEN_RANGES` from pair `-set_id - 1`. Both are static
+    # data, read in place.
+    private def self.prebuilt_ranges(set_id : Int32, range_count : Int32) : Slice(Int32)
+      return Unicode.decoded_ranges(set_id) if set_id >= 0
+      Prebuilt::WRITTEN_RANGES[(-set_id - 1) * 2, range_count * 2]
+    end
+
+    # True when *bounds* and the set of ranges *static* (its complement when
     # *negated*) have the same members past ASCII.
-    private def self.same_past_ascii?(bounds : Array(Int32), set_id : Int32, negated : Bool,
+    private def self.same_past_ascii?(bounds : Array(Int32), static : Slice(Int32), negated : Bool,
                                       meter : Core::WorkMeter) : Bool
-      static = Unicode.decoded_ranges(set_id)
       meter.enforce { Core::Position.new(0_i64) } if meter.charge(static.size + 1)
       index = 0
       # Skip the ranges that lie wholly in ASCII; the last range reaches past it.
@@ -356,12 +366,11 @@ module Mica::Regex
       raise error
     end
 
-    # True when *bounds* are those of static set *set_id*, or of its
+    # True when *bounds* are the ranges *static*, or those of their
     # complement when *negated*.
-    private def self.static_set?(bounds : Array(Int32), set_id : Int32, negated : Bool,
+    private def self.static_set?(bounds : Array(Int32), static : Slice(Int32), negated : Bool,
                                  meter : Core::WorkMeter) : Bool
       meter.enforce { Core::Position.new(0_i64) } if meter.charge(bounds.size)
-      static = Unicode.decoded_ranges(set_id)
       unless negated
         return false unless static.size == bounds.size
         bounds.each_with_index { |bound, index| return false unless static[index] == bound }
