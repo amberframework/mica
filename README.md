@@ -19,6 +19,10 @@ format parsers on one shared core:
   cache pool, and `Mica::Regex::Expression`, whose methods follow
   Crystal's `Regex` with required compile and search limits. See
   [docs/regex.md](docs/regex.md).
+- `Mica::Deflate`, `Mica::Zlib` and `Mica::Gzip`: Inflate for raw DEFLATE
+  (RFC 1951), zlib (RFC 1950) and gzip (RFC 1952, multi-member), one-shot
+  and streaming, with required output, ratio, window, member, metadata
+  and work limits and a deadline. See [docs/compression.md](docs/compression.md).
 - `Mica::Testing` (opt-in, `require "mica/testing"`): the complexity,
   fuzzing and requirement-traceability harnesses every format uses.
 
@@ -26,7 +30,7 @@ More formats (JSON, YAML, CBOR, COSE, HTTP/1.1, URIs, multipart, CSV, TOML,
 Markdown) plug into the same core; see
 [docs/ADDING_A_FORMAT.md](docs/ADDING_A_FORMAT.md).
 
-Mica has no C parsing dependencies: no libxml2 and no PCRE2. A Mica
+Mica has no C parsing dependencies: no libxml2, no PCRE2 and no libz. A Mica
 program links only libgc, libiconv and libSystem, which the Crystal runtime
 itself needs (`scripts/check_linkage.sh` checks this). Mica never reads the
 network or the file system while parsing, and it is secure by default:
@@ -367,6 +371,11 @@ crystal-alpha build --release fuzz/campaign.cr -o bin/fuzz_campaign
 bin/fuzz_campaign SEED ITERATIONS [FIRST]
 MICA_FUZZ_SEED=7 MICA_FUZZ_ITERATIONS=300000 crystal-alpha spec spec/xml/fuzz_spec.cr
 crystal-alpha run --release fuzz/differential.cr -- 20261024 20000
+
+# Inflate: differential fuzzing against system zlib, and benchmarks
+crystal-alpha build --release fuzz/deflate_campaign.cr -o bin/deflate_campaign
+bin/deflate_campaign SEED ITERATIONS [FIRST]
+bench/deflate/run.sh --quick
 
 # Benchmarks against stdlib XML (libxml2)
 crystal-alpha run --release bench/generate.cr

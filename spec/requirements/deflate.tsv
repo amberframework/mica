@@ -1,0 +1,89 @@
+# Requirements for Mica::Deflate, Mica::Zlib and Mica::Gzip (milestone Z1, the
+# pure-Crystal Inflate decoder): the decoder requirements of RFC 1951
+# (DEFLATE), RFC 1950 (zlib) and RFC 1952 (gzip), the public API, and the
+# decode limits. Where zlib 1.2.12 and the letter of an RFC differ, Mica
+# follows zlib and the summary says so.
+# The DEFLATE-LIMIT-* ids are shared: spec/deflate/bomb_spec.cr and
+# spec/deflate/differential_spec.cr (the fuzz work) cover them as well, and
+# the ids those specs add are merged into this catalog.
+# Format: id<TAB>section<TAB>summary.
+DEFLATE-1951-3.1.1-bit-order	RFC 1951 3.1.1	Data elements are read from the least significant bit of each byte; Huffman codes are read most significant bit first and extra bits least significant bit first
+DEFLATE-1951-3.2.2-canonical-codes	RFC 1951 3.2.2	Codes are rebuilt from code lengths alone: shorter codes first, and codes of one length in symbol order
+DEFLATE-1951-3.2.2-code-length-limits	RFC 1951 3.2.2	Literal/length and distance codes of every length from 1 to 15 bits decode
+DEFLATE-1951-3.2.2-oversubscribed	RFC 1951 3.2.2	A set of code lengths that claims more codes than exist (oversubscribed) is rejected for all three alphabets
+DEFLATE-1951-3.2.2-incomplete	RFC 1951 3.2.2	An incomplete literal/length or distance code is rejected, except the zlib case of exactly one code of length 1 (Mica follows zlib 1.2.12 here; the RFC only allows it for the distance code)
+DEFLATE-1951-3.2.2-unused-code	RFC 1951 3.2.2	Data that uses the unassigned code of an accepted incomplete code is rejected
+DEFLATE-1951-3.2.3-block-header	RFC 1951 3.2.3	Each block starts with BFINAL (1 bit) and BTYPE (2 bits) at any bit position
+DEFLATE-1951-3.2.3-reserved-block-type	RFC 1951 3.2.3	BTYPE 11 is rejected
+DEFLATE-1951-3.2.3-block-sequence	RFC 1951 3.2.3	A stream is any sequence of stored, fixed and dynamic blocks, and their output is concatenated
+DEFLATE-1951-3.2.3-final-block	RFC 1951 3.2.3	Decoding ends with the block that sets BFINAL; a stream whose last block does not set it is truncated
+DEFLATE-1951-3.2.4-stored-alignment	RFC 1951 3.2.4	The bits between a stored block header and the next byte boundary are ignored, whatever their value
+DEFLATE-1951-3.2.4-stored-length	RFC 1951 3.2.4	NLEN must be the one's complement of LEN; any other value is rejected
+DEFLATE-1951-3.2.4-stored-data	RFC 1951 3.2.4	LEN bytes are copied to the output, for every LEN from 0 to 65,535
+DEFLATE-1951-3.2.5-literals	RFC 1951 3.2.5	Symbols 0 to 255 are literal bytes
+DEFLATE-1951-3.2.5-end-of-block	RFC 1951 3.2.5	Symbol 256 ends the block
+DEFLATE-1951-3.2.5-length-codes	RFC 1951 3.2.5	Length symbols 257 to 285 and their extra bits give lengths 3 to 258
+DEFLATE-1951-3.2.5-length-284-extra-31	RFC 1951 3.2.5	Length symbol 284 with extra bits 31 decodes as length 258 (Mica follows zlib 1.2.12 and libdeflate; the RFC assigns 258 to symbol 285 only)
+DEFLATE-1951-3.2.5-distance-codes	RFC 1951 3.2.5	Distance symbols 0 to 29 and their extra bits give distances 1 to 32,768
+DEFLATE-1951-3.2.5-reserved-symbols	RFC 1951 3.2.5	Literal/length symbols 286 and 287 and distance symbols 30 and 31 are rejected when they occur in the data
+DEFLATE-1951-3.2.5-overlap	RFC 1951 3.2.5	A back reference may overlap the bytes it produces (length greater than distance)
+DEFLATE-1951-3.2.5-across-blocks	RFC 1951 3.2.5	A back reference may reach into the output of earlier blocks of any type
+DEFLATE-1951-3.2.5-window	RFC 1951 3.2.5	A back reference may reach exactly 32,768 bytes back, also after the output has passed 32,768 bytes
+DEFLATE-1951-3.2.5-distance-too-far	RFC 1951 3.2.5	A back reference to before the first output byte is rejected
+DEFLATE-1951-3.2.6-fixed-codes	RFC 1951 3.2.6	BTYPE 01 uses the fixed literal/length code (8, 9, 7 and 8 bits) and 5-bit distance codes
+DEFLATE-1951-3.2.7-hlit	RFC 1951 3.2.7	HLIT declares 257 to 286 literal/length code lengths; 287 and 288 are rejected
+DEFLATE-1951-3.2.7-hdist	RFC 1951 3.2.7	HDIST declares 1 to 30 distance code lengths; 31 and 32 are rejected
+DEFLATE-1951-3.2.7-hclen	RFC 1951 3.2.7	HCLEN declares 4 to 19 code length code lengths, sent in the order 16 17 18 0 8 7 9 6 10 5 11 4 12 3 13 2 14 1 15; the ones not sent are zero
+DEFLATE-1951-3.2.7-code-length-code	RFC 1951 3.2.7	The code length code must be complete: an incomplete one is rejected even with a single code (zlib 1.2.12)
+DEFLATE-1951-3.2.7-code-lengths	RFC 1951 3.2.7	Code length symbols 0 to 15 are literal code lengths
+DEFLATE-1951-3.2.7-repeat-16	RFC 1951 3.2.7	Symbol 16 repeats the previous code length 3 to 6 times, and is rejected when no code length precedes it
+DEFLATE-1951-3.2.7-repeat-17	RFC 1951 3.2.7	Symbol 17 repeats a zero length 3 to 10 times
+DEFLATE-1951-3.2.7-repeat-18	RFC 1951 3.2.7	Symbol 18 repeats a zero length 11 to 138 times
+DEFLATE-1951-3.2.7-one-sequence	RFC 1951 3.2.7	The literal/length and distance code lengths form one sequence, so a repeat may run from the first alphabet into the second
+DEFLATE-1951-3.2.7-repeat-overrun	RFC 1951 3.2.7	A repeat that runs past HLIT + HDIST code lengths is rejected
+DEFLATE-1951-3.2.7-end-of-block-code	RFC 1951 3.2.7	A literal/length code that gives symbol 256 no code is rejected (zlib 1.2.12)
+DEFLATE-1951-3.2.7-single-distance-code	RFC 1951 3.2.7	One distance code is sent as one code of length 1, with one unused code
+DEFLATE-1951-3.2.7-no-distance-codes	RFC 1951 3.2.7	A distance code with no codes is accepted for a block of literals only; a length symbol in such a block is rejected
+DEFLATE-1950-2.2-cm	RFC 1950 2.2	CM must be 8 (deflate); any other compression method is rejected
+DEFLATE-1950-2.2-cinfo	RFC 1950 2.2	CINFO from 0 to 7 is accepted and above 7 rejected; distances are checked against the 32 KiB window and the output so far, not against the declared window (zlib 1.2.12 without INFLATE_STRICT)
+DEFLATE-1950-2.2-fcheck	RFC 1950 2.2	CMF * 256 + FLG must be a multiple of 31
+DEFLATE-1950-2.2-flevel	RFC 1950 2.2	FLEVEL has no effect on decoding
+DEFLATE-1950-2.2-fdict	RFC 1950 2.2	With FDICT set a 4-byte DICTID follows FLG, and the stream is rejected unless the caller supplied the dictionary whose Adler-32 it is
+DEFLATE-1950-2.2-dictionary-history	RFC 1950 2.2	A preset dictionary is the history before the first output byte: back references reach into its last 32,768 bytes and no further
+DEFLATE-1950-2.2-adler32	RFC 1950 2.2	The trailer is the Adler-32 of the uncompressed data, most significant byte first; a mismatch is a checksum error
+DEFLATE-1950-8.2-adler32-algorithm	RFC 1950 8.2	Adler-32 is two sums modulo 65521, s1 starting at 1 and s2 at 0, returned as s2 * 65536 + s1
+DEFLATE-1952-2.2-members	RFC 1952 2.2	A gzip file is a series of members, and the output is the output of each member in order
+DEFLATE-1952-2.3-magic	RFC 1952 2.3.1	A member starts with ID1 0x1f and ID2 0x8b
+DEFLATE-1952-2.3-cm	RFC 1952 2.3.1	CM must be 8 (deflate)
+DEFLATE-1952-2.3-reserved-flags	RFC 1952 2.3.1	A member with FLG bit 5, 6 or 7 set is rejected
+DEFLATE-1952-2.3-ftext	RFC 1952 2.3.1	FTEXT is reported and has no effect on the data
+DEFLATE-1952-2.3-mtime-xfl-os	RFC 1952 2.3.1	MTIME (4 bytes, least significant first), XFL and OS are reported, and every value is accepted
+DEFLATE-1952-2.3-fextra	RFC 1952 2.3.1	With FEXTRA set, XLEN (2 bytes, least significant first) and that many bytes follow the fixed header
+DEFLATE-1952-2.3-fname	RFC 1952 2.3.1	With FNAME set, a zero-terminated file name follows
+DEFLATE-1952-2.3-fcomment	RFC 1952 2.3.1	With FCOMMENT set, a zero-terminated comment follows
+DEFLATE-1952-2.3-field-order	RFC 1952 2.3	The optional fields come in the order extra field, file name, comment, header CRC, in every combination of the flags
+DEFLATE-1952-2.3-fhcrc	RFC 1952 2.3.1	With FHCRC set, CRC16 must equal the low 16 bits of the CRC-32 of the header bytes before it
+DEFLATE-1952-2.3-crc32	RFC 1952 2.3.1	The trailer CRC32 must equal the CRC-32 of the member's uncompressed data
+DEFLATE-1952-2.3-isize	RFC 1952 2.3.1	The trailer ISIZE must equal the size of the member's uncompressed data modulo 2^32
+DEFLATE-1952-8-crc32-algorithm	RFC 1952 8	CRC-32 uses the polynomial 0xEDB88320 with initial value and final XOR 0xFFFFFFFF
+DEFLATE-API-one-shot	API	Deflate.decode, Zlib.decode and Gzip.decode return the whole output of a valid stream
+DEFLATE-API-streaming-identical	API	A Reader gives the same output, or the same error at the same input offset, as the one-shot decode, however its input is chunked
+DEFLATE-API-one-byte-reads	API	A Reader read one output byte at a time, over input that arrives one byte at a time, gives the same result as the one-shot decode
+DEFLATE-API-reader-io	API	A Reader is a read-only IO: it reads zero bytes at the end of the stream, refuses writes, and closes its source only with sync_close
+DEFLATE-API-required-limits	API	Every decode entry point takes limits and timeout as required arguments with no default
+DEFLATE-API-limit-presets	API	DecodeLimits has the presets REQUEST_BODY, HTTP_CLIENT_RESPONSE, WEBSOCKET_MESSAGE and TRUSTED_ASSET, and custom starts from REQUEST_BODY
+DEFLATE-API-errors	API	Stream errors are MalformedStreamError (a Mica::ParseError) with the input byte offset; TruncatedStreamError and ChecksumError are its subclasses
+DEFLATE-API-truncation	API	Input that ends anywhere inside a stream raises TruncatedStreamError
+DEFLATE-API-trailing-data	API	A whole byte after the final block (raw), after the Adler-32 (zlib), or after a member that does not start another member (gzip) is rejected; padding bits in the last byte are ignored
+DEFLATE-API-gzip-headers	API	Gzip::Reader reports each member's header fields in list_of_headers
+DEFLATE-API-checksums	API	CRC32.update and Adler32.update continue a running checksum, so any split of the input gives the same value
+DEFLATE-LIMIT-max-output-bytes	limits	Output past max_output_bytes raises DecodeLimitError naming max_output_bytes; output of exactly the limit is allowed
+DEFLATE-LIMIT-max-ratio	limits	Once the output passes 1 MiB, output larger than max_ratio times the input consumed raises DecodeLimitError naming max_ratio
+DEFLATE-LIMIT-max-window-bytes	limits	A back reference farther than max_window_bytes, or a zlib header declaring a larger window, raises DecodeLimitError naming max_window_bytes
+DEFLATE-LIMIT-max-members	limits	A gzip stream with more than max_members members raises DecodeLimitError naming max_members
+DEFLATE-LIMIT-max-metadata-bytes	limits	A gzip member whose FEXTRA, FNAME and FCOMMENT bytes together pass max_metadata_bytes raises DecodeLimitError naming max_metadata_bytes
+DEFLATE-LIMIT-work-budget	limits	A decode that needs more work than its limits allow raises Mica::WorkBudgetExceededError
+DEFLATE-LIMIT-deadline	limits	A decode that runs past its timeout raises Mica::DeadlineExceededError
+DEFLATE-LIMIT-bounded-memory	limits	A decompression bomb allocates at most about twice max_output_bytes one-shot, and a fixed 224 KiB of buffers streaming, before its limit error
+DEFLATE-LIMIT-empty-blocks	limits	Long runs of empty stored or dynamic blocks are charged per block, so the work budget and the deadline stop them
+DEFLATE-LIMIT-differential	limits	Across generated, encoder-made and mutated streams, Mica and system zlib agree: the same output, or both reject

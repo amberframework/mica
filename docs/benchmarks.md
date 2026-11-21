@@ -1,11 +1,13 @@
 # Benchmarks
 
-Mica has two benchmark harnesses:
+Mica has three benchmark harnesses:
 
 - **XML** (`bench/run.sh`): Mica::XML against libxml2. See the README,
   "Benchmarks".
 - **Regex** (`bench/regex/`): Mica::Regex against PCRE2 as Crystal uses it
   today. This page covers it.
+- **Inflate** (`bench/deflate/`): Mica's raw DEFLATE, zlib and gzip
+  decoders against the system zlib. See "Inflate" at the end of this page.
 
 ## The bar
 
@@ -228,3 +230,78 @@ engine, and what `Mica::Regex.static` gains), kept for re-measuring:
 - `build_cost.rb OUT_DIR` measures the build-time program per corpus
   pattern and the build of a small application with and without static
   patterns, and the size of each binary.
+
+## Inflate (`bench/deflate/`)
+
+Mica's Inflate decoders (`Mica::Deflate`, `Mica::Zlib`, `Mica::Gzip`)
+against the system zlib. The interim bar for Z1 is a geometric-mean speed
+of at least 0.5x zlib's one-shot inflate, with zlib allocating its output
+buffer per decode as Mica's one-shot API does; the report states the gap.
+
+```sh
+bench/deflate/run.sh            # every corpus; 8 rounds, 16 where an interval reaches 0.5x or 1.0x
+bench/deflate/run.sh --quick    # Canterbury and the HTTP bodies, 3 rounds, for iteration
+```
+
+One command fetches and verifies the corpus, builds the three runners with
+`--release`, runs the rounds and prints the path of the report
+(`bench/data/deflate/runs/<UTC time>/REPORT.md`, with `results.json`,
+`run.json`, `samples.jsonl`, `memory.jsonl` and `run.log` beside it).
+Other options: `--out DIR` (a run directory is resumable: samples it
+already holds are kept, so a long run can be done in pieces),
+`--engines LIST`, `--corpora canterbury,silesia,http`, and anything after
+`--` goes to the driver (`--only silesia/mozilla` filters case ids,
+`--rounds`, `--max-rounds`, `--samples`, `--skip-memory`, `--timeout`).
+Requirements: `crystal-alpha`, `/usr/bin/ruby` and macOS's `/usr/bin/time`,
+`otool` and `dyld_info`. The downloads take 69 MB and the extracted and
+compressed files about 500 MB under `bench/data/deflate/` (git ignores
+it).
+
+**Corpus** (`bench/deflate/corpus.tsv`, every row pinned by sha256 with
+the source of the hash): the Canterbury corpus (11 files) and the Silesia
+corpus (12 files, 212 MB), downloaded by
+`bench/deflate/scripts/fetch_corpus.rb`, which deletes a download whose
+sha256 differs and fails; and seven real HTTP response bodies committed
+under `bench/deflate/corpus/http/` (HTML at about 1 KiB, 16 KiB, 64 KiB
+and 1 MiB, JSON at about 1 KiB, 16 KiB and 64 KiB; `parts.tsv` lists each
+URL and capture date, and `scripts/capture_http_bodies.rb` is how they
+were captured). Each file is compressed once by the system zlib at level 6
+as gzip, zlib and raw DEFLATE, so a case is a file in one format: 90
+cases. (The Z1 run of 2026-11-21 also measured a 1 MiB JSON body of
+joined Amber issue pages, 93 cases in all; it is not committed because
+the issue bodies quote git commit hashes that the pre-commit secret
+scanner reads as keys.)
+
+**Engines**, each measured in its own release-built process, one process
+at a time:
+
+| Engine | Program | What it is |
+|---|---|---|
+| `zlib-oneshot-fresh` | `bench/deflate/zlib_runner.cr` | The baseline of the gate. System zlib through the harness's own `lib` binding: one `inflate(Z_FINISH)` into an output buffer of the known size, allocated untouched from the collector for every decode, as Mica's one-shot API allocates the `Bytes` it returns. |
+| `zlib-oneshot-reused` | `bench/deflate/zlib_runner.cr` | zlib's best case: the same call into one buffer allocated when the process starts and reused by every decode. |
+| `zlib-stream` | `bench/deflate/zlib_runner.cr` | The same binding with 64 KiB input and output buffers. |
+| `mica-oneshot` | `bench/deflate/mica_runner.cr` | `Mica::Gzip.decode`, `Mica::Zlib.decode`, `Mica::Deflate.decode` with `DecodeLimits::TRUSTED_ASSET` and no timeout. The program links no libz. |
+| `mica-stream` | `bench/deflate/mica_runner.cr` | `Mica::Gzip::Reader` and its siblings, read through a 64 KiB slice. |
+| `stdlib-reader` | `bench/deflate/stdlib_runner.cr` | Crystal's `Compress::Gzip::Reader` and siblings, read through a 64 KiB slice. A context row. |
+
+**Method.** A process does one warm-up decode and 11 timed samples, and
+reports the median and the minimum as milliseconds and as MB (1,000,000
+bytes) of decoded output per second; a decode under 10 ms is timed in
+batches. Every sample's output is hashed after its clock stops and must
+equal the original file's sha256, or the runner exits non-zero. Rounds
+interleave the engines (Mica before its zlib pair in even rounds, the
+reverse order in odd ones) and record the load average, because the ratio of two engines
+measured back to back holds up on a busy machine where absolute times do
+not. The Mica/zlib speed ratio of a case is the geometric mean of its
+per-round ratios, with a 95% paired-bootstrap interval over the rounds
+(10,000 resamples, fixed seed); the headline is the geometric mean over
+the cases. Peak memory is the maximum resident set size of a separate
+process doing one decode (`/usr/bin/time -l`). `run.json` records the
+macOS build, the CPU, the `crystal-alpha` version and the zlib identity
+(`zlibVersion()`, the sha256 of the SDK's `libz.tbd`, and the `dyld_info`
+UUID of `/usr/lib/libz.1.dylib`).
+
+**The report** lists the gate result and the gap, geometric means per
+corpus and format, every case where Mica is slower than zlib with its
+margin, every case's absolute numbers for both engines with the ratio and
+interval, peak memory, the load averages, and the method and machine.

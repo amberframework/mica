@@ -11,3 +11,4 @@ end
 require "./mica/core"
 require "./mica/xml"
 require "./mica/regex"
+require "./mica/deflate"

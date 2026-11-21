@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>HeatPilot — free fan control for Apple Silicon Macs, by AgentC</title>
+  <meta name="description" content="Take the yoke of your Mac's thermals. HeatPilot is a free, notarized menu-bar app for Apple Silicon: three modes, live temps, and one click hands control straight back to Apple. No account, no telemetry, 1.1 MB.">
+
+  <link rel="canonical" href="https://agentc.consulting/heatpilot">
+
+  <meta name="theme-color" content="#23293a">
+
+  <meta property="og:title" content="HeatPilot — free fan control for Apple Silicon Macs, by AgentC">
+  <meta property="og:description" content="Take the yoke of your Mac's thermals. HeatPilot is a free, notarized menu-bar app for Apple Silicon: three modes, live temps, and one click hands control straight back to Apple. No account, no telemetry, 1.1 MB.">
+  <meta property="og:image" content="https://agentc.consulting/img/heatpilot/heatpilot_og.png">
+  <meta property="og:image:width" content="1280">
+  <meta property="og:image:height" content="640">
+  <meta property="og:image:alt" content="HeatPilot — free fan control for Apple Silicon Macs">
+  <meta property="og:url" content="https://agentc.consulting/heatpilot">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="AgentC Consulting">
+
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="HeatPilot — free fan control for Apple Silicon Macs, by AgentC">
+  <meta name="twitter:description" content="Take the yoke of your Mac's thermals. HeatPilot is a free, notarized menu-bar app for Apple Silicon: three modes, live temps, and one click hands control straight back to Apple. No account, no telemetry, 1.1 MB.">
+  <meta name="twitter:image" content="https://agentc.consulting/img/heatpilot/heatpilot_og.png">
+  <meta name="twitter:image:alt" content="HeatPilot — free fan control for Apple Silicon Macs">
+
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    "name": "HeatPilot",
+    "operatingSystem": "macOS 14+ (Apple Silicon)",
+    "applicationCategory": "UtilitiesApplication",
+    "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+    "downloadUrl": "https://github.com/AgentC-Consulting/heatpilot/releases/download/v1.0.0/HeatPilot-Installer.dmg",
+    "fileSize": "1.1 MB",
+    "softwareVersion": "1.0.0",
+    "author": { "@type": "Organization", "name": "AgentC Consulting LLC", "url": "https://agentc.consulting" }
+  }
+  </script>
+
+  <link rel="preload" as="font" type="font/woff2" href="/fonts/fira-sans-v17-latin-regular.woff2" crossorigin>
+  <link rel="preload" as="font" type="font/woff2" href="/fonts/fira-sans-v17-latin-500.woff2" crossorigin>
+  <link rel="preload" as="font" type="font/woff2" href="/fonts/michroma-v21-latin-regular.woff2" crossorigin>
+  <link rel="preload" as="font" type="font/woff2" href="/fonts/fira-mono-v14-latin-regular.woff2" crossorigin>
+
+  <link rel="stylesheet" href="/css/min/site_core.css?v=20261102hero">
+  <link rel="stylesheet" href="/css/min/agentc.css?v=20261102harness">
+
+  <link rel="icon" type="image/png" href="/img/heatpilot/heatpilot_icon_256.png">
+  <link rel="apple-touch-icon" href="/img/heatpilot/heatpilot_icon_256.png">
+</head>
+
+<body>
+
+  <a href="#main" class="skip-link">Skip to content</a>
+
+  <main id="main">
+    
+
+
+
+
+<div class="hpx-page">
+
+<section class="hpx-hero">
+  <div class="hpx-frame">
+  <picture>
+    <source media="(max-width: 760px)" type="image/webp" srcset="/img/heatpilot/hero_cockpit_p_768.webp 768w, /img/heatpilot/hero_cockpit_p_1080.webp 1080w" sizes="100vw" width="1228" height="1536">
+    <source media="(max-width: 760px)" srcset="/img/heatpilot/hero_cockpit_p_768.jpg 768w, /img/heatpilot/hero_cockpit_p_1080.jpg 1080w" sizes="100vw" width="1228" height="1536">
+    <source type="image/webp" srcset="/img/heatpilot/hero_cockpit_1024.webp 1024w, /img/heatpilot/hero_cockpit_1600.webp 1600w, /img/heatpilot/hero_cockpit_2200.webp 2200w, /img/heatpilot/hero_cockpit_2752.webp 2752w" sizes="100vw" width="2752" height="1536">
+    <img src="/img/heatpilot/hero_cockpit_1600.jpg" srcset="/img/heatpilot/hero_cockpit_1024.jpg 1024w, /img/heatpilot/hero_cockpit_1600.jpg 1600w, /img/heatpilot/hero_cockpit_2200.jpg 2200w, /img/heatpilot/hero_cockpit_2752.jpg 2752w" sizes="100vw" width="2752" height="1536" fetchpriority="high" decoding="async" alt="The view from a small aircraft cockpit at golden hour: propeller spinning, towering clouds ahead, the instrument panel below">
+  </picture>
+
+  <div class="hpx-tint" aria-hidden="true"></div>
+
+  <header class="hpx-topbar">
+    <span class="hpx-mark">
+      <img src="/img/heatpilot/heatpilot_icon_256.png" alt="" width="256" height="256">
+      <span class="hpx-wordmark">HEATPILOT</span>
+    </span>
+    <a class="hpx-parent" href="https://agentc.consulting/">AgentC Consulting</a>
+  </header>
+
+  <div class="hpx-chips">
+    <span class="hpx-chip">CPU 72&deg;F</span>
+    <span class="hpx-chip">FAN 1 4210 RPM</span>
+    <span class="hpx-chip">MODE COOLER AUTO</span>
+  </div>
+  </div>
+
+  <div class="hpx-block">
+    <p class="hpx-eyebrow">Free &middot;&nbsp;No sign-up &middot;&nbsp;Just download and go</p>
+    <h1 class="hpx-h1">
+      <span class="hpx-l1">Your Mac runs hot.</span>
+      <span class="hpx-l2"><span class="hpx-l2a">Apple waits.</span> <span class="hpx-l2b">HeatPilot doesn't.</span></span>
+    </h1>
+    <p class="hpx-sub">Take the yoke of your own thermals &mdash; three modes, live temps in the menu bar, and one click hands control straight back to Apple.</p>
+    <div class="hpx-cta">
+      <a class="btn-primary hpx-dl" href="https://github.com/AgentC-Consulting/heatpilot/releases/download/v1.0.0/HeatPilot-Installer.dmg">Download free</a>
+      <span class="hpx-dlnote">1.1&nbsp;MB &middot; notarized by Apple</span>
+    </div>
+  </div>
+</section>
+
+<div class="hpx-flow">
+
+  
+  <header class="hpx-sechead">
+    <p class="hpx-kicker">Before you're ever asked</p>
+    <h2 class="hpx-h2">About the administrator password</h2>
+  </header>
+  <div class="hpx-prose">
+    <p>The first time you switch HeatPilot into a mode that takes the controls, macOS will show you a
+    HeatPilot-branded administrator prompt. A free app asking for your password is exactly the moment
+    you <em>should</em> get suspicious &mdash; so here's the explanation up front, before you ever see it.</p>
+    <p>HeatPilot is two parts. The menu-bar app &mdash; the part you see &mdash; is an ordinary,
+    unprivileged app. It reads temperatures and draws menus, and it couldn't touch your fans if it
+    wanted to. Fan hardware is privileged territory, and macOS is right to guard it. So the one job
+    that needs privileges lives in a tiny root helper whose entire vocabulary is &ldquo;set fan
+    speed&rdquo; and &ldquo;hand control back to Apple.&rdquo; Your password installs that helper,
+    once. That's the whole transaction.</p>
+    <p>And if you only ever fly in System Auto, you'll never be asked at all.</p>
+  </div>
+
+  
+  <header class="hpx-sechead">
+    <p class="hpx-kicker">Apple is always one click away</p>
+    <h2 class="hpx-h2">Built to hand the controls back</h2>
+  </header>
+  <ul class="hpx-points">
+    <li><b>System Auto restores Apple's thermal management instantly.</b> So does quitting the app.
+    There is no state where HeatPilot is gone and your fans are stranded.</li>
+    <li><b>The helper watches for kill, logout, and shutdown signals</b> &mdash; and its last act is
+    always the same: give Apple back the controls on its way out.</li>
+    <li><b>Cooler Auto only ever raises fan speed above Apple's own curve.</b> It never slows a fan
+    below what Apple would do. The worst case is a cooler, slightly louder Mac.</li>
+    <li><b>Fanless Macs and Intel Macs never see a password prompt.</b> The privileged modes simply
+    show as disabled, with a plain explanation of why there's nothing for HeatPilot to fly.</li>
+  </ul>
+
+  
+  <header class="hpx-sechead">
+    <p class="hpx-kicker">Don't take our word for it</p>
+    <h2 class="hpx-h2">Verify it yourself</h2>
+  </header>
+  <div class="hpx-checkset">
+  <div class="hpx-prose">
+    <p>You shouldn't have to trust a stranger's download page &mdash; and you don't have to. Every
+    claim below is checkable from your own Terminal, in about a minute.</p>
+  </div>
+  <figure class="hpx-check">
+    <figcaption class="hpx-check-label"><span>The app is signed by us &mdash; and Apple has verified that signature</span><button type="button" class="hpx-copy" data-copy="codesign -dv --verify /Applications/HeatPilot.app">Copy</button></figcaption>
+    <pre><code>codesign -dv --verify /Applications/HeatPilot.app</code></pre>
+    <p class="hpx-expect">Authority=Developer ID Application: AgentC Consulting LLC</p>
+  </figure>
+  <figure class="hpx-check">
+    <figcaption class="hpx-check-label"><span>Gatekeeper accepts it as notarized by Apple</span><button type="button" class="hpx-copy" data-copy="spctl -a -vv /Applications/HeatPilot.app">Copy</button></figcaption>
+    <pre><code>spctl -a -vv /Applications/HeatPilot.app</code></pre>
+    <p class="hpx-expect">accepted &middot; source=Notarized Developer ID</p>
+  </figure>
+  <figure class="hpx-check">
+    <figcaption class="hpx-check-label"><span>The download is byte-for-byte what we shipped</span><button type="button" class="hpx-copy" data-copy="shasum -a 256 ~/Downloads/HeatPilot-Installer.dmg">Copy</button></figcaption>
+    <pre><code>shasum -a 256 ~/Downloads/HeatPilot-Installer.dmg</code></pre>
+    <p class="hpx-expect">e1c93539463e4390a21bc0a2b39762f141e48c605d4f1ff6be580d67c3c23dab</p>
+  </figure>
+  <p class="hpx-aside">Want to go one layer deeper? The release also carries a GPG-signed
+  <a class="hpx-link" href="https://github.com/AgentC-Consulting/heatpilot/releases/tag/v1.0.0">SHA256SUMS file</a>.</p>
+  </div>
+
+  
+  <section class="hpx-unit">
+  <header class="hpx-sechead">
+    <p class="hpx-kicker">The quiet part, out loud</p>
+    <h2 class="hpx-h2">What HeatPilot never does</h2>
+  </header>
+  <div class="hpx-prose">
+    <p>No network calls. No account. No telemetry &mdash; not &ldquo;anonymized&rdquo; telemetry,
+    not &ldquo;just crash reports.&rdquo; None. Cut your network and everything still works, because
+    nothing in HeatPilot has anywhere to phone.</p>
+    <p>Its entire memory of you is a small JSON file in
+    <code class="hpx-path">~/Library/Application&nbsp;Support/HeatPilot/</code> &mdash; your chosen
+    mode and preferences, in plain text you can open and read yourself.</p>
+  </div>
+  </section>
+
+  
+  <header class="hpx-sechead">
+    <p class="hpx-kicker">The fine print, kept short</p>
+    <h2 class="hpx-h2">Requirements &amp; uninstall</h2>
+  </header>
+  <div class="hpx-prose">
+    <p><b>Requires:</b> an Apple Silicon Mac with fans, running macOS&nbsp;14 or later. Intel Macs
+    aren't supported &mdash; their fan hardware speaks a different language, and we'd rather not
+    support it badly.</p>
+    <p><b>Uninstalling leaves nothing behind:</b> switch to System Auto, quit HeatPilot, then delete
+    the app and <code class="hpx-path">~/Library/Application&nbsp;Support/HeatPilot/</code>. Apple
+    has the controls again, as if we were never aboard.</p>
+  </div>
+  <figure class="hpx-check hpx-tie">
+    <figcaption class="hpx-check-label"><span>Prefer Homebrew? Same signed app, same notarization</span><button type="button" class="hpx-copy" data-copy="brew tap agentc-consulting/heatpilot https://github.com/AgentC-Consulting/heatpilot &amp;&amp; brew install --cask heatpilot">Copy</button></figcaption>
+    <pre><code>brew tap agentc-consulting/heatpilot https://github.com/AgentC-Consulting/heatpilot &amp;&amp; brew install --cask heatpilot</code></pre>
+  </figure>
+
+  
+  <div class="hpx-endnote">
+    <p class="hpx-thesis">HeatPilot is free for life. We build native apps like this for clients
+    &mdash; <a class="hpx-link" href="https://agentc.consulting/#contact">talk to AgentC</a>.</p>
+    <p class="hpx-issue">Found a quirk? <a class="hpx-link" href="https://github.com/AgentC-Consulting/heatpilot/issues">Open an issue</a> &mdash; we read everything.</p>
+  </div>
+
+  <p class="hpx-colophon">&copy; 2026 AgentC Consulting LLC &middot; <a href="/privacy">Privacy</a> &middot; <a href="/terms">Terms</a></p>
+
+</div>
+
+</div>
+
+<script>
+  (function () {
+    "use strict";
+    var buttons = document.querySelectorAll(".hpx-copy");
+    for (var i = 0; i < buttons.length; i++) {
+      buttons[i].addEventListener("click", function () {
+        var btn = this;
+        var text = btn.getAttribute("data-copy");
+        var done = function () {
+          btn.textContent = "Copied";
+          setTimeout(function () { btn.textContent = "Copy"; }, 1600);
+        };
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(text).then(done, function () {});
+        }
+      });
+    }
+  })();
+</script>
+
+  </main>
+
+</body>
+</html>
