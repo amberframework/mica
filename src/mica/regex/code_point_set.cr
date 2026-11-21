@@ -34,8 +34,9 @@ module Mica::Regex
       new(bounds)
     end
 
-    # An FNV-1a digest of the bounds, computed once, so a set is a cheap
-    # hash key (`ClassMemo`).
+    # An FNV-1a digest of the ranges (one step per range, its two bounds
+    # as one word), computed once, so a set is a cheap hash key
+    # (`ClassMemo`).
     getter digest : UInt64
 
     # The number of code points in the set, counted once.
@@ -45,9 +46,12 @@ module Mica::Regex
     def initialize(@list_of_bounds : Array(Int32))
       digest = 14695981039346656037_u64
       size = 0_i64
-      @list_of_bounds.each_with_index do |bound, index|
-        digest = (digest ^ bound.to_u32!) &* 1099511628211_u64
-        size += index.odd? ? bound.to_i64 + 1 : -bound.to_i64
+      bounds = @list_of_bounds.to_unsafe
+      (@list_of_bounds.size // 2).times do |index|
+        first = bounds[index * 2]
+        last = bounds[index * 2 + 1]
+        digest = (digest ^ (first.to_u32!.to_u64 | (last.to_u32!.to_u64 << 32))) &* 1099511628211_u64
+        size += last.to_i64 + 1 - first
       end
       @digest = digest
       @size = size
