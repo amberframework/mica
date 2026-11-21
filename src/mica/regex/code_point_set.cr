@@ -10,8 +10,10 @@ module Mica::Regex
     # The highest code point.
     MAX_CODE_POINT = 0x10FFFF
 
-    # Range bounds, two entries per range: first, last.
-    getter list_of_bounds : Array(Int32)
+    # Range bounds, two entries per range: first, last. A read-only view:
+    # of an array's elements for a set built from one, or of static data
+    # for a set the engine shares across the process.
+    getter list_of_bounds : Slice(Int32)
 
     # Builds a set from *ranges* in any order; overlapping and adjacent
     # ranges are merged.
@@ -31,6 +33,12 @@ module Mica::Regex
     # Wraps *bounds* (already sorted, disjoint and non-adjacent) without
     # copying.
     def self.from_bounds(bounds : Array(Int32)) : self
+      new(Slice.new(bounds.to_unsafe, bounds.size, read_only: true))
+    end
+
+    # Wraps *bounds* (already sorted, disjoint and non-adjacent) without
+    # copying. The caller leaves the elements unchanged afterward.
+    def self.from_bounds(bounds : Slice(Int32)) : self
       new(bounds)
     end
 
@@ -43,7 +51,7 @@ module Mica::Regex
     getter size : Int64
 
     # Wraps *list_of_bounds*; see `from_bounds`.
-    def initialize(@list_of_bounds : Array(Int32))
+    def initialize(@list_of_bounds : Slice(Int32))
       digest = 14695981039346656037_u64
       size = 0_i64
       bounds = @list_of_bounds.to_unsafe

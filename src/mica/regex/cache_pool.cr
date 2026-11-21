@@ -47,8 +47,8 @@ module Mica::Regex
     # The ceiling of one cache.
     getter max_cache_bytes : Int64
     @reserved = Atomic(Int64).new(0_i64)
-    @mutex = Mutex.new
-    @list_of_members = [] of WeakRef(PoolMember)
+    @mutex : Mutex
+    @list_of_members : Array(WeakRef(PoolMember))
     # The member-list size at which `register` next drops the references
     # of collected members (see `register`).
     @prune_at = PRUNE_FLOOR
@@ -58,14 +58,30 @@ module Mica::Regex
     # Counts hand-backs, to order idle members by their last use.
     @clock = Atomic(Int64).new(0_i64)
 
-    def initialize(@max_bytes : Int64 = DEFAULT_MAX_BYTES, @max_cache_bytes : Int64 = DEFAULT_MAX_CACHE_BYTES)
+    def self.new(max_bytes : Int64 = DEFAULT_MAX_BYTES, max_cache_bytes : Int64 = DEFAULT_MAX_CACHE_BYTES) : self
+      new(max_bytes, max_cache_bytes, Mutex.new, [] of WeakRef(PoolMember))
+    end
+
+    # :nodoc:
+    # Builds a pool around the lock and the member list it is given (the
+    # process-wide pool gets static ones).
+    def initialize(@max_bytes : Int64, @max_cache_bytes : Int64, @mutex : Mutex,
+                   @list_of_members : Array(WeakRef(PoolMember)))
       raise ArgumentError.new("max_bytes must be positive") unless @max_bytes > 0
       raise ArgumentError.new("max_cache_bytes must be positive") unless @max_cache_bytes > 0
     end
 
+    # The pool every program starts with, its lock and its member list are
+    # static objects, so a program that links Mica starts with the same
+    # collector heap as one that does not.
+    Regex.static_object(first_default_mutex, Mutex)
+    Regex.static_object(first_default_members, Array(WeakRef(PoolMember)))
+    Regex.static_object(first_default, CachePool, DEFAULT_MAX_BYTES, DEFAULT_MAX_CACHE_BYTES, @@first_default_mutex,
+      @@first_default_members)
+
     # Held in an atomic so a pool configured on one thread is seen whole
     # by every other.
-    @@default = Atomic(CachePool).new(CachePool.new)
+    @@default = Atomic(CachePool).new(@@first_default)
 
     # The process-wide pool every expression uses unless it is given one.
     def self.default : CachePool

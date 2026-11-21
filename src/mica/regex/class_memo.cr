@@ -104,8 +104,46 @@ module Mica::Regex
       end
     end
 
-    @@mutex = Mutex.new
-    @@blocks = {} of Key => Block
+    # Static objects, so a program that never compiles a class this memo
+    # keeps pays nothing for them.
+    #
+    # The memo maps each set to the index of its block in `@@kept_blocks`,
+    # a buffer outside the collector's heap that doubles as blocks are
+    # kept, from `FIRST_KEPT_BLOCKS`: a block holds no reference the
+    # collector follows, and a table entry of a set and a number is a
+    # fraction of the size of one that holds the block.
+    Regex.static_object(mutex, Mutex)
+    Regex.static_object(block_indexes, Hash(Key, Int32))
+    @@kept_blocks = Pointer(Block).null
+    @@kept_block_room = 0
+
+    # The blocks `@@kept_blocks` first has room for.
+    private FIRST_KEPT_BLOCKS = 8
+
+    # The memo's block for *lookup*, or nil. The caller holds `@@mutex`.
+    private def self.kept_block?(lookup : Key) : Block?
+      index = @@block_indexes[lookup]?
+      index ? @@kept_blocks[index] : nil
+    end
+
+    # Keeps *block* for *lookup* when the memo has room, and returns
+    # whether it did. The caller holds `@@mutex`.
+    private def self.keep_block?(lookup : Key, block : Block) : Bool
+      index = @@block_indexes.size
+      return false unless index < MAX_ENTRIES
+      if index == @@kept_block_room
+        room = Math.max(FIRST_KEPT_BLOCKS, @@kept_block_room * 2)
+        bytes = LibC::SizeT.new(room) * sizeof(Block)
+        buffer = LibC.realloc(@@kept_blocks.as(Void*), bytes).as(Pointer(Block))
+        raise OutOfMemoryError.new("Out of memory: the class memo (#{bytes} bytes)") if buffer.null?
+        OffHeap.count(bytes)
+        @@kept_blocks = buffer
+        @@kept_block_room = room
+      end
+      @@kept_blocks[index] = block
+      @@block_indexes[lookup] = index
+      true
+    end
 
     def self.memoized?(set : CodePointSet) : Bool
       bounds = set.list_of_bounds
@@ -118,15 +156,15 @@ module Mica::Regex
     # trie.
     def self.block_for(set : CodePointSet, ledger : AllocationLedger, meter : Core::WorkMeter) : Block
       lookup = Key.new(set)
-      if block = @@mutex.synchronize { @@blocks[lookup]? }
+      if block = @@mutex.synchronize { kept_block?(lookup) }
         return block
       end
       built = prebuilt_block?(set, ledger, meter) || build(set, ledger, meter)
       kept = @@mutex.synchronize do
-        if existing = @@blocks[lookup]?
+        if existing = kept_block?(lookup)
           existing
-        elsif @@blocks.size < MAX_ENTRIES
-          @@blocks[lookup] = built
+        elsif keep_block?(lookup, built)
+          built
         end
       end
       return kept if kept && kept.same_lists?(built)
@@ -196,7 +234,7 @@ module Mica::Regex
     # last, so `build` makes exactly this block (a spec checks them equal).
     # Grant's email validator class built from its trie cost about 150 us and
     # 190 KB of allocation on a process's first compile.
-    private def self.ascii_variant_block?(bounds : Array(Int32), ledger : AllocationLedger,
+    private def self.ascii_variant_block?(bounds : Slice(Int32), ledger : AllocationLedger,
                                           meter : Core::WorkMeter) : Block?
       return nil if bounds.empty? || bounds[-1] < ASCII_END
       # Ranges that reach past ASCII: the set must have as many as the
@@ -244,7 +282,7 @@ module Mica::Regex
     # them (a spec checks the result equal to what `build` makes). The
     # range count is compared first, so a set that is no such class reads
     # no table.
-    private def self.folded_variant_block?(bounds : Array(Int32), ledger : AllocationLedger,
+    private def self.folded_variant_block?(bounds : Slice(Int32), ledger : AllocationLedger,
                                            meter : Core::WorkMeter) : Block?
       return nil if bounds.empty? || bounds[-1] < ASCII_END
       ranges_past_ascii = range_count_past_ascii(bounds)
@@ -269,7 +307,7 @@ module Mica::Regex
     # *set_id* (no set when it is negative) and `FOLD_EXTRAS`. The
     # generator keeps only sets the extras neither lie in nor touch, so
     # the union's ranges are the set's with each extra among them.
-    private def self.same_past_ascii_with_fold_extras?(bounds : Array(Int32), set_id : Int32,
+    private def self.same_past_ascii_with_fold_extras?(bounds : Slice(Int32), set_id : Int32,
                                                        meter : Core::WorkMeter) : Bool
       static = set_id < 0 ? Slice(Int32).empty : Unicode.decoded_ranges(set_id)
       meter.enforce { Core::Position.new(0_i64) } if meter.charge(static.size + 1)
@@ -299,7 +337,7 @@ module Mica::Regex
 
     # True when *bounds* and the set of ranges *static* (its complement when
     # *negated*) have the same members past ASCII.
-    private def self.same_past_ascii?(bounds : Array(Int32), static : Slice(Int32), negated : Bool,
+    private def self.same_past_ascii?(bounds : Slice(Int32), static : Slice(Int32), negated : Bool,
                                       meter : Core::WorkMeter) : Bool
       meter.enforce { Core::Position.new(0_i64) } if meter.charge(static.size + 1)
       index = 0
@@ -320,7 +358,7 @@ module Mica::Regex
     # cut to start at `ASCII_END` at the earliest: the first range of each
     # is compared cut, and the ranges after it, which lie wholly past
     # ASCII, as memory.
-    private def self.same_tail?(bounds : Array(Int32), index : Int32, static : Slice(Int32)) : Bool
+    private def self.same_tail?(bounds : Slice(Int32), index : Int32, static : Slice(Int32)) : Bool
       static_index = 0
       while static_index < static.size && static.unsafe_fetch(static_index + 1) < ASCII_END
         static_index += 2
@@ -365,7 +403,7 @@ module Mica::Regex
     # (`build` makes that a `ByteRange` state).
     private def self.replace_ascii_transitions(list_of_states : OffHeapList(Program::State),
                                                list_of_transitions : OffHeapList(Program::Transition), entry : Int32,
-                                               bounds : Array(Int32)) : OffHeapList(Program::Transition)?
+                                               bounds : Slice(Int32)) : OffHeapList(Program::Transition)?
       state = list_of_states[entry]
       first = state.argument
       return nil unless state.kind.sparse? && first + state.alternate == list_of_transitions.size
@@ -392,7 +430,7 @@ module Mica::Regex
     end
 
     # The ranges of *bounds* that reach past ASCII.
-    private def self.range_count_past_ascii(bounds : Array(Int32)) : Int32
+    private def self.range_count_past_ascii(bounds : Slice(Int32)) : Int32
       index = 0
       while index < bounds.size && bounds[index + 1] < ASCII_END
         index += 2
@@ -401,7 +439,7 @@ module Mica::Regex
     end
 
     # The ranges of *bounds* that start in ASCII.
-    private def self.ascii_range_count(bounds : Array(Int32)) : Int32
+    private def self.ascii_range_count(bounds : Slice(Int32)) : Int32
       count = 0
       while count * 2 < bounds.size && bounds[count * 2] < ASCII_END
         count += 1
@@ -455,7 +493,7 @@ module Mica::Regex
 
     # True when *bounds* are the ranges *static*, or those of their
     # complement when *negated*.
-    private def self.static_set?(bounds : Array(Int32), static : Slice(Int32), negated : Bool,
+    private def self.static_set?(bounds : Slice(Int32), static : Slice(Int32), negated : Bool,
                                  meter : Core::WorkMeter) : Bool
       meter.enforce { Core::Position.new(0_i64) } if meter.charge(bounds.size)
       unless negated
@@ -518,7 +556,7 @@ module Mica::Regex
       ledger.charge_array(node_count, sizeof(Int32), "a class block", 0)
       ledger.charge_object(instance_sizeof(Hash(UInt64, Int32)), "a class block", 0)
       node_states = OffHeapList(Int32).new(node_count, NONE)
-      shared_nodes = {} of UInt64 => Int32
+      shared_nodes = SharedNodes.new(node_count)
       builder = BlockBuilder.new(trie, node_states, ledger, meter)
       begin
         (node_count - 1).downto(0) do |node_index|
@@ -541,8 +579,54 @@ module Mica::Regex
         raise error
       ensure
         node_states.free
+        shared_nodes.free
       end
       finished_block(builder.list_of_states, builder.list_of_transitions, entry, ledger)
+    end
+
+    # The state emitted for each distinct node digest of one block build:
+    # an open-addressing table outside the collector's heap, sized once
+    # for the trie's nodes (each adds at most one digest) and freed with
+    # the build.
+    private struct SharedNodes
+      @list_of_digests : OffHeapList(UInt64)
+      @list_of_states : OffHeapList(Int32)
+      @mask : Int32
+
+      def initialize(node_count : Int32)
+        slot_count = Math.pw2ceil(Math.max(node_count, 4) * 2)
+        @mask = slot_count - 1
+        @list_of_digests = OffHeapList(UInt64).new(slot_count, 0_u64)
+        @list_of_states = OffHeapList(Int32).new(slot_count, NONE)
+      end
+
+      # The state kept for *digest*, or nil.
+      def []?(digest : UInt64) : Int32?
+        slot = slot_of(digest)
+        state = @list_of_states.unsafe_fetch(slot)
+        state == NONE ? nil : state
+      end
+
+      # Keeps *state* for *digest*, which has none yet.
+      def []=(digest : UInt64, state : Int32) : Nil
+        slot = slot_of(digest)
+        @list_of_digests.unsafe_put(slot, digest)
+        @list_of_states.unsafe_put(slot, state)
+      end
+
+      def free : Nil
+        @list_of_digests.free
+        @list_of_states.free
+      end
+
+      # The slot that holds *digest*, or the empty one where it belongs.
+      private def slot_of(digest : UInt64) : Int32
+        slot = (digest ^ (digest >> 32)).to_i32! & @mask
+        until @list_of_states.unsafe_fetch(slot) == NONE || @list_of_digests.unsafe_fetch(slot) == digest
+          slot = (slot + 1) & @mask
+        end
+        slot
+      end
     end
 
     # The target in *table* for each byte value at *entry* (a `Sparse`

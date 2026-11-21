@@ -21,14 +21,6 @@ module Mica::Regex
   # before it is made, and every heap step to the work meter with the
   # heap's depth.
   module ClassLowering
-    # The bounds of each `Ast::AsciiSet`, indexed by its value. Built once
-    # per process and only read (range streams walk it in place).
-    private ASCII_SET_BOUNDS = Ast::AsciiSet.values.map do |ascii_set|
-      bounds = [] of Int32
-      ascii_set.ranges.each { |first, last| bounds << first << last }
-      bounds
-    end
-
     # Lowers *char_class* for *dialect*.
     #
     # A class of one escape or property (`\w`, `\p{L}`, `[^\d]`) that
@@ -53,8 +45,10 @@ module Mica::Regex
 
     # The shared sets of single-item classes, by item and negation. There
     # are at most two per escape and property, so the table stays small.
-    @@shared_mutex = Mutex.new
-    @@shared_sets = {} of {Ast::ClassItem, Bool} => CodePointSet
+    # The lock and the tables are static objects, so a program that never
+    # compiles a class pays nothing for them.
+    Regex.static_object(shared_mutex, Mutex)
+    Regex.static_object(shared_sets, Hash({Ast::ClassItem, Bool}, CodePointSet))
 
     # The most items a class may have for its lowering to be kept in
     # `@@written_sets`, and the most classes kept there.
@@ -96,23 +90,26 @@ module Mica::Regex
       set
     end
 
-    @@written_sets = {} of WrittenClassKey => CodePointSet
+    Regex.static_object(written_sets, Hash(WrittenClassKey, CodePointSet))
 
+    # The ranges, the bounds merged from them and the fold partners are
+    # scratch outside the collector's heap, freed when the set is made;
+    # the context lives in this call's stack frame.
     private def self.lower_items(char_class : Ast::CharClass, dialect : Dialect, limits : CompileLimits,
                                  ledger : AllocationLedger, meter : Core::WorkMeter) : CodePointSet
       ledger.charge_object(instance_sizeof(Context), "a class lowering", char_class.offset)
-      context = Context.new(char_class.offset, limits, ledger, meter)
+      context = Regex.stack_object(Context, char_class.offset, limits, ledger, meter)
       options = char_class.options
       folding = options.ignore_case? && !dialect.xsd?
       restricted = options.caseless_restrict? && dialect.crystal?
       context.charge_array(0, 8)
-      list_of_ranges = [] of {Int32, Int32}
+      list_of_ranges = OffHeapList({Int32, Int32}).new
       context.charge_array(0, 8)
       list_of_streams = [] of RangeStream
       context.charge_hash
-      # The escapes and properties seen: the first is held as it is, and
-      # the set is made when a second one arrives (`[\w+\-.]` has one).
-      first_seen = nil
+      # The members seen so far: the first one alone, then a set once a
+      # second arrives (most classes have one).
+      first_item = nil
       seen_items = nil
       char_class.list_of_items.each do |item|
         context.charge_work(1)
@@ -120,39 +117,46 @@ module Mica::Regex
           context.charge_append(sizeof({Int32, Int32}))
           list_of_ranges << {item.first, item.last}
         else
-          if first_seen.nil?
-            first_seen = item
+          if seen_items
+            next if seen_items.includes?(item)
+            seen_items << item
+          elsif first_item
+            next if first_item == item
+            seen_items = Set{first_item, item}
           else
-            next if item == first_seen
-            seen_items ||= Set(Ast::ClassItem).new
-            next unless seen_items.add?(item)
+            first_item = item
           end
           context.charge_hash_entry(sizeof(Ast::ClassItem))
           context.charge_stream
-          list_of_streams << RangeStream.for_item(item, ASCII_SET_BOUNDS)
+          list_of_streams << RangeStream.for_item(item)
         end
       end
       unless list_of_ranges.empty?
         literal_bounds = merge_ranges(list_of_ranges, context)
         context.charge_stream
-        list_of_streams << RangeStream.new(literal_bounds, false)
+        list_of_streams << RangeStream.new(literal_bounds.to_slice, false)
         if folding && dialect.crystal?
-          partners = fold_partners(literal_bounds, restricted, context)
+          partners = fold_partners(literal_bounds.to_slice, restricted, context)
           context.charge_stream
-          list_of_streams << RangeStream.new(partners, false)
+          list_of_streams << RangeStream.new(partners.to_slice, false)
         end
       end
       set = union(list_of_streams, context)
       if folding && dialect.ecma262?
+        partners.try(&.free)
         partners = fold_partners(set.list_of_bounds, false, context)
         context.charge_array(2, 8)
         context.charge_stream
         context.charge_stream
-        set = union([RangeStream.new(set.list_of_bounds, false), RangeStream.new(partners, false)], context)
+        set = union([RangeStream.new(set.list_of_bounds, false), RangeStream.new(partners.to_slice, false)], context)
       end
       set = complement(set, context) if char_class.negated?
       context.check_final(set.range_count)
       set
+    ensure
+      list_of_ranges.try(&.free)
+      literal_bounds.try(&.free)
+      partners.try(&.free)
     end
 
     # Returns the set *literal* stands for when case folding gives it fold
@@ -200,14 +204,14 @@ module Mica::Regex
     end
 
     # The folded set of an ASCII literal, shared by the process (see
-    # `ASCII_FOLDS`): a case-insensitive pattern folds most of its
+    # `ascii_fold_set?`): a case-insensitive pattern folds most of its
     # characters, and each would otherwise make a set of its own. The set
     # is held to `max_class_ranges` and charged to *meter* as one made for
     # the literal would be; nothing is allocated, so the ledger is not
     # charged.
     private def self.shared_ascii_fold(literal : Ast::Literal, restricted : Bool, limits : CompileLimits,
                                        meter : Core::WorkMeter) : CodePointSet?
-      set = ASCII_FOLDS[literal.code_point * 2 + (restricted ? 1 : 0)]
+      set = ascii_fold_set?(literal.code_point, restricted)
       return nil unless set
       offset = literal.offset
       meter.enforce { Core::Position.new(offset.to_i64) } if meter.charge(set.size.to_i32)
@@ -218,44 +222,45 @@ module Mica::Regex
       set
     end
 
-    # The fold set of each ASCII code point, unrestricted then restricted
-    # (`CaselessRestrict`), or nil for one that matches only itself. Built
-    # once per process and only read afterward: one exactly sized set per
-    # letter, shared by both entries when restriction changes nothing.
-    private ASCII_FOLDS = begin
-      list_of_sets = Array(CodePointSet?).new(256, nil)
-      0x80.times do |code_point|
-        unrestricted = ascii_fold_set(code_point, false)
-        list_of_sets[code_point * 2] = unrestricted
-        next unless unrestricted
-        # Restriction drops only partners outside ASCII.
-        reaches_outside_ascii = unrestricted.list_of_bounds[-1] >= 0x80
-        list_of_sets[code_point * 2 + 1] = reaches_outside_ascii ? ascii_fold_set(code_point, true) : unrestricted
+    # The bounds of the fold set of each ASCII letter, six entries per
+    # letter in alphabet order: the capital, the small letter and the one
+    # partner outside ASCII (the Kelvin sign for `k`, the long s for `s`),
+    # each as a range of one. A letter without an outside partner has two
+    # zeros there, which no set reads. A spec checks these against the
+    # Unicode fold table.
+    {% begin %}
+      private ASCII_FOLD_BOUNDS = Slice(Int32).literal(
+        {% for letter in 0...26 %}
+          {% outside = letter == 10 ? 0x212A : (letter == 18 ? 0x17F : 0) %}
+          {{0x41 + letter}}, {{0x41 + letter}}, {{0x61 + letter}}, {{0x61 + letter}}, {{outside}}, {{outside}},
+        {% end %}
+      )
+    {% end %}
+
+    # The fold sets of the ASCII letters, two per letter in alphabet order:
+    # unrestricted, then restricted (`CaselessRestrict`, which drops the
+    # partner outside ASCII). They are static objects over static bounds,
+    # so they cost a program nothing in the collector's heap, at start or
+    # at their first use; a capital and its small letter share their sets.
+    @@ascii_fold_storage = uninitialized StaticArray(ReferenceStorage(CodePointSet), 52)
+    @@ascii_folds : Pointer(ReferenceStorage(CodePointSet)) = begin
+      storage = @@ascii_fold_storage.to_unsafe
+      26.times do |letter|
+        bounds = ASCII_FOLD_BOUNDS[letter * 6, 6]
+        inside_ascii = bounds[0, 4]
+        CodePointSet.unsafe_construct(storage + letter * 2, bounds[5] == 0 ? inside_ascii : bounds)
+        CodePointSet.unsafe_construct(storage + letter * 2 + 1, inside_ascii)
       end
-      list_of_sets
+      storage
     end
 
-    # The fold set of ASCII *code_point* (see `ASCII_FOLDS`), or nil.
-    private def self.ascii_fold_set(code_point : Int32, restricted : Bool) : CodePointSet?
-      members = StaticArray(Int32, 8).new(0)
-      count = 1
-      members[0] = code_point
-      Unicode.each_fold_partner(code_point) do |partner|
-        next if restricted && partner >= 0x80
-        members[count] = partner
-        count += 1
-      end
-      return nil if count == 1
-      sorted = members.to_slice[0, count].sort!
-      bounds = Array(Int32).new(count * 2)
-      sorted.each do |member|
-        if bounds.size > 0 && member == bounds[-1] + 1
-          bounds[-1] = member
-        else
-          bounds << member << member
-        end
-      end
-      CodePointSet.from_bounds(bounds)
+    # The fold set of ASCII *code_point*, restricted to ASCII or not, or
+    # nil for a code point that matches only itself (every one but the
+    # letters).
+    private def self.ascii_fold_set?(code_point : Int32, restricted : Bool) : CodePointSet?
+      letter = (code_point | 0x20) - 0x61
+      return nil unless 0 <= letter < 26
+      (@@ascii_folds + (letter * 2 + (restricted ? 1 : 0))).as(CodePointSet)
     end
 
     # Returns the union of *list_of_sets*, charged to *ledger* and *meter*
@@ -265,7 +270,7 @@ module Mica::Regex
     def self.union_of(list_of_sets : Array(CodePointSet), limits : CompileLimits, ledger : AllocationLedger,
                       meter : Core::WorkMeter, offset : Int32) : CodePointSet
       ledger.charge_object(instance_sizeof(Context), "a class union", offset)
-      context = Context.new(offset, limits, ledger, meter)
+      context = Regex.stack_object(Context, offset, limits, ledger, meter)
       context.charge_array(list_of_sets.size, sizeof(RangeStream))
       list_of_streams = list_of_sets.map do |set|
         context.charge_stream
@@ -279,84 +284,92 @@ module Mica::Regex
     # they are made), so every `.` is the same set and finds its automaton
     # in `ClassMemo` by identity.
     def self.any_character(matches_newline : Bool) : CodePointSet
-      matches_newline ? ANY_CHARACTER : ANY_CHARACTER_BUT_NEWLINE
+      matches_newline ? @@any_character : @@any_character_but_newline
     end
 
-    private ANY_CHARACTER             = CodePointSet.from_bounds([0, CodePointSet::MAX_CODE_POINT])
-    private ANY_CHARACTER_BUT_NEWLINE = CodePointSet.from_bounds([0, 0x09, 0x0B, CodePointSet::MAX_CODE_POINT])
+    Regex.static_object(any_character, CodePointSet, Slice(Int32).literal(0, 0x10FFFF))
+    Regex.static_object(any_character_but_newline, CodePointSet,
+      Slice(Int32).literal(0, 0x09, 0x0B, 0x10FFFF))
 
     # Sorts *list_of_ranges* in place and merges overlapping and adjacent
     # ranges into bounds.
-    private def self.merge_ranges(list_of_ranges : Array({Int32, Int32}), context : Context) : Array(Int32)
+    # The caller frees the list it returns.
+    private def self.merge_ranges(list_of_ranges : OffHeapList({Int32, Int32}), context : Context) : OffHeapList(Int32)
       context.charge_work(list_of_ranges.size * 2)
-      list_of_ranges.unstable_sort!
+      list_of_ranges.to_slice.unstable_sort!
       context.charge_array(0, sizeof(Int32))
-      bounds = [] of Int32
+      bounds = OffHeapList(Int32).new
       list_of_ranges.each do |first, last|
         if bounds.size > 0 && first <= bounds[-1] + 1
           bounds[-1] = last if last > bounds[-1]
         else
           context.charge_range
-          bounds << first << last
+          bounds << first
+          bounds << last
         end
       end
       bounds
     end
 
     # The fold partners of every member of the ranges in *bounds*, as
-    # merged single-point bounds (they may overlap *bounds*).
-    private def self.fold_partners(bounds : Array(Int32), restricted : Bool, context : Context) : Array(Int32)
+    # merged single-point bounds (they may overlap *bounds*). The caller
+    # frees the list it returns.
+    private def self.fold_partners(bounds : Slice(Int32), restricted : Bool, context : Context) : OffHeapList(Int32)
       context.charge_array(0, sizeof(Int32))
-      # The points are scratch outside the collector's heap, and the bounds
-      # are allocated once at their exact size; both are charged as the
-      # arrays they would grow in.
-      list_of_points = OffHeapList(Int32).new(64)
-      (bounds.size // 2).times do |index|
-        first = bounds[index * 2]
-        last = bounds[index * 2 + 1]
-        visited = 0
-        # The ASCII part of a range folds by arithmetic: no table is read.
-        if first < Unicode::ASCII_END
-          (first..Math.min(last, Unicode::ASCII_END - 1)).each do |code_point|
-            folds = Unicode.each_ascii_fold_partner(code_point) do |partner|
-              next if restricted && partner >= Unicode::ASCII_END
+      list_of_points = OffHeapList(Int32).new
+      partner_bounds = OffHeapList(Int32).new
+      begin
+        (bounds.size // 2).times do |index|
+          first = bounds[index * 2]
+          last = bounds[index * 2 + 1]
+          visited = 0
+          # The members within ASCII fold by `ASCII_FOLD_BOUNDS`, which
+          # holds what the Unicode table holds for them: a class of ASCII
+          # ranges then never reads that table.
+          if first < 0x80
+            Math.max(first, 0x41).upto(Math.min(last, 0x7A)) do |code_point|
+              letter = (code_point | 0x20) - 0x61
+              next unless 0 <= letter < 26
+              visited += 1
               context.charge_append(sizeof(Int32))
-              list_of_points << partner
-            end
-            visited += 1 if folds
-          end
-          first = Unicode::ASCII_END
-        end
-        if first <= last
-          visited += Unicode.each_folding_code_point(first, last) do |code_point|
-            Unicode.each_fold_partner(code_point) do |partner|
-              next if restricted && (partner < 0x80) != (code_point < 0x80)
+              list_of_points << (code_point ^ 0x20)
+              outside = ASCII_FOLD_BOUNDS[letter * 6 + 4]
+              next if restricted || outside == 0
               context.charge_append(sizeof(Int32))
-              list_of_points << partner
+              list_of_points << outside
+            end
+            first = 0x80
+          end
+          if first <= last
+            visited += Unicode.each_folding_code_point(first, last) do |code_point|
+              Unicode.each_fold_partner(code_point) do |partner|
+                next if restricted && partner < 0x80
+                context.charge_append(sizeof(Int32))
+                list_of_points << partner
+              end
             end
           end
+          context.charge_work(visited + 1)
         end
-        context.charge_work(visited + 1)
-      end
-      context.charge_work(list_of_points.size)
-      list_of_points.to_slice.unstable_sort!
-      context.charge_array(0, sizeof(Int32))
-      range_count = 0
-      list_of_points.each_with_index do |code_point, index|
-        range_count += 1 if index == 0 || code_point > list_of_points.unsafe_fetch(index - 1) + 1
-      end
-      partner_bounds = Array(Int32).new(range_count * 2)
-      list_of_points.each do |code_point|
-        if partner_bounds.size > 0 && code_point <= partner_bounds[-1] + 1
-          partner_bounds[-1] = code_point if code_point > partner_bounds[-1]
-        else
-          context.charge_range
-          partner_bounds << code_point << code_point
+        context.charge_work(list_of_points.size)
+        list_of_points.to_slice.unstable_sort!
+        context.charge_array(0, sizeof(Int32))
+        list_of_points.each do |code_point|
+          if partner_bounds.size > 0 && code_point <= partner_bounds[-1] + 1
+            partner_bounds[-1] = code_point if code_point > partner_bounds[-1]
+          else
+            context.charge_range
+            partner_bounds << code_point
+            partner_bounds << code_point
+          end
         end
+      rescue error
+        partner_bounds.free
+        raise error
+      ensure
+        list_of_points.free
       end
       partner_bounds
-    ensure
-      list_of_points.try(&.free)
     end
 
     # Merges sorted range streams into one set with a binary heap keyed on
@@ -394,18 +407,24 @@ module Mica::Regex
           heap.pop
         end
         sift_down(heap, list_of_streams, 0) unless heap.empty?
-        next unless heap.size == 1
-        # One stream is left: its ranges go in whole when they can.
+        # One stream is left: its ranges go in whole when they can. A union
+        # of one stream reads it to the end instead, so a static set comes
+        # through unmerged and is read in place below.
+        next unless heap.size == 1 && list_of_streams.size > 1
         if with_rest = bounds_with_rest(list_of_streams[heap[0]], bounds, context)
           context.charge_set
           return CodePointSet.from_bounds(with_rest)
         end
       end
       context.charge_set
-      CodePointSet.from_bounds(Array(Int32).build(bounds.size) do |buffer|
-        buffer.copy_from(bounds.to_unsafe, bounds.size)
-        bounds.size
-      end)
+      # One stream of static data that came through unmerged is the set's
+      # bounds already (`\d`, `[[:alpha:]]`): the set reads them in place.
+      static_bounds = list_of_streams.size == 1 ? list_of_streams[0].static_bounds? : nil
+      if static_bounds && static_bounds.size == bounds.size
+        CodePointSet.from_bounds(static_bounds)
+      else
+        CodePointSet.from_bounds(Slice(Int32).new(bounds.size) { |index| bounds.unsafe_fetch(index) })
+      end
     ensure
       heap.try(&.free)
       bounds.try(&.free)
@@ -420,31 +439,30 @@ module Mica::Regex
     # `max_class_ranges` might stop the pass part way, so a refusal comes
     # from the same range as before. The charges are those of the loop:
     # two operations per range read (a heap of one) and one appended range
-    # per range kept. The array has room for every range left, so it is a
+    # per range kept. The buffer has room for every range left, so it is a
     # range longer than the set where the first one left joins the last of
     # *bounds*.
-    private def self.bounds_with_rest(stream : RangeStream, bounds : OffHeapList(Int32), context : Context) : Array(Int32)?
+    private def self.bounds_with_rest(stream : RangeStream, bounds : OffHeapList(Int32), context : Context) : Slice(Int32)?
       rest = stream.rest || return nil
       range_count = rest.size // 2
       return nil unless context.fits_whole?(bounds.size // 2 + range_count, range_count)
       appended = 0
-      with_rest = Array(Int32).build(bounds.size + rest.size) do |buffer|
-        buffer.copy_from(bounds.to_unsafe, bounds.size)
-        size = bounds.size
-        range_count.times do |index|
-          first = rest.unsafe_fetch(index * 2)
-          last = rest.unsafe_fetch(index * 2 + 1)
-          if size > 0 && first <= buffer[size - 1] + 1
-            buffer[size - 1] = last if last > buffer[size - 1]
-          else
-            buffer[size] = first
-            buffer[size + 1] = last
-            size += 2
-            appended += 1
-          end
+      buffer = Pointer(Int32).malloc(bounds.size + rest.size)
+      buffer.copy_from(bounds.to_unsafe, bounds.size)
+      size = bounds.size
+      range_count.times do |index|
+        first = rest.unsafe_fetch(index * 2)
+        last = rest.unsafe_fetch(index * 2 + 1)
+        if size > 0 && first <= buffer[size - 1] + 1
+          buffer[size - 1] = last if last > buffer[size - 1]
+        else
+          buffer[size] = first
+          buffer[size + 1] = last
+          size += 2
+          appended += 1
         end
-        size
       end
+      with_rest = Slice.new(buffer, size)
       context.charge_work(range_count * 2)
       context.charge_ranges(appended)
       with_rest
@@ -590,23 +608,32 @@ module Mica::Regex
       getter current_last : Int32 = 0
       getter? done : Bool = false
 
-      def self.for_item(item : Ast::ClassItem, ascii_set_bounds : Array(Array(Int32))) : self
+      # True when the bounds are static data in the binary.
+      @static = false
+
+      def self.for_item(item : Ast::ClassItem) : self
         if item.item_kind.unicode_set?
           new(item.first, item.negated)
         else
-          new(ascii_set_bounds[item.first], item.negated)
+          new(Ast::AsciiSet.new(item.first).bounds, item.negated, static: true)
         end
       end
 
-      def initialize(bounds : Array(Int32), @negated : Bool)
-        @bounds = Slice.new(bounds.to_unsafe, bounds.size, read_only: true)
-        @count = bounds.size // 2
+      # The bounds when they are static data read as they are (not as
+      # their complement), else nil.
+      def static_bounds? : Slice(Int32)?
+        @static && !@negated ? @bounds : nil
+      end
+
+      def initialize(@bounds : Slice(Int32), @negated : Bool, @static : Bool = false)
+        @count = @bounds.size // 2
         @index = 0
         load
       end
 
       def initialize(set_id : Int32, @negated : Bool)
         @bounds = Unicode.decoded_ranges(set_id)
+        @static = true
         @count = Unicode.range_count(set_id)
         @index = 0
         load

@@ -11,8 +11,8 @@ module Mica::Regex
     end
 
     # The POSIX class names in PCRE2's order.
-    POSIX_NAMES = ["alpha", "lower", "upper", "alnum", "ascii", "blank", "cntrl", "digit", "graph", "print",
-                   "punct", "space", "word", "xdigit"]
+    POSIX_NAMES = {"alpha", "lower", "upper", "alnum", "ascii", "blank", "cntrl", "digit", "graph", "print",
+                   "punct", "space", "word", "xdigit"}
 
     # A `[` outside a class; @pos is just after it.
     private def parse_class(start : Int32) : Nil
@@ -55,11 +55,14 @@ module Mica::Regex
       end
 
       @ledger.charge_array(0, sizeof(Ast::ClassItem), "a class", start)
-      list_of_items = [] of Ast::ClassItem
+      # The items gather in the parser's scratch list (outside the
+      # collector's heap, reused for every class); the class gets one
+      # array of their exact number.
+      @class_items.clear
       state = RangeState::None
       forbid_offset = 0
       if c == ']'.ord
-        add_class_range(list_of_items, c, c, start)
+        add_class_range(c, c, start)
         state = RangeState::OkLiteral
         syntax_error("missing terminating ] for character class", @pos) if @pos >= @bytes.size
         c = read_char
@@ -72,7 +75,7 @@ module Mica::Regex
             @inside_quote = false
             @pos += 1
           else
-            state = class_literal(list_of_items, c, state, true, forbid_offset, start)
+            state = class_literal(c, state, true, forbid_offset, start)
           end
         elsif (c == ' '.ord || c == '\t'.ord) && @options.extended_more?
           # Skipped in extended-more mode.
@@ -99,22 +102,22 @@ module Mica::Regex
           posix_name = String.new(@bytes[@pos, terminator - @pos])
           @pos = terminator + 2
           index = POSIX_NAMES.index(posix_name) || syntax_error("unknown POSIX class name", @pos)
-          add_class_item(list_of_items, posix_class_item(index, posix_negated), start)
+          add_class_item(posix_class_item(index, posix_negated), start)
           state = RangeState::ForbidNone
         elsif c == ']'.ord
           if state.started?
-            add_class_range(list_of_items, '-'.ord, '-'.ord, start)
+            add_class_range('-'.ord, '-'.ord, start)
           end
           break
         elsif c == '\\'.ord
           escape = check_escape(in_class: true)
           kind = escape.escape_kind
           if kind.literal?
-            state = class_literal(list_of_items, escape.code_point, state, false, forbid_offset, start)
+            state = class_literal(escape.code_point, state, false, forbid_offset, start)
           elsif kind.word_boundary?
-            state = class_literal(list_of_items, 0x08, state, false, forbid_offset, start)
+            state = class_literal(0x08, state, false, forbid_offset, start)
           elsif kind.named_backreference?
-            state = class_literal(list_of_items, 'k'.ord, state, false, forbid_offset, start)
+            state = class_literal('k'.ord, state, false, forbid_offset, start)
           elsif kind.quote?
             @inside_quote = true
           elsif kind.end_quote?
@@ -132,7 +135,7 @@ module Mica::Regex
                    else
                      class_escape_item(kind)
                    end
-            add_class_item(list_of_items, item, start)
+            add_class_item(item, start)
             syntax_error("invalid range in character class", @pos) if state.started?
             if state.forbid_started?
               @pos = forbid_offset
@@ -143,11 +146,11 @@ module Mica::Regex
         elsif c == '-'.ord && (state.ok_escaped? || state.ok_literal?)
           state = RangeState::Started
         elsif c == '-'.ord && state.forbid_none?
-          add_class_range(list_of_items, '-'.ord, '-'.ord, start)
+          add_class_range('-'.ord, '-'.ord, start)
           state = RangeState::ForbidStarted
           forbid_offset = @pos
         else
-          state = class_literal(list_of_items, c, state, true, forbid_offset, start)
+          state = class_literal(c, state, true, forbid_offset, start)
         end
         if @pos >= @bytes.size
           syntax_error("missing terminating ] for character class", @pos)
@@ -155,23 +158,25 @@ module Mica::Regex
         c = read_char
       end
       charge_node(instance_sizeof(Ast::CharClass), start)
+      list_of_items = Array(Ast::ClassItem).new(@class_items.size)
+      @class_items.each { |item| list_of_items << item }
       append(Ast::CharClass.new(start, list_of_items, negated, class_options))
       @quantifiable = true
     end
 
     # A literal character in a class: the end of a pending range, or a new
     # item that may start one.
-    private def class_literal(list_of_items : Array(Ast::ClassItem), code_point : Int32, state : RangeState,
+    private def class_literal(code_point : Int32, state : RangeState,
                               literal : Bool, forbid_offset : Int32, start : Int32) : RangeState
       if state.started?
-        last = list_of_items.last
+        last = @class_items.last
         low = last.first
         if code_point == low
           # A one-character range: already present.
         elsif low > code_point
           syntax_error("range out of order in character class", @pos)
         else
-          list_of_items[-1] = Ast::ClassItem.range(low, code_point)
+          @class_items[-1] = Ast::ClassItem.range(low, code_point)
         end
         return RangeState::None
       end
@@ -179,17 +184,17 @@ module Mica::Regex
         @pos = forbid_offset
         syntax_error("invalid range in character class", @pos)
       end
-      add_class_range(list_of_items, code_point, code_point, start)
+      add_class_range(code_point, code_point, start)
       literal ? RangeState::OkLiteral : RangeState::OkEscaped
     end
 
-    private def add_class_range(list_of_items : Array(Ast::ClassItem), first : Int32, last : Int32, start : Int32) : Nil
-      add_class_item(list_of_items, Ast::ClassItem.range(first, last), start)
+    private def add_class_range(first : Int32, last : Int32, start : Int32) : Nil
+      add_class_item(Ast::ClassItem.range(first, last), start)
     end
 
-    private def add_class_item(list_of_items : Array(Ast::ClassItem), item : Ast::ClassItem, start : Int32) : Nil
+    private def add_class_item(item : Ast::ClassItem, start : Int32) : Nil
       @ledger.charge_append(sizeof(Ast::ClassItem), "a class item", start)
-      list_of_items << item
+      @class_items << item
     end
 
     # The item for POSIX class *index*: Unicode properties in UCP mode

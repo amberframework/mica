@@ -68,7 +68,7 @@ module Mica::Regex
 
     # The group-name table of every pattern without named groups (never
     # changed: `name_table` hands out copies).
-    private NO_GROUP_NAMES = {} of Int32 => String
+    Regex.static_constant(NO_GROUP_NAMES, Hash(Int32, String))
 
     # The name table entries of *list_of_group_names*, in PCRE2 order.
     protected def self.name_entries(list_of_group_names : Array(Ast::GroupName)) : Array(Ast::GroupName)

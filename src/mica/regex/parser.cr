@@ -63,6 +63,9 @@ module Mica::Regex
     @group_count = 0
     @node_count = 0
     @list_of_frames = [] of Frame
+    # The items of the class being parsed (see `parse_class`), freed when
+    # `parse` returns.
+    @class_items = OffHeapList(Ast::ClassItem).new
     @list_of_group_names = [] of Ast::GroupName
     # The first entry of `@list_of_group_names` for each name and for each
     # group number, and every (name, number) pair recorded, so each new
@@ -110,18 +113,20 @@ module Mica::Regex
                      Ast::SourceEnd::Closed
                    end
       Ast::Pattern.new(root, @group_count, @list_of_group_names, @options, @node_count, source_end)
+    ensure
+      @class_items.free
     end
 
     # ---- Start of pattern ---------------------------------------------------
 
     # Start-of-pattern settings, in PCRE2's pso_list order (each name
     # includes its closing parenthesis or `=`).
-    START_SETTINGS = [
+    START_SETTINGS = {
       "UTF8)", "UTF)", "UCP)", "NOTEMPTY)", "NOTEMPTY_ATSTART)", "NO_AUTO_POSSESS)", "NO_DOTSTAR_ANCHOR)",
       "NO_JIT)", "NO_START_OPT)", "CASELESS_RESTRICT)", "TURKISH_CASING)", "LIMIT_HEAP=", "LIMIT_MATCH=",
       "LIMIT_DEPTH=", "LIMIT_RECURSION=", "CR)", "LF)", "CRLF)", "ANY)", "NUL)", "ANYCRLF)", "BSR_ANYCRLF)",
       "BSR_UNICODE)",
-    ]
+    }
 
     private def read_start_of_pattern_settings : Nil
       while @pos + 2 <= @bytes.size && @bytes[@pos] == '('.ord && @bytes[@pos + 1] == '*'.ord
@@ -431,7 +436,7 @@ module Mica::Regex
           @pos += 1
           syntax_error("(*alpha_assertion) not recognized", @pos)
         end
-        construct = ALPHA_ASSERTIONS[word]? || syntax_error("(*alpha_assertion) not recognized", @pos)
+        construct = alpha_assertion?(word) || syntax_error("(*alpha_assertion) not recognized", @pos)
         unsupported(construct, start)
       end
       word = read_word
@@ -446,19 +451,20 @@ module Mica::Regex
       unsupported("a backtracking verb (*#{word.empty? ? "MARK" : word})", start)
     end
 
-    ALPHA_ASSERTIONS = {
-      "pla" => "lookahead", "plb" => "lookbehind", "napla" => "non-atomic lookahead",
-      "naplb" => "non-atomic lookbehind", "nla" => "lookahead", "nlb" => "lookbehind",
-      "positive_lookahead" => "lookahead", "positive_lookbehind" => "lookbehind",
-      "non_atomic_positive_lookahead" => "non-atomic lookahead",
-      "non_atomic_positive_lookbehind" => "non-atomic lookbehind",
-      "negative_lookahead" => "lookahead", "negative_lookbehind" => "lookbehind",
-      "scs" => "a scan substring assertion", "scan_substring" => "a scan substring assertion",
-      "atomic" => "an atomic group", "sr" => "a script run", "asr" => "a script run",
-      "script_run" => "a script run", "atomic_script_run" => "a script run",
-    }
+    # The construct an alpha assertion *word* names, or nil.
+    private def alpha_assertion?(word : String) : String?
+      case word
+      when "pla", "nla", "positive_lookahead", "negative_lookahead"   then "lookahead"
+      when "plb", "nlb", "positive_lookbehind", "negative_lookbehind" then "lookbehind"
+      when "napla", "non_atomic_positive_lookahead"                   then "non-atomic lookahead"
+      when "naplb", "non_atomic_positive_lookbehind"                  then "non-atomic lookbehind"
+      when "scs", "scan_substring"                                    then "a scan substring assertion"
+      when "atomic"                                                   then "an atomic group"
+      when "sr", "asr", "script_run", "atomic_script_run"             then "a script run"
+      end
+    end
 
-    VERBS = ["", "MARK", "ACCEPT", "F", "FAIL", "COMMIT", "PRUNE", "SKIP", "THEN"]
+    VERBS = {"", "MARK", "ACCEPT", "F", "FAIL", "COMMIT", "PRUNE", "SKIP", "THEN"}
 
     # Reads ASCII word characters (verb and alpha assertion names).
     private def read_word : String

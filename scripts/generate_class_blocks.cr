@@ -125,7 +125,7 @@ module Mica::Regex
       set_id = -1
       bounds = [] of Int32
       if pattern
-        bounds = set_of_class(pattern).list_of_bounds
+        bounds = set_of_class(pattern).list_of_bounds.to_a
         set_id, negated = static_set_of(bounds) || abort "#{pattern} is not a static set"
         abort "#{pattern} is a complement" if negated
       end
@@ -192,7 +192,7 @@ Mica::Regex::LIST_OF_PREBUILT_CLASSES.each do |pattern, ignore_case|
         else
           abort "#{pattern} is not a single class or literal"
         end
-  bounds = set.list_of_bounds
+  bounds = set.list_of_bounds.to_a
   next unless seen.add?(bounds)
   abort "#{pattern} is not memoized" unless Mica::Regex::ClassMemo.memoized?(set)
   if set.range_count <= Mica::Regex::MAX_WRITTEN_RANGES
@@ -234,9 +234,9 @@ puts "    # Static set id, complemented, range count, entry state, state"
 puts "    # count, transition count and byte offset in `DATA` of each block. A"
 puts "    # negative id -n - 1 stands for the set whose ranges begin at pair n of"
 puts "    # `WRITTEN_RANGES`."
-puts "    LIST_OF_ENTRIES = ["
+puts "    LIST_OF_ENTRIES = {"
 entries.each { |entry| puts entry }
-puts "    ] of {Int32, Bool, Int32, Int32, Int32, Int32, Int32}"
+puts "    }"
 puts
 puts "    # The ranges, as `first, last` pairs, of the sets that are not static"
 puts "    # sets of the Unicode tables."

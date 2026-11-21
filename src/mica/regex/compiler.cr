@@ -45,7 +45,20 @@ module Mica::Regex
       Visited
     end
 
-    private record Task, task_kind : TaskKind, node : Hir::Node, next_state : Int32, count : Int32
+    # One step of the compile. It names its node by address, so the task
+    # list can sit outside the collector's heap: every node a task names
+    # is part of the pattern's tree, which the compiler holds for as long
+    # as it runs.
+    private record Task, task_kind : TaskKind, node_address : UInt64, next_state : Int32, count : Int32 do
+      def node : Hir::Node
+        Compiler.node_at(node_address)
+      end
+    end
+
+    # The node of the pattern's tree at *address* (see `Task`).
+    protected def self.node_at(address : UInt64) : Hir::Node
+      Pointer(Void).new(address).as(Hir::Node)
+    end
 
     private NONE = -1
 
@@ -71,7 +84,7 @@ module Mica::Regex
     # and the visited marks are scratch, freed by `release`.
     @list_of_states : OffHeapList(Program::State)
     @list_of_transitions : OffHeapList(Program::Transition)
-    @list_of_tasks : Array(Task)
+    @list_of_tasks : OffHeapList(Task)
     @list_of_values : OffHeapList(Int32)
     # The byte trie of the small class being compiled, reused for every
     # class, and the state of each of its nodes.
@@ -148,7 +161,7 @@ module Mica::Regex
       @ledger.charge_array(0, sizeof(Int32), "the class trie", 0)
       # Every charge above may refuse the pattern, so the lists outside the
       # collector's heap are made only once all of them passed.
-      @list_of_tasks = [] of Task
+      @list_of_tasks = OffHeapList(Task).new
       @class_trie = ClassTrie.new
       @list_of_states = OffHeapList(Program::State).new(@state_room)
       @list_of_transitions = OffHeapList(Program::Transition).new(presized_transitions ? transition_bound.to_i32 : 0)
@@ -177,44 +190,51 @@ module Mica::Regex
     private def transitions_bound : Int64
       total = 0_i64
       @ledger.charge_array(0, sizeof({Hir::Node, Int64}), "the transition bound stack", 0)
-      stack = [] of {Hir::Node, Int64}
-      push_bound_entry(stack, @pattern.root, 1_i64)
-      while entry = stack.pop?
-        node, copies = entry
-        charge_work
-        case node
-        when Hir::Class
-          total = Preflight.add(total, Preflight.multiply(class_transitions(node.code_point_set), copies))
-        when Hir::LineBreak
-          total = Preflight.add(total, Preflight.multiply(OTHER_LINE_BREAKS.range_count.to_i64 * 4, copies))
-        when Hir::Repetition
-          maximum = node.maximum
-          # A run's transitions sit in its table, not in the program's
-          # list: an exact count (`x{n}`) adds none, and `x{n,m}` adds only
-          # the copies no run holds.
-          if copies == 1
-            mandatory_run = run_ahead?(node)
-            if maximum && node.child.is_a?(Hir::Class)
-              emitted = (optional_run_ahead?(node) ? 0 : maximum - node.minimum) + (mandatory_run ? 0 : node.minimum)
-              push_bound_entry(stack, node.child, emitted.to_i64) if emitted > 0
-              next
+      # Scratch outside the collector's heap: each entry names a node of
+      # the pattern's tree by address (see `Task`).
+      stack = OffHeapList({UInt64, Int64}).new
+      begin
+        push_bound_entry(pointerof(stack), @pattern.root, 1_i64)
+        while entry = stack.pop?
+          node = Compiler.node_at(entry[0])
+          copies = entry[1]
+          charge_work
+          case node
+          when Hir::Class
+            total = Preflight.add(total, Preflight.multiply(class_transitions(node.code_point_set), copies))
+          when Hir::LineBreak
+            total = Preflight.add(total, Preflight.multiply(@@other_line_breaks.range_count.to_i64 * 4, copies))
+          when Hir::Repetition
+            maximum = node.maximum
+            # A run's transitions sit in its table, not in the program's
+            # list: an exact count (`x{n}`) adds none, and `x{n,m}` adds only
+            # the copies no run holds.
+            if copies == 1
+              mandatory_run = run_ahead?(node)
+              if maximum && node.child.is_a?(Hir::Class)
+                emitted = (optional_run_ahead?(node) ? 0 : maximum - node.minimum) + (mandatory_run ? 0 : node.minimum)
+                push_bound_entry(pointerof(stack), node.child, emitted.to_i64) if emitted > 0
+                next
+              end
             end
+            repeated = if maximum
+                         maximum.to_i64
+                       else
+                         # The fresh copy exists only for a body that can match
+                         # the empty string (see `finish_loop`).
+                         Math.max(node.minimum, 1).to_i64 + (consumes?(node.child, BOUND_DEPTH) ? 0 : 1)
+                       end
+            push_bound_entry(pointerof(stack), node.child, Preflight.multiply(copies, repeated))
+          when Hir::Capture
+            push_bound_entry(pointerof(stack), node.child, copies)
+          when Hir::Concatenation
+            node.list_of_children.each { |child| push_bound_entry(pointerof(stack), child, copies) }
+          when Hir::Alternation
+            node.list_of_branches.each { |branch| push_bound_entry(pointerof(stack), branch, copies) }
           end
-          repeated = if maximum
-                       maximum.to_i64
-                     else
-                       # The fresh copy exists only for a body that can match
-                       # the empty string (see `finish_loop`).
-                       Math.max(node.minimum, 1).to_i64 + (consumes?(node.child, BOUND_DEPTH) ? 0 : 1)
-                     end
-          push_bound_entry(stack, node.child, Preflight.multiply(copies, repeated))
-        when Hir::Capture
-          push_bound_entry(stack, node.child, copies)
-        when Hir::Concatenation
-          node.list_of_children.each { |child| push_bound_entry(stack, child, copies) }
-        when Hir::Alternation
-          node.list_of_branches.each { |branch| push_bound_entry(stack, branch, copies) }
         end
+      ensure
+        stack.free
       end
       total
     end
@@ -244,9 +264,12 @@ module Mica::Regex
       end
     end
 
-    private def push_bound_entry(stack : Array({Hir::Node, Int64}), node : Hir::Node, copies : Int64) : Nil
+    # Pushes *node* with its *copies* on the list *stack* points to.
+    private def push_bound_entry(stack : Pointer(OffHeapList({UInt64, Int64})), node : Hir::Node, copies : Int64) : Nil
       @ledger.charge_append(sizeof({Hir::Node, Int64}), "the transition bound stack", 0)
-      stack << {node, copies}
+      list = stack.value
+      list << {node.object_id, copies}
+      stack.value = list
     end
 
     private def class_transitions(set : CodePointSet) : Int64
@@ -662,14 +685,14 @@ module Mica::Regex
       lone = emit_look(Program::LookKind::NotBeforeLineFeed, next_state)
       after_return = emit_split(line_feed, lone)
       carriage_return = emit_byte_range(0x0D_u8, 0x0D_u8, after_return)
-      others = any_crlf ? LINE_FEED_ONLY : OTHER_LINE_BREAKS
+      others = any_crlf ? @@line_feed_only : @@other_line_breaks
       emit_split(carriage_return, compile_class(others, next_state))
     end
 
     # The line breaks of `\R` other than `\r`.
-    private OTHER_LINE_BREAKS = CodePointSet.from_bounds([0x0A, 0x0C, 0x85, 0x85, 0x2028, 0x2029])
+    Regex.static_object(other_line_breaks, CodePointSet, Slice(Int32).literal(0x0A, 0x0C, 0x85, 0x85, 0x2028, 0x2029))
     # The line breaks of `\R` under `(*BSR_ANYCRLF)` other than `\r`.
-    private LINE_FEED_ONLY = CodePointSet.from_bounds([0x0A, 0x0A])
+    Regex.static_object(line_feed_only, CodePointSet, Slice(Int32).literal(0x0A, 0x0A))
 
     # Compiles *set* (see `compile_class`) and records its states as a
     # `Program::ClassBlock` when they are more than one.
@@ -1054,7 +1077,7 @@ module Mica::Regex
     # marks), once the program is built. The compiler is not used again;
     # it alone holds these lists, and never shifts them.
     protected def release : Nil
-      free_list(@list_of_tasks)
+      @list_of_tasks.free
       @list_of_values.free
       @list_of_trie_states.free
       @list_of_visited.free
@@ -1067,11 +1090,6 @@ module Mica::Regex
       @list_of_states.free
       @list_of_transitions.free
       @list_of_class_blocks.free
-    end
-
-    private def free_list(list : Array) : Nil
-      GC.free(list.to_unsafe.as(Void*))
-      GC.free(list.as(Void*))
     end
 
     # True when *node*, compiled once, will make a run (`class_run`) of its
@@ -1164,7 +1182,7 @@ module Mica::Regex
 
     private def push_task(kind : TaskKind, node : Hir::Node, next_state : Int32, count : Int32 = 0) : Nil
       grow(GrowingList::Tasks, @list_of_tasks.size + 1, sizeof(Task))
-      @list_of_tasks << Task.new(kind, node, next_state, count)
+      @list_of_tasks << Task.new(kind, node.object_id, next_state, count)
     end
 
     private def push_value(value : Int32) : Nil

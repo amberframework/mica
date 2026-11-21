@@ -8,7 +8,7 @@ module Mica::Regex::ClassMemo
     # count, transition count and byte offset in `DATA` of each block. A
     # negative id -n - 1 stands for the set whose ranges begin at pair n of
     # `WRITTEN_RANGES`.
-    LIST_OF_ENTRIES = [
+    LIST_OF_ENTRIES = {
       {-1, false, 1, 7, 8, 9, 0},              # \p{Any}
       {-2, false, 3, 2, 3, 3, 108},            # (?i)k
       {-5, false, 4, 3, 4, 4, 147},            # (?i)[a-z]
@@ -23,7 +23,7 @@ module Mica::Regex::ClassMemo
       {373, false, 677, 88, 89, 670, 33249},   # \p{Lowercase}
       {387, false, 660, 79, 80, 635, 36730},   # \p{Uppercase}
       {34, false, 199, 127, 128, 255, 39990},  # \pP
-    ] of {Int32, Bool, Int32, Int32, Int32, Int32, Int32}
+    }
 
     # The ranges, as `first, last` pairs, of the sets that are not static
     # sets of the Unicode tables.

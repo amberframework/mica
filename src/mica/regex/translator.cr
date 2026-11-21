@@ -11,7 +11,7 @@ module Mica::Regex
       # stack never holds more results than there are nodes.
       capacity = Math.max(pattern.node_count, 1)
       ledger.charge_array(capacity, sizeof(Hir::Node), "the translation stack", pattern.root.offset)
-      list_of_results = Array(Hir::Node).new(capacity)
+      list_of_results = Regex.scratch_stack(Hir::Node, capacity)
       Ast.each_post_order(pattern.root, pattern.node_count, ledger) do |node, child_count|
         offset = node.offset
         meter.enforce { Core::Position.new(offset.to_i64) } if meter.charge(1)
@@ -28,7 +28,7 @@ module Mica::Regex
 
     # The `Hir` for *node*, whose *child_count* children's results are on
     # top of *list_of_results*.
-    private def self.translate_node(node : Ast::Node, list_of_results : Array(Hir::Node), child_count : Int32,
+    private def self.translate_node(node : Ast::Node, list_of_results : ScratchStack(Hir::Node), child_count : Int32,
                                     ledger : AllocationLedger) : Hir::Node
       offset = node.offset
       first_child = list_of_results.size - child_count
@@ -39,7 +39,7 @@ module Mica::Regex
           return Hir::Class.new(set)
         end
         code_point = node.code_point
-        return ASCII_LITERALS[code_point] if code_point < ASCII_LITERALS.size
+        return ascii_literal(code_point) if code_point < ASCII_LITERAL_COUNT
         ledger.charge_object(instance_sizeof(Hir::Literal), "a Hir literal", offset)
         Hir::Literal.new(code_point)
       when Ast::CharClass
@@ -78,15 +78,28 @@ module Mica::Regex
       end
     end
 
+    private ASCII_LITERAL_COUNT = 0x80
+
     # The `Hir` node of each ASCII literal, shared by every translation:
     # nodes are never changed after they are made, and most patterns are
     # mostly ASCII literals, so these are made once rather than once per
-    # character.
-    private ASCII_LITERALS = Array(Hir::Literal).new(0x80) { |code_point| Hir::Literal.new(code_point) }
+    # character. They are static objects (see `Regex.static_object`): a
+    # node holds one number, so the table costs the collector's heap
+    # nothing, at program start or in a translation.
+    @@ascii_literal_storage = uninitialized StaticArray(ReferenceStorage(Hir::Literal), ASCII_LITERAL_COUNT)
+    @@ascii_literals : Pointer(ReferenceStorage(Hir::Literal)) = begin
+      storage = @@ascii_literal_storage.to_unsafe
+      ASCII_LITERAL_COUNT.times { |code_point| Hir::Literal.unsafe_construct(storage + code_point, code_point) }
+      storage
+    end
+
+    private def self.ascii_literal(code_point : Int32) : Hir::Literal
+      (@@ascii_literals + code_point).as(Hir::Literal)
+    end
 
     # Copies the results from index *first* to the top into an array of
     # exactly that size, charged first.
-    private def self.children_from(list_of_results : Array(Hir::Node), first : Int32, ledger : AllocationLedger,
+    private def self.children_from(list_of_results : ScratchStack(Hir::Node), first : Int32, ledger : AllocationLedger,
                                    offset : Int32) : Array(Hir::Node)
       count = list_of_results.size - first
       ledger.charge_array(count, sizeof(Hir::Node), "a Hir child list", offset)
