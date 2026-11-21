@@ -32,14 +32,15 @@ describe Mica::Regex::Unicode do
     greek.try(&.set_id).should_not eq(script_only.try(&.set_id))
   end
 
-  it "reads each set's ranges in place, sorted and disjoint" do
+  it "reads each set's ranges in place, sorted, with a gap between them" do
     Mica::Regex::Unicode::Tables::SET_COUNT.times do |set_id|
       bounds = Mica::Regex::Unicode.decoded_ranges(set_id)
       bounds.read_only?.should be_true
       bounds.size.should eq(Mica::Regex::Unicode.range_count(set_id) * 2)
       (bounds.size // 2).times do |index|
         (bounds[index * 2] <= bounds[index * 2 + 1]).should be_true
-        (bounds[index * 2 - 1] < bounds[index * 2]).should be_true if index > 0
+        # A gap, so `ClassLowering` copies a set's ranges as they are.
+        (bounds[index * 2 - 1] + 1 < bounds[index * 2]).should be_true if index > 0
       end
     end
   end

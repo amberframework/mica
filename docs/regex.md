@@ -586,13 +586,18 @@ byte ranges in a trie, so a class emits at most the byte ranges the size
 preflight counted for it). A large class (16 ranges or more, such as `\w`
 or `\p{L}`, or any class reaching three-byte sequences, such as `.` or
 `[^"']`) is built once per process as a minimal automaton, its equal
-suffixes sharing states. The automata of `\w`, `\W`, `\d`, `\D`, `\p{L}`,
-`\P{L}`, `\p{Lowercase}` and `\p{Uppercase}` are built ahead of time by
+suffixes sharing states. The automata of `\w`, `\W`, `\d`, `\D`, `\s`,
+`\S`, `\p{L}`, `\P{L}`, `\p{Lowercase}`, `\p{Uppercase}` and `\p{P}`, of
+the class of every character, and of the two sets the ASCII letters fold
+to past ASCII (`(?i)k` and `(?i)[a-z]`) are built ahead of time by
 scripts/generate_class_blocks.cr into `ClassMemo::Prebuilt`, static data
 a process decodes in one pass the first time a pattern uses the class,
 where building `\w` from its trie takes about 70 us and 150 KiB of
 short-lived allocation; a spec checks each against the block its set
-builds. A program copies only its states (one memory
+builds. A class that differs from one of them only in its ASCII members
+(`(?i)[\w+\-.]`, `[$+<=>\p{P}]`, `.`, `[^"']`, `(?i)[a-z0-9.+-]`) takes
+that block with the entry's ASCII transitions replaced, so most classes a
+pattern writes are never built from a trie. A program copies only its states (one memory
 copy, relocated in place): their `Sparse` states read the class's
 transitions from one table shared by every program and copy
 (`Program#list_of_shared_tables`, targets relative to the reading state),
@@ -848,7 +853,10 @@ the bounded backtracker finds the start over `offset...e` (when the span
 would suit a first search, its most work fits the call's remaining
 allowance, and the backtracker decides within its visit limit): the
 leftmost-first match of that span ends at `e`, as cutting bytes off after
-the match only removes matches.
+the match only removes matches. The analysis that tells whether every
+match has one length (`SearchPlan#fixed_match_bytes`, whose start is then
+that many bytes before `e`) waits for the first start the backtracker
+does not find, so a program searched once or twice never makes it.
 
 ## Required bytes
 
@@ -940,7 +948,13 @@ much as the cost per byte:
   whole anchored search at each candidate, which finds the span and the
   groups at once: no reverse DFA and no separate capture pass; otherwise
   it runs the forward lazy DFA anchored at each candidate, which finds the
-  end, and still needs no reverse DFA. An anchored search that wants
+  end, and still needs no reverse DFA. A one-pass table that is not small
+  (over `OnePassBuilder::PRESIZED_TABLE_CELLS` cells) is built only once
+  the tries on the forward DFA have read as many bytes as it has cells
+  (`SearchPlan#start_search_one_pass`), unless the search wants groups: a
+  Markdown autolink with a `{1,31}` class has about 6,000 cells, which
+  cost 38 us and 150 KB of allocation in a fresh process, where the lazy
+  DFA builds only the states a try reaches. An anchored search that wants
   groups runs the one-pass DFA alone at its offset once an earlier capture
   pass has built it. The one-pass DFA
   leaves out the paths that rank below a match path; when that match path

@@ -301,11 +301,25 @@ module Mica::Regex
       context.charge_array(0, sizeof(Int32))
       list_of_points = [] of Int32
       (bounds.size // 2).times do |index|
-        visited = Unicode.each_folding_code_point(bounds[index * 2], bounds[index * 2 + 1]) do |code_point|
-          Unicode.each_fold_partner(code_point) do |partner|
-            next if restricted && (partner < 0x80) != (code_point < 0x80)
+        first = bounds[index * 2]
+        last = bounds[index * 2 + 1]
+        visited = 0
+        # The ASCII members' partners are read from `ASCII_FOLDS`, with no
+        # search of the fold table: most classes a pattern writes are ASCII.
+        if first < ASCII_END
+          visited += each_ascii_fold_partner(first, Math.min(last, ASCII_END - 1), restricted) do |partner|
             context.charge_append(sizeof(Int32))
             list_of_points << partner
+          end
+          first = ASCII_END
+        end
+        if first <= last
+          visited += Unicode.each_folding_code_point(first, last) do |code_point|
+            Unicode.each_fold_partner(code_point) do |partner|
+              next if restricted && partner < ASCII_END
+              context.charge_append(sizeof(Int32))
+              list_of_points << partner
+            end
           end
         end
         context.charge_work(visited + 1)
@@ -323,6 +337,27 @@ module Mica::Regex
         end
       end
       partner_bounds
+    end
+
+    # The first code point past ASCII.
+    private ASCII_END = 0x80
+
+    # Calls the block with every fold partner of each ASCII code point in
+    # *first*..*last* (those outside ASCII left out when *restricted*), read
+    # from `ASCII_FOLDS`, and returns the number of code points there that
+    # have fold partners, as `Unicode.each_folding_code_point` does.
+    private def self.each_ascii_fold_partner(first : Int32, last : Int32, restricted : Bool, & : Int32 ->) : Int32
+      visited = 0
+      (first..last).each do |code_point|
+        next unless ASCII_FOLDS.unsafe_fetch(code_point * 2)
+        visited += 1
+        set = ASCII_FOLDS.unsafe_fetch(code_point * 2 + (restricted ? 1 : 0))
+        next unless set
+        set.each_range do |low, high|
+          (low..high).each { |member| yield member unless member == code_point }
+        end
+      end
+      visited
     end
 
     # Merges sorted range streams into one set with a binary heap keyed on
@@ -353,6 +388,17 @@ module Mica::Regex
           context.charge_range
           bounds << first
           bounds << last
+          # The last stream left, read in place: its other ranges follow
+          # this one in order with a gap between them, so they are the rest
+          # of the set (`\p{P}` past the ASCII members of `[$+<=>\p{P}]`),
+          # charged as the ranges they are and copied in one pass.
+          if heap.size == 1 && (rest = stream.rest_of_bounds) && context.fits_ranges?(bounds.size // 2, rest.size // 2)
+            count = rest.size // 2
+            context.charge_work(count * 2)
+            context.charge_ranges(count)
+            bounds.concat(rest)
+            break
+          end
         end
         stream.advance
         if stream.done?
@@ -441,6 +487,20 @@ module Mica::Regex
         @ledger.charge_append(2 * sizeof(Int32), "a class range", @offset)
       end
 
+      # *count* ranges appended to a growing bounds array, as *count*
+      # calls of `charge_range` would charge them.
+      def charge_ranges(count : Int32) : Nil
+        @ledger.charge_appends(count, 2 * sizeof(Int32), "a class range", @offset)
+      end
+
+      # True when *count* more ranges after *held* stay within the growth
+      # `check_growth` allows and the ledger's limit, so charging them at
+      # once refuses nothing that charging them one by one would not.
+      def fits_ranges?(held : Int32, count : Int32) : Bool
+        return false if held.to_i64 + count > @limits.max_class_ranges.to_i64 + 1
+        @ledger.bytes + count.to_i64 * 2 * sizeof(Int32) * AllocationLedger::GROWTH_FACTOR <= @ledger.limit
+      end
+
       # A range stream object and its entry in the stream list.
       def charge_stream : Nil
         @ledger.charge_object(instance_sizeof(RangeStream), "a class member", @offset)
@@ -518,6 +578,13 @@ module Mica::Regex
       def advance : Nil
         @index += 1
         load
+      end
+
+      # The bounds of the ranges after the current one, or nil for a
+      # stream read as a complement (its ranges are the gaps).
+      def rest_of_bounds : Slice(Int32)?
+        return nil if @negated
+        @bounds[(@index + 1) * 2, (@count - @index - 1) * 2]
       end
 
       # Loads the range at @index (a gap between ranges when negated),
