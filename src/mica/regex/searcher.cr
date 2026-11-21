@@ -443,7 +443,7 @@ module Mica::Regex
       end
       if start_search?(anchored, end_anchored, want_captures, bytes.size - byte_index)
         @handed_over_at = -1
-        found = find_at_starts(bytes, byte_index, anchored)
+        found = find_at_starts(bytes, byte_index, anchored, want_captures)
         span_from = @handed_over_at if found.nil? && @handed_over_at > byte_index
         unless found.nil?
           return nil unless found
@@ -558,10 +558,15 @@ module Mica::Regex
     # they add up to more than the haystack (or the prefilter proves
     # ineffective) it stops searching this way: the extra work is then at
     # most n plus one per try, and the call stays linear.
-    private def find_at_starts(bytes : Bytes, byte_index : Int32, anchored : Bool) : Bool?
+    #
+    # The tries of a program whose one-pass DFA is not built yet run on the
+    # forward lazy DFA until they have read enough to pay for building it
+    # (see `SearchPlan#start_search_one_pass`), unless the search wants
+    # groups (*want_captures*).
+    private def find_at_starts(bytes : Bytes, byte_index : Int32, anchored : Bool, want_captures : Bool) : Bool?
       plan = @plan || return nil
       return find_anchored(plan, bytes, byte_index) if anchored
-      one_pass = plan.one_pass
+      one_pass = plan.start_search_one_pass(want_captures)
       forward = nil
       cache = nil
       unless one_pass
@@ -660,6 +665,8 @@ module Mica::Regex
         before = @meter.operations
         finish = forward.find_end(cache, bytes, start, true, false, nil, @meter, stop)
         scanned = @meter.operations - before
+        plan = @plan
+        plan.note_start_try_bytes(scanned.to_i64 + 1) if plan && !plan.one_pass_built?
         @span_slots[0] = start.to_i64
         @span_slots[1] = finish.to_i64
         path = Path::LazyDFA
@@ -814,11 +821,26 @@ module Mica::Regex
     # reverse DFA finds it.
     private def match_start(lease : SearchLease, dfa : LazyDFA, cache : DFACache?, bytes : Bytes, finish : Int32,
                             lower_bound : Int32) : Int32
-      # Every match has the same length: the start is that far back.
-      if @engine.auto? && (length = @program.plan.fixed_match_bytes) >= 0 && finish - length >= lower_bound
-        return finish - length
+      backtracked = false
+      if @engine.auto?
+        plan = @program.plan
+        # The analysis that tells whether every match has one length is made
+        # once per program (`SearchPlan#fixed_match_bytes`), and costs more
+        # than the backtracker's pass over a short span, so until it is made
+        # the backtracker finds the start where it may (`backtracked_start`):
+        # a program searched once or twice never makes the analysis.
+        unless plan.fixed_match_bytes_known?
+          backtracked = true
+          if start = backtracked_start(bytes, finish, lower_bound)
+            return start
+          end
+        end
+        # Every match has the same length: the start is that far back.
+        length = plan.fixed_match_bytes
+        return finish - length if length >= 0 && finish - length >= lower_bound
       end
-      if (@engine.auto? || @engine.backtracked_starts?) && (start = backtracked_start(bytes, finish, lower_bound))
+      if !backtracked && (@engine.auto? || @engine.backtracked_starts?) &&
+         (start = backtracked_start(bytes, finish, lower_bound))
         return start
       end
       # The match bound is analyzed only when a start may come from it.

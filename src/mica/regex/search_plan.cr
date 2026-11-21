@@ -70,6 +70,9 @@ module Mica::Regex
     # program ran without a plan (`FirstSearch`): a program searched that
     # often is searched again.
     @short_searches : Atomic(Int32)
+    # Bytes the tries of searches at starts read on the forward DFA before
+    # the one-pass DFA was built (see `start_search_one_pass`).
+    @start_try_bytes = Atomic(Int64).new(0_i64)
     # Unanchored short searches that ran out of tries (see `ShortSearch`).
     @short_declines = Atomic(Int32).new(0)
     # Candidate searches that ran out of tries (see `CandidateSearch`).
@@ -474,6 +477,35 @@ module Mica::Regex
       one_pass
     end
 
+    # The one-pass DFA for a search at starts (`Searcher#find_at_starts`),
+    # or nil when its tries should run on the forward DFA: the program is
+    # not one-pass, or its one-pass DFA is not built yet and building it
+    # now would cost more than the tries have read.
+    #
+    # Building costs a pass over the table, `OnePassDFA.most_cells` cells
+    # at most (about 6,000 for a Markdown autolink with a `{1,31}` class,
+    # 38 us and 150 KB of allocation in a fresh process), where the lazy
+    # DFA builds only the states a try reaches. So a table that is not
+    # small is built once the tries on the forward DFA have read as many
+    # bytes as it has cells (`note_start_try_bytes`): a program searched
+    # once or twice never builds it, and one searched over and over pays
+    # for it with at most that much reading. A small table is built at
+    # once, and so is any table when the search *wants_groups*, which the
+    # one-pass DFA reads with the match in one pass.
+    def start_search_one_pass(wants_groups : Bool) : OnePassDFA?
+      return @one_pass.get(:relaxed) if @one_pass_built.get(:acquire) == 1
+      return one_pass if wants_groups || OnePassDFA.small?(@program, @byte_classes)
+      return nil if @start_try_bytes.get(:relaxed) < OnePassDFA.most_cells(@program, @byte_classes)
+      one_pass
+    end
+
+    # Counts *count* bytes a try of a search at starts read on the forward
+    # DFA while the one-pass DFA was not built (see
+    # `start_search_one_pass`).
+    def note_start_try_bytes(count : Int64) : Nil
+      @start_try_bytes.add(count, :relaxed)
+    end
+
     # True once a search has built the one-pass DFA (see `one_pass`),
     # whether or not the program is one-pass.
     def one_pass_built? : Bool
@@ -518,6 +550,11 @@ module Mica::Regex
       end
       @fixed_match_bytes.set(length, :relaxed)
       length
+    end
+
+    # True once `fixed_match_bytes` has made its analysis.
+    def fixed_match_bytes_known? : Bool
+      @fixed_match_bytes.get(:relaxed) != FIXED_LENGTH_UNKNOWN
     end
 
     private FIXED_LENGTH_UNKNOWN = -2
