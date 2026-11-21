@@ -108,13 +108,17 @@ module Mica::Regex
     # keeps pays nothing for them.
     #
     # The memo maps each set to the index of its block in `@@kept_blocks`,
-    # a buffer outside the collector's heap with room for `MAX_ENTRIES`
-    # blocks, made when the first block is kept: a block holds no
-    # reference the collector follows, and a table entry of a set and a
-    # number is a fraction of the size of one that holds the block.
+    # a buffer outside the collector's heap that doubles as blocks are
+    # kept, from `FIRST_KEPT_BLOCKS`: a block holds no reference the
+    # collector follows, and a table entry of a set and a number is a
+    # fraction of the size of one that holds the block.
     Regex.static_object(mutex, Mutex)
     Regex.static_object(block_indexes, Hash(Key, Int32))
     @@kept_blocks = Pointer(Block).null
+    @@kept_block_room = 0
+
+    # The blocks `@@kept_blocks` first has room for.
+    private FIRST_KEPT_BLOCKS = 8
 
     # The memo's block for *lookup*, or nil. The caller holds `@@mutex`.
     private def self.kept_block?(lookup : Key) : Block?
@@ -127,12 +131,14 @@ module Mica::Regex
     private def self.keep_block?(lookup : Key, block : Block) : Bool
       index = @@block_indexes.size
       return false unless index < MAX_ENTRIES
-      if @@kept_blocks.null?
-        bytes = LibC::SizeT.new(MAX_ENTRIES) * sizeof(Block)
-        buffer = LibC.malloc(bytes).as(Pointer(Block))
+      if index == @@kept_block_room
+        room = Math.max(FIRST_KEPT_BLOCKS, @@kept_block_room * 2)
+        bytes = LibC::SizeT.new(room) * sizeof(Block)
+        buffer = LibC.realloc(@@kept_blocks.as(Void*), bytes).as(Pointer(Block))
         raise OutOfMemoryError.new("Out of memory: the class memo (#{bytes} bytes)") if buffer.null?
         OffHeap.count(bytes)
         @@kept_blocks = buffer
+        @@kept_block_room = room
       end
       @@kept_blocks[index] = block
       @@block_indexes[lookup] = index

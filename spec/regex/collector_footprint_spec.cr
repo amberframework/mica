@@ -159,6 +159,30 @@ describe "Mica::Regex and the collector's heap" do
     end
   end
 
+  describe "the class memo" do
+    it "gives back the block it kept, before and after its buffer of blocks grows" do
+      ledger = Mica::Regex::AllocationLedger.new(Int64::MAX)
+      meter = Mica::Core::WorkMeter.new
+      # Wide sets no other spec compiles: one range each, from a private
+      # use area. More of them than the buffer first holds, and fewer than
+      # the memo keeps even when other specs filled some of it.
+      list_of_sets = Array(Mica::Regex::CodePointSet).new(24) do |index|
+        Mica::Regex::CodePointSet.from_bounds([0xF0000 + index * 7, 0xF0000 + index * 7 + 3])
+      end
+      list_of_blocks = list_of_sets.map { |set| Mica::Regex::ClassMemo.block_for(set, ledger, meter) }
+      list_of_sets.each_with_index do |set, index|
+        again = Mica::Regex::ClassMemo.block_for(set, ledger, meter)
+        again.same_lists?(list_of_blocks[index]).should be_true
+        again.entry.should eq(list_of_blocks[index].entry)
+        equal = Mica::Regex::CodePointSet.from_bounds(set.list_of_bounds.to_a)
+        Mica::Regex::ClassMemo.block_for(equal, ledger, meter).same_lists?(list_of_blocks[index]).should be_true
+      end
+      list_of_blocks[0].same_lists?(list_of_blocks[1]).should be_false
+    ensure
+      ledger.try(&.free_owned_blocks)
+    end
+  end
+
   describe Mica::Regex::ScratchStack do
     it "pushes and pops in the caller's stack frame" do
       stack = Mica::Regex.scratch_stack(Int32, 3)
