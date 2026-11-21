@@ -204,6 +204,89 @@ describe Mica::Core::UTF8 do
     Mica::Core::UTF8.decode(Bytes.empty).should eq({Mica::Core::UTF8::Problem::Truncated.value, 0})
   end
 
+  it "finds the same first invalid offset as decoding one sequence at a time, at any length and position" do
+    random = Random.new(20261119)
+    pieces = ["a", " ", "é", "Ж", "€", "\u{10348}", "z" * 70, "Холмс ", "\u{10FFFF}"].map(&.to_slice)
+    bad = [Bytes[0xFF], Bytes[0x80], Bytes[0xC0, 0x80], Bytes[0xED, 0xA0, 0x80], Bytes[0xF4, 0x90, 0x80, 0x80],
+           Bytes[0xE2, 0x82], Bytes[0xE2, 0x41]]
+    2000.times do |round|
+      io = IO::Memory.new
+      count = random.rand(0..60)
+      cut = round.odd? ? random.rand(0..count) : -1
+      count.times do |index|
+        io.write(bad.sample(random)) if index == cut
+        io.write(pieces.sample(random))
+      end
+      text = io.to_slice
+      expected = nil
+      at = 0
+      while at < text.size
+        _, length = Mica::Core::UTF8.decode(text, at, text.size)
+        if length == 0
+          expected = at
+          break
+        end
+        at += length
+      end
+      Mica::Core::UTF8.first_invalid_offset(text).should eq(expected)
+    end
+  end
+
+  it "finds the same first invalid offset in long text read as two streams, wherever the fault lies" do
+    random = Random.new(20261120)
+    pieces = ["a", " ", "é", "Ж", "€", "\u{10348}", "z" * 70, "Холмс ", "\u{10FFFF}", "日本語"].map(&.to_slice)
+    bad = [Bytes[0xFF], Bytes[0x80], Bytes[0xC0, 0x80], Bytes[0xED, 0xA0, 0x80], Bytes[0xF4, 0x90, 0x80, 0x80],
+           Bytes[0xE2, 0x82], Bytes[0xE2, 0x41], Bytes[0x80, 0x80, 0x80, 0x80, 0x80]]
+    400.times do |round|
+      io = IO::Memory.new
+      count = random.rand(100..1500)
+      cut = round % 3 == 0 ? -1 : random.rand(0..count)
+      count.times do |index|
+        io.write(bad.sample(random)) if index == cut
+        io.write(pieces.sample(random))
+      end
+      io.write(bad.sample(random)) if cut == count
+      text = io.to_slice
+      expected = nil
+      at = 0
+      while at < text.size
+        _, length = Mica::Core::UTF8.decode(text, at, text.size)
+        if length == 0
+          expected = at
+          break
+        end
+        at += length
+      end
+      Mica::Core::UTF8.first_invalid_offset(text).should eq(expected)
+    end
+  end
+
+  it "finds a non-ASCII byte at every position of short text, read word by word" do
+    (0..72).each do |size|
+      Mica::Core::UTF8.first_invalid_offset(Bytes.new(size, 0x61_u8)).should be_nil
+      size.times do |position|
+        text = Bytes.new(size, 0x61_u8)
+        text[position] = 0xFF_u8
+        Mica::Core::UTF8.first_invalid_offset(text).should eq(position)
+        next unless position + 2 <= size
+        # A valid two-byte character at the same place is not a fault.
+        text[position] = 0xC3_u8
+        text[position + 1] = 0xA9_u8
+        Mica::Core::UTF8.first_invalid_offset(text).should be_nil
+      end
+    end
+  end
+
+  it_satisfies "MICA-MEMORY-SAFETY", "reads no byte outside the slice it is given" do
+    backing = Bytes.new(96, 0xFF_u8)
+    (0..64).each do |size|
+      window = backing[16, size]
+      window.fill(0x61_u8)
+      Mica::Core::UTF8.first_invalid_offset(window).should be_nil
+      backing.fill(0xFF_u8)
+    end
+  end
+
   it_satisfies "MICA-MEMORY-SAFETY", "never reads past the limit it is given" do
     bytes = "\u20AC\u20AC".to_slice
     Mica::Core::UTF8.decode(bytes, 3, 6).should eq({0x20AC, 3})

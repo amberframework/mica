@@ -1,0 +1,2 @@
+# Subjects where Mica's result differs from PCRE2 10.49's, each a deviation for the code owner to approve or a defect to fix.
+# id<TAB>reason<TAB>approval (`approved by @login`, a code owner of /conformance/regex/)

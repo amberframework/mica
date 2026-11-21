@@ -27,6 +27,32 @@ module Mica::Core
       index
     end
 
+    # Returns the index of the first byte in `bytes[from...stop]` that is
+    # not ASCII (0x80 or above), or *stop* when all of them are. Reads eight
+    # bytes at a time while they fit. Raises `IndexError` unless
+    # `0 <= from <= stop <= bytes.size`.
+    #
+    # ```
+    # Mica::Core::ByteScan.skip_ascii("plain text é".to_slice, 0, 13) # => 11
+    # ```
+    def self.skip_ascii(bytes : Bytes, from : Int32, stop : Int32) : Int32
+      unless 0 <= from && from <= stop && stop <= bytes.size
+        raise IndexError.new("Scan window #{from}...#{stop} is outside 0...#{bytes.size}")
+      end
+      index = from
+      pointer = bytes.to_unsafe
+      # index + 8 <= stop <= bytes.size: the word read is in bounds (an
+      # unaligned load, which the targets Mica supports allow).
+      while index + 8 <= stop
+        break if (pointer + index).as(Pointer(UInt64)).value & 0x8080808080808080_u64 != 0
+        index += 8
+      end
+      while index < stop && pointer[index] < 0x80
+        index += 1
+      end
+      index
+    end
+
     # Returns true when the `expected.size` bytes of *bytes* at *offset*
     # equal *expected*. Raises `IndexError` unless
     # `0 <= offset <= bytes.size - expected.size`. Compares in place, which

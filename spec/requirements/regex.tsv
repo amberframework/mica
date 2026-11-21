@@ -1,0 +1,48 @@
+# Requirements for Mica::Regex milestones R1 (the Crystal-dialect front end),
+# R2 (the Pike VM, the bounded backtracker and the native search API) and
+# R3 (the lazy DFAs, the one-pass DFA, literal acceleration and the cache pool):
+# the PCRE2 10.49 pattern syntax subset it accepts, the constructs it
+# refuses by name, its compile limits and allocation ledger, Unicode tables
+# and case folding, and the complexity of compiling. The PCRE2 testinput
+# census (spec/regex/pcre2_syntax_census_spec.cr) covers the grammar case by
+# case; this catalog traces the behaviors the specs pin down.
+# Format: id<TAB>section<TAB>summary.
+REGEX-R1-literals	docs/regex.md Syntax	Literals, escapes (\a \e \f \n \r \t \xhh \x{} \o{} \0 octal \cX \N{U+}) and \Q...\E quoting read as PCRE2 reads them
+REGEX-R1-classes	docs/regex.md Syntax	Bracketed classes, ranges, negation, POSIX classes and class escapes follow PCRE2's class rules
+REGEX-R1-properties	docs/regex.md Unicode	\p and \P accept PCRE2's loose property names (general categories, scripts, script extensions, Bidi classes, Boolean properties, Any, L&, Xan, Xps, Xsp, Xwd, Xuc)
+REGEX-R1-quantifiers	docs/regex.md Syntax	*, +, ?, {n}, {n,}, {n,m}, {,m} with lazy suffix; a quantifier with nothing to repeat is an error
+REGEX-R1-groups	docs/regex.md Syntax	Capturing, named, non-capturing and branch-reset groups number captures as PCRE2 does
+REGEX-R1-options	docs/regex.md Options	Inline option settings (?imnrsxxJUa-...) and start-of-pattern settings apply with PCRE2's scoping
+REGEX-R1-excluded	docs/regex.md Excluded constructs	Backreferences, lookaround, atomic and possessive forms, recursion, conditionals, callouts, verbs, \K, \C and \X raise UnsupportedConstructError naming the construct and its byte offset
+REGEX-R1-errors	docs/regex.md Errors	Malformed patterns raise SyntaxError with the byte offset PCRE2 reports
+REGEX-R1-limits	docs/regex.md Limits	Pattern bytes, nesting depth, captures, class ranges, program states and compile bytes are refused with CompileLimitError naming the limit
+REGEX-R1-preflight	docs/regex.md Limits	The size preflight bounds program states with saturating arithmetic before Hir is built
+REGEX-R1-ledger	docs/regex.md Limits	Every compile allocation is charged to the ledger before it is made, and compiling stays under max_compile_bytes
+REGEX-R1-unicode-tables	docs/regex.md Unicode	Unicode 17.0.0 tables are generated from the sha256-pinned UCD and match PCRE2 10.49's property names
+REGEX-R1-case-folding	docs/regex.md Case folding	Case-insensitive classes close over simple case folding per dialect; (?r) keeps ASCII and non-ASCII apart
+REGEX-R1-utf8-sequences	docs/regex.md Limits	Code point ranges split into exact UTF-8 byte-range sequences, surrogates excluded
+REGEX-R1-hir	docs/regex.md Hir	Patterns translate to Hir with folded classes, explicit repetition counts and captures only
+REGEX-R1-pcre2-census	docs/regex.md PCRE2 census	Every PCRE2 10.49 testinput pattern is classified; Mica and PCRE2 agree on acceptance except for listed exclusions and divergences
+REGEX-R1-compile-complexity	docs/regex.md Limits	Compile work grows linearly with pattern size, and the roadmap 6.8 families are refused under max_compile_bytes
+REGEX-R1-fuzz	docs/regex.md Fuzzing	Random and mutated patterns end in a result or a Mica::Error, never a crash
+REGEX-R2-compiler	docs/regex.md Engines	Hir compiles to a byte-level Thompson NFA with UTF-8 automata, within the preflight bound, checking max_program_states while emitting and max_pike_bytes when done
+REGEX-R2-semantics	docs/regex.md Engines	Searches report the leftmost-first match with PCRE2's meanings: an empty group iteration ends the repetition, \R is atomic, anchors and word boundaries follow the Crystal dialect
+REGEX-R2-api	docs/regex.md Native API	Expression and MatchData mirror Regex and Regex::MatchData (match, match!, match_at_byte_index, matches?, captures, named groups, name table, escape, union)
+REGEX-R2-iteration	docs/regex.md Native API	each_match, scan, gsub, sub and split follow String#scan, #gsub, #sub and #split, with one work allowance per call
+REGEX-R2-limits	docs/regex.md Search limits	Every search takes required SearchLimits; running out of work or output raises SearchLimitError naming the limit, and a timeout raises DeadlineExceededError
+REGEX-R2-complexity	docs/regex.md Search complexity	The n, m and c families stay within their stated bounds and grow linearly
+REGEX-R2-conformance	docs/regex.md Conformance	The RE2 search tests and the Rust regex tests pass under fixed denominators, every eligible case on every engine path
+REGEX-R2-differential	docs/regex.md Engine differential	The Pike VM, the bounded backtracker and the two-phase search agree on generated patterns over every short string
+REGEX-R3-dfa	docs/regex.md Engines	The forward and reverse lazy DFAs find the leftmost-first span with the Crystal dialect's assertions, build states on demand, charge every byte, state and clear, decide Unicode word assertions next to non-ASCII text, and give up to the Pike VM when the cache thrashes
+REGEX-R3-one-pass	docs/regex.md Engines	A one-pass DFA extracts captures in one pass for one-pass patterns and agrees with the other engines
+REGEX-R3-accelerators	docs/regex.md Literal acceleration	Prefix literals are extracted at compile time; memchr-style, rare-byte and packed (Teddy-style) prefilters skip ahead only while the forward DFA is in its start state, verify every candidate, and turn themselves off when candidates come densely
+REGEX-R3-cache-pool	docs/regex.md Cache memory	Lazy-DFA caches and Pike VM workspaces are leased from a CachePool with a process-wide cap (and a per-cache ceiling for DFA caches); idle members are evicted least recently used first, a search whose DFA cannot get memory runs on the Pike VM, a Pike workspace the pool cannot supply raises SearchLimitError, and a call that fails to start gives its lease back
+REGEX-R3-selection	docs/regex.md Engine selection	Each search takes the fastest correct path (literal search, lazy DFAs with prefilter, Pike VM) and every path enforces the work budget and the deadline
+REGEX-R3-complexity	docs/regex.md Search complexity	The accelerator, cache-thrash and iteration families stay within their envelopes and grow linearly
+REGEX-R3-conformance	docs/regex.md Conformance	The RE2, Rust and PCRE2 (valid UTF-8) corpora give identical results on every engine path
+REGEX-R3-differential	docs/regex.md Engine differential	Every engine path, accelerators on and off, agrees on generated patterns over every short string
+REGEX-R3-short-search	docs/regex.md Short searches	A single search allocates nothing for a pattern without groups, answers a short haystack that cannot match (too few bytes, no possible first byte) without an engine, leaves groups only the backtracker or the Pike VM can read to be read on first use (under the limits of the call that found the match), and takes and returns its lease with one atomic operation each
+REGEX-R3-first-search	docs/regex.md First searches	A program's first single searches over a short haystack run on the bounded backtracker, building no plan, lease or lazy-DFA cache, only where the backtracker's whole work fits the call's allowance, and find the same match and groups as the plan's engines
+REGEX-R3-required-bytes	docs/regex.md Required bytes	An Auto search (and a first search of a small program) runs no engine when the haystack from its offset lacks one of the ASCII bytes every match reads, charging each byte it scans, and an iteration call reads the haystack at most once per required byte
+REGEX-R3-short-match	docs/regex.md Short matches	A program whose matches span at most 512 bytes finds its match start with the anchored forward DFA while its reverse cache thrashes or when the reverse DFA gives up, and while its forward cache thrashes it is searched from each start (skipping starts too far before the next final byte); both agree with every other engine and stay linear
+REGEX-R3-reversed-classes	docs/regex.md Lazy DFA	Each class of more than one state is recorded, and once reverse DFA states grow wide the reverse DFA reads each class backward through its reversed, deterministic UTF-8 automaton, agreeing with every other engine
