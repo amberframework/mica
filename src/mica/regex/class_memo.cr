@@ -174,7 +174,7 @@ module Mica::Regex
         list_of_states, list_of_transitions = decode_prebuilt(state_count, transition_count, offset, ledger, meter)
         return finished_block(list_of_states, list_of_transitions, entry, ledger)
       end
-      ascii_variant_block?(bounds, ledger, meter)
+      ascii_variant_block?(bounds, ledger, meter) || folded_variant_block?(bounds, ledger, meter)
     end
 
     # The first code point past ASCII. A set's ASCII members are one-byte
@@ -211,9 +211,9 @@ module Mica::Regex
         next unless same_past_ascii?(bounds, prebuilt_ranges(set_id, range_count), negated, meter)
         list_of_states, list_of_transitions = decode_prebuilt(state_count, transition_count, offset, ledger, meter,
           spare_transitions: ascii_range_count(bounds))
-        replaced = replace_ascii_transitions(list_of_states, list_of_transitions, entry, bounds, ledger)
-        list_of_transitions.free
+        replaced = replace_ascii_transitions(list_of_states, list_of_transitions, entry, bounds)
         unless replaced
+          list_of_transitions.free
           list_of_states.free
           return nil
         end
@@ -231,6 +231,72 @@ module Mica::Regex
       Prebuilt::WRITTEN_RANGES[(-set_id - 1) * 2, range_count * 2]
     end
 
+    # The code points past ASCII that fold to an ASCII letter: U+017F LATIN
+    # SMALL LETTER LONG S (with `s`) and U+212A KELVIN SIGN (with `k`). A
+    # class of ASCII letters gains both under `IgnoreCase`.
+    FOLD_EXTRAS = {0x17F, 0x212A}
+
+    # Returns the block of a set whose members past ASCII are those of a
+    # static set of `PrebuiltFolded` together with `FOLD_EXTRAS`, as
+    # `(?i)[a-z\d\-]` is `\d`'s and `(?i)[a-z]` is the extras alone, else
+    # nil: the block generated for that union, its entry's ASCII
+    # transitions replaced by the set's as `ascii_variant_block?` replaces
+    # them (a spec checks the result equal to what `build` makes). The
+    # range count is compared first, so a set that is no such class reads
+    # no table.
+    private def self.folded_variant_block?(bounds : Array(Int32), ledger : AllocationLedger,
+                                           meter : Core::WorkMeter) : Block?
+      return nil if bounds.empty? || bounds[-1] < ASCII_END
+      ranges_past_ascii = range_count_past_ascii(bounds)
+      PrebuiltFolded::LIST_OF_ENTRIES.each do |prebuilt|
+        set_id, range_count, entry, state_count, transition_count, offset = prebuilt
+        next unless ranges_past_ascii == range_count
+        next unless same_past_ascii_with_fold_extras?(bounds, set_id, meter)
+        list_of_states, list_of_transitions = decode_prebuilt(state_count, transition_count, offset, ledger, meter,
+          spare_transitions: ascii_range_count(bounds), prebuilt_bytes: PrebuiltFolded::DATA.to_slice)
+        replaced = replace_ascii_transitions(list_of_states, list_of_transitions, entry, bounds)
+        unless replaced
+          list_of_transitions.free
+          list_of_states.free
+          return nil
+        end
+        return finished_block(list_of_states, replaced, entry, ledger)
+      end
+      nil
+    end
+
+    # True when the members of *bounds* past ASCII are those of static set
+    # *set_id* (no set when it is negative) and `FOLD_EXTRAS`. The
+    # generator keeps only sets the extras neither lie in nor touch, so
+    # the union's ranges are the set's with each extra among them.
+    private def self.same_past_ascii_with_fold_extras?(bounds : Array(Int32), set_id : Int32,
+                                                       meter : Core::WorkMeter) : Bool
+      static = set_id < 0 ? Slice(Int32).empty : Unicode.decoded_ranges(set_id)
+      meter.enforce { Core::Position.new(0_i64) } if meter.charge(static.size + 1)
+      index = 0
+      while bounds[index + 1] < ASCII_END
+        index += 2
+      end
+      static_index = 0
+      while static_index < static.size && static.unsafe_fetch(static_index + 1) < ASCII_END
+        static_index += 2
+      end
+      extra = 0
+      while static_index < static.size || extra < FOLD_EXTRAS.size
+        if extra < FOLD_EXTRAS.size && (static_index == static.size || FOLD_EXTRAS[extra] < static.unsafe_fetch(static_index))
+          first = last = FOLD_EXTRAS[extra]
+          extra += 1
+        else
+          first = Math.max(static.unsafe_fetch(static_index), ASCII_END)
+          last = static.unsafe_fetch(static_index + 1)
+          static_index += 2
+        end
+        return false unless index + 1 < bounds.size && Math.max(bounds[index], ASCII_END) == first && bounds[index + 1] == last
+        index += 2
+      end
+      index == bounds.size
+    end
+
     # True when *bounds* and the set of ranges *static* (its complement when
     # *negated*) have the same members past ASCII.
     private def self.same_past_ascii?(bounds : Array(Int32), static : Slice(Int32), negated : Bool,
@@ -241,11 +307,29 @@ module Mica::Regex
       while bounds[index + 1] < ASCII_END
         index += 2
       end
+      return same_tail?(bounds, index, static) unless negated
       each_range_past_ascii(static, negated) do |first, last|
         return false unless index + 1 < bounds.size && Math.max(bounds[index], ASCII_END) == first && bounds[index + 1] == last
         index += 2
       end
       index == bounds.size
+    end
+
+    # True when the ranges of *bounds* from *index* on (the first reaches
+    # past ASCII) are the ranges of *static* that reach past ASCII, each
+    # cut to start at `ASCII_END` at the earliest: the first range of each
+    # is compared cut, and the ranges after it, which lie wholly past
+    # ASCII, as memory.
+    private def self.same_tail?(bounds : Array(Int32), index : Int32, static : Slice(Int32)) : Bool
+      static_index = 0
+      while static_index < static.size && static.unsafe_fetch(static_index + 1) < ASCII_END
+        static_index += 2
+      end
+      count = bounds.size - index
+      return false unless count == static.size - static_index
+      return true if count == 0
+      return false unless Math.max(bounds.unsafe_fetch(index), ASCII_END) == Math.max(static.unsafe_fetch(static_index), ASCII_END)
+      (bounds.to_unsafe + index + 1).memcmp(static.to_unsafe + static_index + 1, count - 1) == 0
     end
 
     # Yields each range of *static* (of its complement when *negated*) that
@@ -273,14 +357,15 @@ module Mica::Regex
 
     # Replaces the ASCII transitions of the *entry* state with one transition
     # to the exit per ASCII range of *bounds*, in place, within the room
-    # `decode_prebuilt` left (`ascii_range_count`). Returns false, leaving
-    # the set to `build`, where the result would not be the block `build`
-    # makes: the entry's transitions do not end the list, one straddles
-    # `ASCII_END`, or the entry would keep a single transition (`build` makes
-    # that a `ByteRange` state).
+    # `decode_prebuilt` left (`ascii_range_count`): the entry's transitions
+    # past ASCII move to make the room, and nothing else is copied. Returns
+    # false, leaving the set to `build`, where the result would not be the
+    # block `build` makes: the entry's transitions do not end the list, one
+    # straddles `ASCII_END`, or the entry would keep a single transition
+    # (`build` makes that a `ByteRange` state).
     private def self.replace_ascii_transitions(list_of_states : OffHeapList(Program::State),
                                                list_of_transitions : OffHeapList(Program::Transition), entry : Int32,
-                                               bounds : Array(Int32), ledger : AllocationLedger) : OffHeapList(Program::Transition)?
+                                               bounds : Array(Int32)) : OffHeapList(Program::Transition)?
       state = list_of_states[entry]
       first = state.argument
       return nil unless state.kind.sparse? && first + state.alternate == list_of_transitions.size
@@ -289,23 +374,21 @@ module Mica::Regex
         past_ascii += 1
       end
       return nil if past_ascii < list_of_transitions.size && list_of_transitions[past_ascii].low < ASCII_END
-      # The entry's transitions end the list: the ones before it, then the
-      # set's ASCII ranges, then the entry's transitions past ASCII.
-      replaced = OffHeapList(Program::Transition).new(list_of_transitions.capacity)
-      first.times { |index| replaced << list_of_transitions.unsafe_fetch(index) }
-      index = 0
-      while index < bounds.size && bounds[index] < ASCII_END
-        replaced << Program::Transition.new(bounds[index].to_u8, Math.min(bounds[index + 1], ASCII_END - 1).to_u8, EXIT)
-        index += 2
+      ascii_ranges = ascii_range_count(bounds)
+      kept = list_of_transitions.size - past_ascii
+      count = ascii_ranges + kept
+      return nil if count < 2 || first + count > list_of_transitions.capacity
+      # The entry's transitions end the list: the ones before it stay, then
+      # come the set's ASCII ranges, then the entry's transitions past ASCII.
+      transitions = list_of_transitions.to_unsafe
+      (transitions + first + ascii_ranges).move_from(transitions + past_ascii, kept)
+      ascii_ranges.times do |index|
+        transitions[first + index] = Program::Transition.new(bounds.unsafe_fetch(index * 2).to_u8,
+          Math.min(bounds.unsafe_fetch(index * 2 + 1), ASCII_END - 1).to_u8, EXIT)
       end
-      (past_ascii...list_of_transitions.size).each { |position| replaced << list_of_transitions.unsafe_fetch(position) }
-      count = replaced.size - first
-      if count < 2
-        replaced.free
-        return nil
-      end
+      list_of_transitions.resize_within_capacity(first + count)
       list_of_states[entry] = state.copy_with(alternate: count)
-      replaced
+      list_of_transitions
     end
 
     # The ranges of *bounds* that reach past ASCII.
@@ -327,25 +410,29 @@ module Mica::Regex
     end
 
     # Decodes the states and transitions of the prebuilt block at *offset*
-    # in `Prebuilt::DATA`, with room for *spare_transitions* more
-    # transitions.
+    # in *prebuilt_bytes* (`Prebuilt::DATA` or `PrebuiltFolded::DATA`),
+    # with room for *spare_transitions* more transitions.
     private def self.decode_prebuilt(state_count : Int32, transition_count : Int32, offset : Int32,
                                      ledger : AllocationLedger, meter : Core::WorkMeter,
-                                     spare_transitions : Int32 = 0) : {OffHeapList(Program::State), OffHeapList(Program::Transition)}
+                                     spare_transitions : Int32 = 0,
+                                     prebuilt_bytes : Bytes = Prebuilt::DATA.to_slice) : {OffHeapList(Program::State), OffHeapList(Program::Transition)}
       meter.enforce { Core::Position.new(0_i64) } if meter.charge(state_count + transition_count)
-      prebuilt_bytes = Prebuilt::DATA.to_slice
       ledger.charge_array(state_count, sizeof(Program::State), "a class block", 0)
       ledger.charge_array(transition_count + spare_transitions, sizeof(Program::Transition), "a class block", 0)
+      # The block lies within the data (checked once here), so the loops read
+      # it through a pointer.
+      prebuilt_bytes[offset, state_count * PREBUILT_STATE_BYTES + transition_count * PREBUILT_TRANSITION_BYTES]
+      source = prebuilt_bytes.to_unsafe + offset
       list_of_states = OffHeapList(Program::State).new(state_count)
       state_count.times do
-        list_of_states << Program::State.new(Program::StateKind.new(prebuilt_bytes[offset]), prebuilt_bytes[offset + 1], prebuilt_bytes[offset + 2],
-          prebuilt_int(prebuilt_bytes, offset + 3), prebuilt_int(prebuilt_bytes, offset + 5), prebuilt_int(prebuilt_bytes, offset + 7))
-        offset += PREBUILT_STATE_BYTES
+        list_of_states << Program::State.new(Program::StateKind.new(source[0]), source[1], source[2],
+          prebuilt_int(source + 3), prebuilt_int(source + 5), prebuilt_int(source + 7))
+        source += PREBUILT_STATE_BYTES
       end
       list_of_transitions = OffHeapList(Program::Transition).new(transition_count + spare_transitions)
       transition_count.times do
-        list_of_transitions << Program::Transition.new(prebuilt_bytes[offset], prebuilt_bytes[offset + 1], prebuilt_int(prebuilt_bytes, offset + 2))
-        offset += PREBUILT_TRANSITION_BYTES
+        list_of_transitions << Program::Transition.new(source[0], source[1], prebuilt_int(source + 2))
+        source += PREBUILT_TRANSITION_BYTES
       end
       {list_of_states, list_of_transitions}
     end
@@ -394,8 +481,8 @@ module Mica::Regex
     end
 
     @[AlwaysInline]
-    private def self.prebuilt_int(prebuilt_bytes : Bytes, offset : Int32) : Int32
-      (prebuilt_bytes[offset].to_i16 | (prebuilt_bytes[offset + 1].to_i16 << 8)).to_i32
+    private def self.prebuilt_int(source : Pointer(UInt8)) : Int32
+      (source[0].to_u16 | (source[1].to_u16 << 8)).to_i16!.to_i32
     end
 
     # Builds the minimal automaton of *set*: the trie's nodes are emitted
@@ -481,12 +568,15 @@ module Mica::Regex
                                   ledger : AllocationLedger) : OffHeapList(Program::Transition)
       ledger.charge_array(list_of_transitions.size, sizeof(Program::Transition), "a shared class table", 0)
       table = OffHeapList(Program::Transition).copy_of(list_of_transitions)
+      transitions = table.to_unsafe
       list_of_states.each_with_index do |state, index|
         next unless state.kind.sparse?
+        # A state's transitions lie within the list it was built with.
+        raise IndexError.new unless 0 <= state.argument && state.argument.to_i64 + state.alternate <= table.size
         state.alternate.times do |offset|
-          position = state.argument + offset
-          target = table[position].target
-          table[position] = table[position].copy_with(target: target == EXIT ? Program::SHARED_EXIT : target - index)
+          transition = transitions + state.argument + offset
+          target = transition.value.target
+          transition.value = transition.value.copy_with(target: target == EXIT ? Program::SHARED_EXIT : target - index)
         end
       end
       table

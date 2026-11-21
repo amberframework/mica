@@ -166,6 +166,25 @@ module Mica::Regex
       end
     end
 
+    # The first code point past ASCII.
+    ASCII_END = 0x80
+
+    # Calls the block with every other member of ASCII *code_point*'s
+    # simple case folding orbit, as `each_fold_partner` does, and returns
+    # true when it has any, without reading the tables: a letter folds
+    # with its other case, `k` and `K` with U+212A KELVIN SIGN, `s` and `S`
+    # with U+017F LATIN SMALL LETTER LONG S, and no other ASCII code point
+    # folds (a spec checks each of the 128 against `FOLD_ORBITS`).
+    @[AlwaysInline]
+    def self.each_ascii_fold_partner(code_point : Int32, & : Int32 ->) : Bool
+      lower = code_point | 0x20
+      return false unless 0x61 <= lower <= 0x7A
+      yield code_point ^ 0x20
+      yield 0x212A if lower == 0x6B
+      yield 0x17F if lower == 0x73
+      true
+    end
+
     # Calls the block with each code point in *first*..*last* that has fold
     # partners, in order, and returns the number of such code points
     # visited (the work done).

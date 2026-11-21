@@ -63,4 +63,15 @@ describe Mica::Regex::Unicode do
       (members.size < Mica::Regex::Unicode::Tables::LARGEST_ORBIT).should be_true
     end
   end
+
+  it "folds each ASCII code point by arithmetic to the partners the orbits hold" do
+    Mica::Regex::Unicode::ASCII_END.times do |code_point|
+      from_orbits = [] of Int32
+      Mica::Regex::Unicode.each_fold_partner(code_point) { |partner| from_orbits << partner }
+      by_arithmetic = [] of Int32
+      folds = Mica::Regex::Unicode.each_ascii_fold_partner(code_point) { |partner| by_arithmetic << partner }
+      by_arithmetic.sort.should eq(from_orbits.sort)
+      folds.should eq(!from_orbits.empty?)
+    end
+  end
 end

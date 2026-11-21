@@ -79,6 +79,29 @@ module Mica::Regex
       list
     end
 
+    # Copies *values* into a new list (one memory copy).
+    def self.copy_of(values : OffHeapList(T)) : self
+      list = new(values.size)
+      list.concat(values)
+      list
+    end
+
+    # Appends every element of *values* (one memory copy).
+    def concat(values : OffHeapList(T)) : Nil
+      # A list appended to itself: its buffer may move when it grows.
+      appends_itself = values.to_unsafe == @buffer
+      reserve(Math.max(@size + values.size, @capacity * 2)) if @size + values.size > @capacity
+      (@buffer + @size).copy_from(appends_itself ? @buffer : values.to_unsafe, values.size)
+      @size += values.size
+    end
+
+    # Sets the size to *count*, which must be within the capacity: the
+    # caller has written the elements up to it through `to_unsafe`.
+    def resize_within_capacity(count : Int32) : Nil
+      raise IndexError.new("OffHeapList of capacity #{@capacity} cannot hold #{count} elements") unless 0 <= count <= @capacity
+      @size = count
+    end
+
     @[AlwaysInline]
     def unsafe_fetch(index : Int) : T
       @buffer[index]

@@ -10,7 +10,96 @@ private def compiled_program(source : String) : Mica::Regex::Program
   Mica::Regex::Expression.new(source, compile_limits: TRUSTED).program
 end
 
+# The ASCII bytes every match of *program* contains, found by walking
+# every state and transition (large classes included, which
+# `StartFilter.required_bytes` steps over): a byte is required when the
+# match state cannot be reached once the states that read only it are
+# removed.
+private def required_bytes_by_walking(program : Mica::Regex::Program) : Set(UInt8)
+  required = Set(UInt8).new
+  (0_u8..0x7F_u8).each do |byte|
+    visited = Set(Int32).new
+    list_of_pending = [program.start_state]
+    reached = false
+    while index = list_of_pending.pop?
+      next unless visited.add?(index)
+      state = program.state_at(index)
+      case state.kind
+      when .match?        then reached = true
+      when .split?        then list_of_pending << state.next_state << state.alternate
+      when .save?, .look? then list_of_pending << state.next_state
+      when .byte_range?
+        list_of_pending << state.next_state unless state.low == byte && state.high == byte
+      when .sparse?
+        state.alternate.times do |offset|
+          transition = program.transition_at(index, state, offset)
+          list_of_pending << transition.target unless transition.low == byte && transition.high == byte
+        end
+      end
+    end
+    required << byte unless reached
+  end
+  required
+end
+
+# The fewest bytes a match of *program* spans, found by relaxing every
+# edge until nothing changes.
+private def shortest_match_by_walking(program : Mica::Regex::Program) : Int32
+  distance = Array(Int32).new(program.state_count, Int32::MAX)
+  distance[program.start_state] = 0
+  shortest = Int32::MAX
+  changed = true
+  while changed
+    changed = false
+    program.state_count.times do |index|
+      here = distance[index]
+      next if here == Int32::MAX
+      state = program.state_at(index)
+      list_of_steps = [] of {Int32, Int32}
+      case state.kind
+      when .match?        then shortest = Math.min(shortest, here)
+      when .split?        then list_of_steps << {state.next_state, here} << {state.alternate, here}
+      when .save?, .look? then list_of_steps << {state.next_state, here}
+      when .byte_range?   then list_of_steps << {state.next_state, here + 1}
+      when .sparse?
+        state.alternate.times { |offset| list_of_steps << {program.transition_at(index, state, offset).target, here + 1} }
+      end
+      list_of_steps.each do |target, candidate|
+        next unless candidate < distance[target]
+        distance[target] = candidate
+        changed = true
+      end
+    end
+  end
+  shortest
+end
+
 describe "Mica::Regex required bytes" do
+  describe "StartFilter" do
+    it_satisfies "REGEX-R3-required-bytes", "steps over a large class to the bytes and the length a walk of its states finds" do
+      list_of_sources = {
+        "\\A[\\w+\\-.]+@[a-z\\d\\-]+(\\.[a-z\\d\\-]+)*\\.[a-z]+\\z", "\\w+@\\w+\\.com", "\\w:", "\\pL{2}z", "[^']+'",
+        "\\d+px", "(?:\\w|:):", "\\W;\\w", "x\\p{Lowercase}*y", "[\\x{80}-\\x{10FFFF}]+q", "\\w", "\\D?\\d", "a\\w{0,3}b|c\\wb",
+      }
+      {Mica::Regex::CompileOptions::None, Mica::Regex::CompileOptions::IgnoreCase}.each do |options|
+        list_of_sources.each do |source|
+          program = Mica::Regex::Expression.new(source, options, compile_limits: TRUSTED).program
+          walked = required_bytes_by_walking(program)
+          found = Mica::Regex::StartFilter.required_bytes(program)
+          # The analysis keeps at most `MAX_REQUIRED_BYTES` of the rarest
+          # `MAX_REQUIRED_CANDIDATES` single-byte states.
+          found.each { |byte| walked.should contain(byte) }
+          if walked.size <= Mica::Regex::StartFilter::MAX_REQUIRED_BYTES
+            found.to_set.should eq(walked)
+          else
+            found.size.should eq(Mica::Regex::StartFilter::MAX_REQUIRED_BYTES)
+          end
+          Mica::Regex::StartFilter.shortest_match(program).should eq(shortest_match_by_walking(program))
+        end
+      end
+    end
+  end
+
   describe "Program#list_of_required_bytes" do
     it_satisfies "REGEX-R3-required-bytes", "holds the rarest ASCII bytes every match reads" do
       compiled_program("(a|aa)*c").list_of_required_bytes.should eq(['c'.ord.to_u8])

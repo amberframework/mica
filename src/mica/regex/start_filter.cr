@@ -160,18 +160,32 @@ module Mica::Regex
     # state read looks at, at haystack byte *at*, before it reads them.
     def self.required_bytes(program : Program, meter : SearchMeter? = nil, at : Int32 = 0) : Array(UInt8)
       seen = StaticArray(Bool, 128).new(false)
-      list_of_candidates = [] of UInt8
+      # The candidates in the order the states hold them, kept sorted by
+      # rank as they arrive (ties in arrival order), on the stack: there
+      # are at most 128, and a program's first search pays for every
+      # allocation made here.
+      candidates = uninitialized StaticArray(UInt8, 128)
+      ranks = uninitialized StaticArray(Int32, 128)
+      candidate_count = 0
       program.each_distinct_state do |state, _|
         meter.charge(1, at) if meter
         next unless state.kind.byte_range? && state.low == state.high && state.low < 0x80
         next if seen[state.low]
         seen[state.low] = true
-        list_of_candidates << state.low
+        rank = Prefilter.rank(state.low)
+        place = candidate_count
+        while place > 0 && ranks[place - 1] > rank
+          candidates[place] = candidates[place - 1]
+          ranks[place] = ranks[place - 1]
+          place -= 1
+        end
+        candidates[place] = state.low
+        ranks[place] = rank
+        candidate_count += 1
       end
-      list_of_required = [] of UInt8
-      return list_of_required if list_of_candidates.empty?
-      list_of_candidates.sort_by! { |byte| Prefilter.rank(byte) }
-      list_of_candidates = list_of_candidates.first(MAX_REQUIRED_CANDIDATES)
+      list_of_required = Array(UInt8).new(MAX_REQUIRED_BYTES)
+      return list_of_required if candidate_count == 0
+      list_of_candidates = candidates.to_slice[0, Math.min(candidate_count, MAX_REQUIRED_CANDIDATES)]
       avoided = avoided_on_the_way_to_a_match(program, list_of_candidates, meter, at)
       list_of_candidates.each_with_index do |byte, index|
         next if avoided.bit(index) == 1
@@ -184,7 +198,7 @@ module Mica::Regex
     # The candidates (bit i for `list_of_candidates[i]`) that some path from
     # the start state to a match state avoids: no state on it reads only
     # that byte.
-    private def self.avoided_on_the_way_to_a_match(program : Program, list_of_candidates : Array(UInt8),
+    private def self.avoided_on_the_way_to_a_match(program : Program, list_of_candidates : Slice(UInt8),
                                                    meter : SearchMeter?, at : Int32) : UInt8
       blocking = StaticArray(UInt8, 128).new(0_u8)
       list_of_candidates.each_with_index { |byte, index| blocking[byte] = 1_u8 << index }
@@ -211,6 +225,10 @@ module Mica::Regex
         when .byte_range?
           mark(marks, list_of_pending, state.next_state, here & ~blocked_by(blocking, state.low, state.high))
         when .sparse?
+          if state.low != 0
+            mark(marks, list_of_pending, state.next_state, past_shared_class(program, index, state, here, blocking, meter, at))
+            next
+          end
           state.alternate.times do |offset|
             meter.charge(1, at) if meter
             transition = program.transition_at(index, state, offset)
@@ -219,6 +237,33 @@ module Mica::Regex
         end
       end
       at_match
+    end
+
+    # The candidates of *here* still avoided once the class that *state*
+    # (number *index*, a `Sparse` state reading a shared table) belongs to
+    # has been read, without walking the class's states.
+    #
+    # Such a state is part of a large class's automaton (`ClassMemo`):
+    # every path from it reads the rest of one UTF-8 sequence and leaves
+    # to the state's `next_state`, the same for every state of the copy.
+    # A transition that stays in the class starts a sequence of two bytes
+    # or more, none of them ASCII, so that path blocks no candidate and
+    # the exit keeps all of *here*; `\w` has some 350 states and 1,400
+    # transitions behind its entry, which the walk would read to learn
+    # the same. Otherwise every transition leaves the class at once, each
+    # blocking the candidate it alone reads.
+    private def self.past_shared_class(program : Program, index : Int32, state : Program::State, here : UInt8,
+                                       blocking : StaticArray(UInt8, 128), meter : SearchMeter?, at : Int32) : UInt8
+      avoided = 0_u8
+      state.alternate.times do |offset|
+        meter.charge(1, at) if meter
+        transition = program.transition_at(index, state, offset)
+        # A shared table's exit resolves to `next_state`; the states of
+        # the copy are numbered apart from it.
+        return here unless transition.target == state.next_state
+        avoided |= here & ~blocked_by(blocking, transition.low, transition.high)
+      end
+      avoided
     end
 
     # The candidate bits a step reading *low*..*high* blocks: the
@@ -285,12 +330,30 @@ module Mica::Regex
         when .byte_range?
           relax(distance, deque, state.next_state, here + 1, true)
         when .sparse?
+          # A large class that holds a one-byte character is left in one
+          # byte, and no path through its other states is shorter (see
+          # `past_shared_class`), so they are not read.
+          if state.low != 0 && leaves_shared_class_in_one_byte?(program, index, state)
+            relax(distance, deque, state.next_state, here + 1, true)
+            next
+          end
           state.alternate.times do |offset|
             relax(distance, deque, program.transition_at(index, state, offset).target, here + 1, true)
           end
         end
       end
       Int32::MAX
+    end
+
+    # True when a transition of *state* (number *index*, a `Sparse` state
+    # reading a shared table) leaves its class. At a class's entry the
+    # one-byte characters are the lowest ranges, so the first transition
+    # answers for a class that holds any.
+    private def self.leaves_shared_class_in_one_byte?(program : Program, index : Int32, state : Program::State) : Bool
+      state.alternate.times do |offset|
+        return true if program.transition_at(index, state, offset).target == state.next_state
+      end
+      false
     end
 
     # Lowers *target*'s distance to *candidate* when that is shorter, at the

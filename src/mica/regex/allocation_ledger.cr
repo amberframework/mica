@@ -90,6 +90,12 @@ module Mica::Regex
       @bytes = total
     end
 
+    # True when *count* more bytes fit under the limit, so charges that
+    # sum to *count* raise nothing.
+    def room_for?(count : Int64) : Bool
+      count >= 0 && count <= @limit - @bytes
+    end
+
     # Charges one object of *instance_bytes* (its `instance_sizeof`).
     def charge_object(instance_bytes : Int, what : String, offset : Int32) : Nil
       charge(AllocationLedger.granules(instance_bytes), what, offset)

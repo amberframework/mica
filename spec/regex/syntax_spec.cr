@@ -301,6 +301,36 @@ describe Mica::Regex::Syntax do
       error_of("\\p{L}", limits).as(Mica::Regex::CompileLimitError).limit_name.should eq("max_class_ranges")
     end
 
+    it_satisfies "REGEX-R1-limits", "unions a large set and a few literals to the same class, refusals included" do
+      word = Mica::Regex::Unicode.decoded_ranges(Mica::Regex::Unicode::Tables::SET_XWD).to_a
+      list_of_ranges = word.each_slice(2).map { |(low, high)| {low, high} }.to_a
+      expected = Mica::Regex::CodePointSet.new(list_of_ranges + [{0x2B, 0x2B}, {0x2D, 0x2E}])
+      {"[\\w+\\-.]", "[+\\-.\\w]", "(?i)[\\w+\\-.]"}.each do |source|
+        hir = Mica::Regex::Syntax.translate(source, dialect: :crystal, compile_limits: TRUSTED)
+        hir.root.as(Mica::Regex::Hir::Class).code_point_set.list_of_bounds.should eq(expected.list_of_bounds)
+      end
+      # A literal past the set's last range, and one inside a range.
+      hir = Mica::Regex::Syntax.translate("[\\d\\x{10FFFF}5]", dialect: :crystal, compile_limits: TRUSTED)
+      decimal_number = Mica::Regex::Unicode.lookup("nd") || raise "no Nd property"
+      digits = Mica::Regex::Unicode.decoded_ranges(decimal_number.set_id).to_a
+      hir.root.as(Mica::Regex::Hir::Class).code_point_set.list_of_bounds.should eq(digits + [0x10FFFF, 0x10FFFF])
+      # The union stops at the first range past the limit, as it does one
+      # range at a time.
+      refused = error_of("[\\w+\\-.]", Mica::Regex::CompileLimits.custom(max_class_ranges: 100)).as(Mica::Regex::CompileLimitError)
+      refused.limit_name.should eq("max_class_ranges")
+      (refused.message || "").should contain("A class of 102 ranges")
+      error_of("[\\w+\\-.]", Mica::Regex::CompileLimits.custom(max_class_ranges: expected.range_count)).should be_nil
+      error_of("[\\w+\\-.]", Mica::Regex::CompileLimits.custom(max_class_ranges: expected.range_count - 1))
+        .as(Mica::Regex::CompileLimitError).limit_name.should eq("max_class_ranges")
+      # Classes not lowered before: a kept set is charged to no ledger or meter.
+      error_of("[\\w+\\-.!]", Mica::Regex::CompileLimits.custom(max_class_ranges: 2_000, max_compile_bytes: 20_000)).as(Mica::Regex::CompileLimitError)
+        .limit_name.should eq("max_compile_bytes")
+      meter = Mica::Core::WorkMeter.new(Mica::Core::WorkBudget.new(operations_per_unit: 0, base_operations: 500))
+      expect_raises(Mica::WorkBudgetExceededError) do
+        Mica::Regex::Syntax.check("[\\w+\\-.#]", dialect: :crystal, compile_limits: TRUSTED, meter: meter)
+      end
+    end
+
     it_satisfies "REGEX-R1-limits", "holds case-folded literals to max_class_ranges like classes" do
       # (?i)k stands for [Kk\x{212A}]: three ranges.
       [1, 2].each do |max_class_ranges|

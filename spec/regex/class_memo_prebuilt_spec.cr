@@ -44,6 +44,13 @@ private def with_ascii_members(set : Mica::Regex::CodePointSet, ascii : Array(In
   Mica::Regex::CodePointSet.from_bounds(bounds)
 end
 
+# The set *source* (a single class) lowers to under `IgnoreCase`.
+private def folded_class_set(source : String) : Mica::Regex::CodePointSet
+  hir = Mica::Regex::Syntax.translate(source, dialect: :crystal, compile_limits: Mica::Regex::CompileLimits::TRUSTED_PATTERN,
+    options: Mica::Regex::CompileOptions::IgnoreCase)
+  hir.root.as(Mica::Regex::Hir::Class).code_point_set
+end
+
 describe Mica::Regex::ClassMemo do
   describe ".block_for" do
     it "decodes each prebuilt block to the block its set builds" do
@@ -118,6 +125,28 @@ describe Mica::Regex::ClassMemo do
         Mica::Regex::ClassMemo.memoized?(set).should be_true
         prebuilt = Mica::Regex::ClassMemo.prebuilt_block_of?(set) || raise "no prebuilt block for (?i)#{pattern}"
         prebuilt.should eq(Mica::Regex::ClassMemo.build_from_trie(set))
+      end
+    end
+
+    it "derives the block of a class of ASCII letters folded past ASCII" do
+      list_of_sources = {
+        "[a-z\\d\\-]", "[a-z\\d]", "[\\dks]", "[a-z]", "[a-z0-9_.\\-]", "[ks]", "[k-s]", "[\\d!-~]",
+      }
+      list_of_sources.each do |source|
+        set = folded_class_set(source)
+        set.list_of_bounds.should contain(0x212A)
+        derived = Mica::Regex::ClassMemo.prebuilt_block_of?(set) || raise "no derived block for (?i)#{source}"
+        derived.should eq(Mica::Regex::ClassMemo.build_from_trie(set))
+      end
+    end
+
+    it "finds no folded block for a set that lacks a fold extra or holds more" do
+      # Only the Kelvin sign, only the long s, and both with one more member.
+      {"[a-rt-z\\d]", "[a-jl-z\\d]", "[a-z\\d\\x{100}]", "[a-z\\x{2000}]"}.each do |source|
+        set = folded_class_set(source)
+        if derived = Mica::Regex::ClassMemo.prebuilt_block_of?(set)
+          raise "a derived block for (?i)#{source}: #{derived.list_of_states.size} states"
+        end
       end
     end
 
