@@ -106,31 +106,24 @@ module Mica::Regex
     end
 
     private def self.count_set_states(set : CodePointSet) : Int64
+      bounds_states(set.list_of_bounds)
+    end
+
+    # The class bound for the ranges in *list_of_bounds* (two entries per
+    # range: first, last), which has at least one range.
+    private def self.bounds_states(list_of_bounds : Slice(Int32)) : Int64
+      range_count = list_of_bounds.size // 2
       # An ASCII set is one one-byte sequence per range.
-      return add(set.range_count.to_i64, set.range_count.to_i64 - 1) if set.list_of_bounds[-1] < 0x80
+      return add(range_count.to_i64, range_count.to_i64 - 1) if list_of_bounds[-1] < 0x80
       sequences = 0_i64
       byte_ranges = 0_i64
-      set.each_range do |first, last|
-        count, bytes = Utf8Sequences.count(first, last)
+      range_count.times do |index|
+        count, bytes = Utf8Sequences.count(list_of_bounds[index * 2], list_of_bounds[index * 2 + 1])
         sequences += count
         byte_ranges += bytes
       end
       return 1_i64 if sequences == 0
       add(byte_ranges, sequences - 1)
-    end
-
-    # The class bound for a sorted list of code points, merging adjacent
-    # members into ranges as the class would.
-    def self.points_states(list_of_points : Array(Int32)) : Int64
-      list_of_bounds = [] of Int32
-      list_of_points.each do |code_point|
-        if list_of_bounds.size > 0 && code_point == list_of_bounds[-1] + 1
-          list_of_bounds[-1] = code_point
-        else
-          list_of_bounds << code_point << code_point
-        end
-      end
-      small_set_states(CodePointSet.from_bounds(list_of_bounds))
     end
 
     # The class bounds of `\N` (index 0) and of `.` matching newlines
@@ -143,8 +136,8 @@ module Mica::Regex
     # The bounds of `\R` (index 0) and of `\R` under `(*BSR_ANYCRLF)`
     # (index 1), computed once per process.
     private LINE_BREAK_STATES = {
-      add(add(2_i64, points_states([0x0A, 0x0B, 0x0C, 0x0D, 0x85, 0x2028, 0x2029])), 1_i64),
-      add(add(2_i64, points_states([0x0A, 0x0D])), 1_i64),
+      add(add(2_i64, bounds_states(Slice(Int32).literal(0x0A, 0x0D, 0x85, 0x85, 0x2028, 0x2029))), 1_i64),
+      add(add(2_i64, bounds_states(Slice(Int32).literal(0x0A, 0x0A, 0x0D, 0x0D))), 1_i64),
     }
 
     # The bound for *node*, whose *child_count* children's bounds are on

@@ -53,7 +53,7 @@ describe Mica::Regex::ClassMemo do
     it "finds no prebuilt block for a set that is not prebuilt" do
       set = Mica::Regex::CodePointSet.from_bounds([0x41, 0x5A, 0x400, 0x4FF])
       Mica::Regex::ClassMemo.prebuilt_block_of?(set).should be_nil
-      word = static_set(Mica::Regex::Unicode::Tables::SET_XWD, false).list_of_bounds.dup
+      word = static_set(Mica::Regex::Unicode::Tables::SET_XWD, false).list_of_bounds.to_a
       word[-1] -= 1
       Mica::Regex::ClassMemo.prebuilt_block_of?(Mica::Regex::CodePointSet.from_bounds(word)).should be_nil
     end

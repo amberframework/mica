@@ -6,7 +6,7 @@ module Mica::Regex::ClassMemo
   module Prebuilt
     # Static set id, complemented, range count, entry state, state
     # count, transition count and byte offset in `DATA` of each block.
-    LIST_OF_ENTRIES = [
+    LIST_OF_ENTRIES = {
       {395, false, 939, 350, 351, 1409, 0},    # \w
       {395, true, 940, 352, 353, 1344, 8795},  # \W
       {13, false, 72, 24, 25, 82, 17348},      # \d
@@ -15,7 +15,7 @@ module Mica::Regex::ClassMemo
       {31, true, 685, 301, 302, 1037, 25759},  # \PL
       {373, false, 677, 88, 89, 670, 32625},   # \p{Lowercase}
       {387, false, 660, 79, 80, 635, 36106},   # \p{Uppercase}
-    ] of {Int32, Bool, Int32, Int32, Int32, Int32, Int32}
+    }
 
     # The blocks' states (`PREBUILT_STATE_BYTES` each) then transitions
     # (`PREBUILT_TRANSITION_BYTES` each), 39366 bytes.

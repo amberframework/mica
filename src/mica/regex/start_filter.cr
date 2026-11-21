@@ -267,7 +267,8 @@ module Mica::Regex
     # a 0-1 breadth-first search, byte states weighing one and every other
     # state nothing. O(m) for m states (and their sparse transitions).
     def self.shortest_match(program : Program) : Int32
-      distance = Array(Int32).new(program.state_count, Int32::MAX)
+      # Scratch outside the collector's heap, for this call alone.
+      distance = OffHeapList(Int32).new(program.state_count, Int32::MAX)
       deque = Deque(Int32).new
       distance[program.start_state] = 0
       deque << program.start_state
@@ -291,11 +292,13 @@ module Mica::Regex
         end
       end
       Int32::MAX
+    ensure
+      distance.try(&.free)
     end
 
     # Lowers *target*'s distance to *candidate* when that is shorter, at the
     # front of *deque* for a free step and at the back for a byte.
-    private def self.relax(distance : Array(Int32), deque : Deque(Int32), target : Int32, candidate : Int32,
+    private def self.relax(distance : OffHeapList(Int32), deque : Deque(Int32), target : Int32, candidate : Int32,
                            byte : Bool) : Nil
       return unless candidate < distance[target]
       distance[target] = candidate

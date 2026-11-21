@@ -65,23 +65,24 @@ module Mica::Regex
       Word
       Xdigit
 
-      # Returns the set's ranges as `{first, last}` pairs.
-      def ranges : Array({Int32, Int32})
+      # Returns the set's range bounds, two entries per range (first,
+      # last), as static data: reading them allocates nothing.
+      def bounds : Slice(Int32)
         case self
-        in .alpha?  then [{0x41, 0x5A}, {0x61, 0x7A}]
-        in .lower?  then [{0x61, 0x7A}]
-        in .upper?  then [{0x41, 0x5A}]
-        in .alnum?  then [{0x30, 0x39}, {0x41, 0x5A}, {0x61, 0x7A}]
-        in .ascii?  then [{0x00, 0x7F}]
-        in .blank?  then [{0x09, 0x09}, {0x20, 0x20}]
-        in .cntrl?  then [{0x00, 0x1F}, {0x7F, 0x7F}]
-        in .digit?  then [{0x30, 0x39}]
-        in .graph?  then [{0x21, 0x7E}]
-        in .print?  then [{0x20, 0x7E}]
-        in .punct?  then [{0x21, 0x2F}, {0x3A, 0x40}, {0x5B, 0x60}, {0x7B, 0x7E}]
-        in .space?  then [{0x09, 0x0D}, {0x20, 0x20}]
-        in .word?   then [{0x30, 0x39}, {0x41, 0x5A}, {0x5F, 0x5F}, {0x61, 0x7A}]
-        in .xdigit? then [{0x30, 0x39}, {0x41, 0x46}, {0x61, 0x66}]
+        in .alpha?  then Slice(Int32).literal(0x41, 0x5A, 0x61, 0x7A)
+        in .lower?  then Slice(Int32).literal(0x61, 0x7A)
+        in .upper?  then Slice(Int32).literal(0x41, 0x5A)
+        in .alnum?  then Slice(Int32).literal(0x30, 0x39, 0x41, 0x5A, 0x61, 0x7A)
+        in .ascii?  then Slice(Int32).literal(0x00, 0x7F)
+        in .blank?  then Slice(Int32).literal(0x09, 0x09, 0x20, 0x20)
+        in .cntrl?  then Slice(Int32).literal(0x00, 0x1F, 0x7F, 0x7F)
+        in .digit?  then Slice(Int32).literal(0x30, 0x39)
+        in .graph?  then Slice(Int32).literal(0x21, 0x7E)
+        in .print?  then Slice(Int32).literal(0x20, 0x7E)
+        in .punct?  then Slice(Int32).literal(0x21, 0x2F, 0x3A, 0x40, 0x5B, 0x60, 0x7B, 0x7E)
+        in .space?  then Slice(Int32).literal(0x09, 0x0D, 0x20, 0x20)
+        in .word?   then Slice(Int32).literal(0x30, 0x39, 0x41, 0x5A, 0x5F, 0x5F, 0x61, 0x7A)
+        in .xdigit? then Slice(Int32).literal(0x30, 0x39, 0x41, 0x46, 0x61, 0x66)
         end
       end
     end
@@ -244,13 +245,14 @@ module Mica::Regex
 
     # Visits the tree under *root* in post-order without recursion, yielding
     # each node with its number of children; callers keep their own value
-    # stack and pop that many results. The work stack is allocated once with
-    # room for *node_count* entries (every node is on it at most once), and
-    # charged to *ledger* first.
+    # stack and pop that many results. The work stack has room for
+    # *node_count* entries (every node is on it at most once), is charged
+    # to *ledger* first, and sits in the caller's stack frame when the tree
+    # is small (see `ScratchStack`).
     def self.each_post_order(root : Node, node_count : Int32, ledger : AllocationLedger, & : Node, Int32 ->) : Nil
       capacity = Math.max(node_count, 1)
       ledger.charge_array(capacity, sizeof({Node, Bool}), "a traversal stack", root.offset)
-      stack = Array({Node, Bool}).new(capacity)
+      stack = Regex.scratch_stack({Node, Bool}, capacity)
       stack << {root, false}
       until stack.empty?
         node, expanded = stack.pop

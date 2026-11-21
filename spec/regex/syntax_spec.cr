@@ -214,8 +214,8 @@ describe Mica::Regex::Syntax do
         Mica::Regex::Syntax.translate(source, dialect: :crystal, compile_limits: TRUSTED).root.as(Mica::Regex::Hir::Class).code_point_set
       end
       folded.call("(?i)s").should be(folded.call("(?i)s"))
-      folded.call("(?i)s").list_of_bounds.should eq([0x53, 0x53, 0x73, 0x73, 0x17F, 0x17F])
-      folded.call("(?ir)s").list_of_bounds.should eq([0x53, 0x53, 0x73, 0x73])
+      folded.call("(?i)s").list_of_bounds.to_a.should eq([0x53, 0x53, 0x73, 0x73, 0x17F, 0x17F])
+      folded.call("(?ir)s").list_of_bounds.to_a.should eq([0x53, 0x53, 0x73, 0x73])
       folded.call("(?ir)s").should_not be(folded.call("(?i)s"))
       Mica::Regex::Syntax.translate("(?i)1", dialect: :crystal, compile_limits: TRUSTED).root.should be_a(Mica::Regex::Hir::Literal)
     end
@@ -372,12 +372,12 @@ describe Mica::Regex::Syntax do
       again_class = again.root.as(Mica::Regex::Hir::Concatenation).list_of_children[1].as(Mica::Regex::Hir::Class)
       again_class.code_point_set.should be(first_class.code_point_set)
       # 0-9, A-F, a-f, K, k and the Kelvin sign: folding is applied.
-      first_class.code_point_set.list_of_bounds.should eq([0x30, 0x39, 0x41, 0x46, 0x4B, 0x4B, 0x61, 0x66, 0x6B, 0x6B, 0x212A, 0x212A])
+      first_class.code_point_set.list_of_bounds.to_a.should eq([0x30, 0x39, 0x41, 0x46, 0x4B, 0x4B, 0x61, 0x66, 0x6B, 0x6B, 0x212A, 0x212A])
       # Case-sensitive, restricted and negated forms are kept apart.
       plain = Mica::Regex::Syntax.translate("[0-9a-fk]", dialect: :crystal, compile_limits: TRUSTED).root.as(Mica::Regex::Hir::Class)
       plain.code_point_set.range_count.should eq(3)
       restricted = Mica::Regex::Syntax.translate("(*CASELESS_RESTRICT)(?i)[0-9a-fk]", dialect: :crystal, compile_limits: TRUSTED)
-      restricted.root.as(Mica::Regex::Hir::Class).code_point_set.list_of_bounds.should_not contain(0x212A)
+      restricted.root.as(Mica::Regex::Hir::Class).code_point_set.list_of_bounds.to_a.should_not contain(0x212A)
       negated = Mica::Regex::Syntax.translate("(?i)[^0-9a-fk]", dialect: :crystal, compile_limits: TRUSTED).root.as(Mica::Regex::Hir::Class)
       negated.code_point_set.list_of_bounds.first(2).should eq([0, 0x2F])
       # A smaller max_class_ranges still refuses the kept set.

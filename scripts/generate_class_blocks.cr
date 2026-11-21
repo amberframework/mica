@@ -58,7 +58,7 @@ Mica::Regex::LIST_OF_PREBUILT_CLASSES.each do |pattern|
   char_class = ast.root.as?(Mica::Regex::Ast::CharClass) || abort "#{pattern} is not a single class"
   ledger = Mica::Regex::AllocationLedger.new(Int64::MAX)
   set = Mica::Regex::ClassLowering.lower(char_class, :crystal, limits, ledger, Mica::Core::WorkMeter.new)
-  bounds = set.list_of_bounds
+  bounds = set.list_of_bounds.to_a
   next unless seen.add?(bounds)
   abort "#{pattern} is not memoized" unless Mica::Regex::ClassMemo.memoized?(set)
   set_id, negated = Mica::Regex.static_set_of(bounds) || abort "#{pattern} is not a static set"
@@ -90,9 +90,9 @@ puts "  # Class blocks built ahead of time (see `ClassMemo.block_for`)."
 puts "  module Prebuilt"
 puts "    # Static set id, complemented, range count, entry state, state"
 puts "    # count, transition count and byte offset in `DATA` of each block."
-puts "    LIST_OF_ENTRIES = ["
+puts "    LIST_OF_ENTRIES = {"
 entries.each { |entry| puts entry }
-puts "    ] of {Int32, Bool, Int32, Int32, Int32, Int32, Int32}"
+puts "    }"
 puts
 puts "    # The blocks' states (`PREBUILT_STATE_BYTES` each) then transitions"
 puts "    # (`PREBUILT_TRANSITION_BYTES` each), #{bytes.size} bytes."

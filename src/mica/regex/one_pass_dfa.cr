@@ -33,18 +33,24 @@ module Mica::Regex
 
     @byte_classes : ByteClasses
     @class_count : Int32
-    @table : Array(Int32)
-    @match_edges : Array(Int32)
-    @list_of_edges : Array(Edge)
+    # The tables are lists outside the collector's heap (the DFA of a
+    # class over all of Unicode, `\d`, has tens of kilobytes of cells, and
+    # a program's first search builds it), freed in `finalize`.
+    @table : OffHeapList(Int32)
+    @match_edges : OffHeapList(Int32)
+    @list_of_edges : OffHeapList(Edge)
 
     # Builds the one-pass DFA of *program*, or returns nil when the program
     # is not one-pass or is too large.
     def self.build(program : Program, byte_classes : ByteClasses) : OnePassDFA?
       return nil if program.state_count > MAX_STATES || program.slot_count > MAX_SLOTS
-      builder = OnePassBuilder.new(program, byte_classes)
-      one_pass = builder.build
-      builder.release
-      one_pass
+      # The builder serves this call alone, from its stack frame.
+      builder = Regex.stack_object(OnePassBuilder, program, byte_classes)
+      begin
+        builder.build
+      ensure
+        builder.release
+      end
     end
 
     # The most cells the one-pass table of *program* can have: one row of
@@ -65,7 +71,7 @@ module Mica::Regex
     # the edge has assertions or slots and `STEP_REACHES_MATCH` when the
     # target state has a match path; -1 where there is no edge. One load
     # per byte then finds the next state.
-    @steps : Array(Int32)
+    @steps : OffHeapList(Int32)
 
     private STEP_TAKES_EDGE    = 1
     private STEP_REACHES_MATCH = 2
@@ -82,35 +88,55 @@ module Mica::Regex
     # Per state: true when every ASCII byte leads back to the state with no
     # assertion and no slot (`(?s:.)*`, `[^\n]*`), so `captures` steps over
     # a run of ASCII bytes there without reading the table.
-    @list_of_ascii_loops : Array(Bool)
+    @list_of_ascii_loops : OffHeapList(Bool)
 
     # Per state: true when its match path has no assertion, so it holds
     # wherever the state is reached, and some byte leads back to it with no
     # edge work; `search` then reads a run of bytes
     # that lead back to the state with no edge work (`.*`) in one loop,
     # and the match ends where the run does.
-    @list_of_match_loops : Array(Bool)
+    @list_of_match_loops : OffHeapList(Bool)
     # True when some state is a match loop (see `search`).
     @any_match_loop : Bool
 
-    def initialize(@byte_classes : ByteClasses, @table : Array(Int32), @match_edges : Array(Int32),
-                   @list_of_edges : Array(Edge), @list_of_shadows : Array(Bool))
+    # The DFA takes the four lists over: it alone frees them.
+    def initialize(@byte_classes : ByteClasses, @table : OffHeapList(Int32), @match_edges : OffHeapList(Int32),
+                   @list_of_edges : OffHeapList(Edge), @list_of_shadows : OffHeapList(Bool))
       @class_count = @byte_classes.class_count
       @decisive = @list_of_shadows.none?
-      @steps = @table.map do |index|
-        next -1 if index < 0
+      @steps = OffHeapList(Int32).new(@table.size)
+      @list_of_ascii_loops = OffHeapList(Bool).new(@match_edges.size)
+      @list_of_match_loops = OffHeapList(Bool).new(@match_edges.size)
+      @any_match_loop = false
+      @table.each do |index|
+        if index < 0
+          @steps << -1
+          next
+        end
         edge = @list_of_edges[index]
         step = (edge.target * @class_count) << 2
         step |= STEP_TAKES_EDGE if edge.looks != 0 || edge.slots != 0
         step |= STEP_REACHES_MATCH if matches_before_end?(edge.target)
-        step
+        @steps << step
       end
-      @list_of_ascii_loops = Array(Bool).new(@match_edges.size) { |state| ascii_loop?(state) }
-      @list_of_match_loops = Array(Bool).new(@match_edges.size) do |state|
-        index = @match_edges[state]
-        index >= 0 && @list_of_edges[index].looks == 0 && loops_without_edge_work?(state)
+      @match_edges.size.times { |state| @list_of_ascii_loops << ascii_loop?(state) }
+      @match_edges.each_with_index do |index, state|
+        @list_of_match_loops << (index >= 0 && @list_of_edges[index].looks == 0 && loops_without_edge_work?(state))
       end
       @any_match_loop = @list_of_match_loops.any?
+    end
+
+    # Returns the tables to libc. The DFA refers to nothing that refers
+    # back to it (its byte classes hold only bytes), so the collector
+    # finalizes it once the plan that built it is gone.
+    def finalize
+      @table.free
+      @match_edges.free
+      @list_of_edges.free
+      @list_of_shadows.free
+      @steps.free
+      @list_of_ascii_loops.free
+      @list_of_match_loops.free
     end
 
     # :nodoc:
@@ -118,7 +144,7 @@ module Mica::Regex
     # source: the steps, the edge index per cell, the match edge per state,
     # the edges and the ASCII-loop flag per state.
     def static_parts : {Array(Int32), Array(Int32), Array(Int32), Array(Edge), Array(Bool)}
-      {@steps, @table, @match_edges, @list_of_edges, @list_of_ascii_loops}
+      {@steps.to_a, @table.to_a, @match_edges.to_a, @list_of_edges.to_a, @list_of_ascii_loops.to_a}
     end
 
     # True when at least `WIDE_LOOP_BYTES` of the byte values lead from
@@ -531,17 +557,24 @@ module Mica::Regex
   class OnePassBuilder
     record Path, state : Int32, slots : UInt64, looks : UInt32
 
-    @dfa_state_of : Array(Int32)
-    @list_of_roots = [] of Int32
-    @table = [] of Int32
-    @match_edges = [] of Int32
-    @list_of_edges = [] of OnePassDFA::Edge
+    # Every list is outside the collector's heap: the scratch ones
+    # (`@dfa_state_of`, `@list_of_roots`, `@seen`, `@stack`) are freed by
+    # `release`, and so are the DFA's four unless `build` handed them to a
+    # DFA.
+    @dfa_state_of : OffHeapList(Int32)
+    @list_of_roots = OffHeapList(Int32).new
+    @table : OffHeapList(Int32)
+    @match_edges = OffHeapList(Int32).new
+    @list_of_edges = OffHeapList(OnePassDFA::Edge).new
     # Per DFA state: true when it left out a byte path ranked below its
     # match path.
-    @list_of_shadows = [] of Bool
-    @seen : Array(Int32)
+    @list_of_shadows = OffHeapList(Bool).new
+    @seen : OffHeapList(Int32)
     # The paths `explore` has still to follow, reused for every DFA state.
-    @stack = [] of Path
+    @stack = OffHeapList(Path).new
+    # True once `build` has handed the table, the match edges, the edges
+    # and the shadows to a DFA.
+    @handed_over = false
 
     # A table of at most this many cells (one row per NFA state, the most
     # the DFA can have) counts as small (see `OnePassDFA.small?`).
@@ -554,22 +587,25 @@ module Mica::Regex
     FIRST_TABLE_ROWS = 4
 
     def initialize(@program : Program, @byte_classes : ByteClasses)
-      @dfa_state_of = Array(Int32).new(@program.state_count, -1)
-      @seen = Array(Int32).new(@program.state_count, -1)
+      @dfa_state_of = OffHeapList(Int32).new(@program.state_count, -1)
+      @seen = OffHeapList(Int32).new(@program.state_count, -1)
       rows = Math.min(@program.state_count, FIRST_TABLE_ROWS)
-      @table = Array(Int32).new(rows * @byte_classes.class_count)
+      @table = OffHeapList(Int32).new(rows * @byte_classes.class_count)
     end
 
-    # Frees the builder and the lists the DFA does not keep, once `build`
-    # is done: the builder alone holds them, and never shifts them.
+    # Frees the lists the DFA does not keep, once `build` is done: the
+    # builder alone holds them.
     def release : Nil
-      {@dfa_state_of, @seen, @list_of_roots}.each do |list|
-        GC.free(list.to_unsafe.as(Void*))
-        GC.free(list.as(Void*))
+      @dfa_state_of.free
+      @seen.free
+      @list_of_roots.free
+      @stack.free
+      unless @handed_over
+        @table.free
+        @match_edges.free
+        @list_of_edges.free
+        @list_of_shadows.free
       end
-      GC.free(@stack.to_unsafe.as(Void*))
-      GC.free(@stack.as(Void*))
-      GC.free(self.as(Void*))
     end
 
     def build : OnePassDFA?
@@ -579,20 +615,14 @@ module Mica::Regex
         return nil unless explore(index)
         index += 1
       end
-      OnePassDFA.new(@byte_classes, OnePassBuilder.trimmed(@table), @match_edges, OnePassBuilder.trimmed(@list_of_edges),
-        @list_of_shadows)
-    end
-
-    # *list*, or (when growing it left more than half its room unused) a
-    # copy of exactly its size, the list freed: the DFA keeps it for as long
-    # as the program lives. The builder alone holds the list, and never
-    # shifts it.
-    protected def self.trimmed(list : Array(T)) : Array(T) forall T
-      return list if list.size * 2 >= list.remaining_capacity
-      exact = Array(T).new(list.size)
-      exact.concat(list)
-      GC.free(list.to_unsafe.as(Void*))
-      exact
+      # The DFA keeps the lists for as long as the program lives, so they
+      # give back the room that growing left unused.
+      @table.trim
+      @match_edges.trim
+      @list_of_edges.trim
+      @list_of_shadows.trim
+      @handed_over = true
+      OnePassDFA.new(@byte_classes, @table, @match_edges, @list_of_edges, @list_of_shadows)
     end
 
     private def root_of(nfa_state : Int32) : Int32
@@ -608,28 +638,22 @@ module Mica::Regex
     end
 
     # Appends a row of empty cells to the table, growing it by half (at
-    # least `FIRST_TABLE_ROWS` rows) rather than doubling it: the table
-    # is kept for as long as the program lives, so its spare room would
-    # stay allocated too. The list it outgrew is freed (the builder alone
-    # holds it, and never shifts it).
+    # least `FIRST_TABLE_ROWS` rows) rather than doubling it, so a large
+    # table is never copied into twice its room.
     private def add_table_row : Nil
       class_count = @byte_classes.class_count
-      if @table.size + class_count > @table.remaining_capacity
-        grown = Array(Int32).new(@table.size + Math.max(FIRST_TABLE_ROWS * class_count, @table.size // 2))
-        grown.concat(@table)
-        GC.free(@table.to_unsafe.as(Void*))
-        @table = grown
+      if @table.size + class_count > @table.capacity
+        @table.reserve(@table.size + Math.max(FIRST_TABLE_ROWS * class_count, @table.size // 2))
       end
       class_count.times { @table << -1 }
     end
 
     private def explore(dfa_state : Int32) : Bool
       class_count = @byte_classes.class_count
-      stack = @stack
-      stack.clear
-      stack << Path.new(@list_of_roots[dfa_state], 0_u64, 0_u32)
+      @stack.clear
+      @stack << Path.new(@list_of_roots[dfa_state], 0_u64, 0_u32)
       matched = false
-      while path = stack.pop?
+      while path = @stack.pop?
         current = path.state
         slots = path.slots
         looks = path.looks
@@ -661,7 +685,7 @@ module Mica::Regex
             @list_of_edges << OnePassDFA::Edge.new(-1, slots, looks)
             break
           when .split?
-            stack << Path.new(state.alternate, slots, looks)
+            @stack << Path.new(state.alternate, slots, looks)
             current = state.next_state
           when .save?
             slots |= 1_u64 << state.argument

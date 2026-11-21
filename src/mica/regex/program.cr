@@ -225,8 +225,8 @@ module Mica::Regex
 
     # The shared tables and runs of every program that has none (never
     # changed: a compiler that adds one starts a list of its own).
-    NO_SHARED_TABLES = [] of OffHeapList(Transition)
-    NO_RUNS          = [] of ClassRun
+    Regex.static_constant(NO_SHARED_TABLES, Array(OffHeapList(Transition)))
+    Regex.static_constant(NO_RUNS, Array(ClassRun))
 
     # The target in a shared table that stands for the state's
     # `next_state` (the state after the class).

@@ -41,8 +41,9 @@ module Mica::Regex
     # `COMPILE_WORK_BUDGET`).
     def self.check(pattern : String | Bytes, *, dialect : Dialect, compile_limits : CompileLimits,
                    options : CompileOptions = CompileOptions::None, meter : Core::WorkMeter? = nil) : Report
-      work_meter = meter || Core::WorkMeter.new(COMPILE_WORK_BUDGET)
-      ledger = new_ledger(compile_limits, meter)
+      work_meter = meter || Regex.stack_object(Core::WorkMeter, COMPILE_WORK_BUDGET)
+      ledger = Regex.stack_object(AllocationLedger, compile_limits.max_compile_bytes)
+      charge_fixed_objects(ledger, meter)
       parsed, estimate = front_half(pattern, dialect, compile_limits, options, ledger, work_meter)
       Translator.translate(parsed, dialect, ledger, work_meter)
       Report.new(parsed.capture_count, parsed.list_of_group_names, estimate, ledger.bytes, work_meter.operations)
@@ -64,8 +65,9 @@ module Mica::Regex
     # Parses, checks and translates *pattern*, returning its `Hir`.
     def self.translate(pattern : String | Bytes, *, dialect : Dialect, compile_limits : CompileLimits,
                        options : CompileOptions = CompileOptions::None, meter : Core::WorkMeter? = nil) : Hir::Pattern
-      work_meter = meter || Core::WorkMeter.new(COMPILE_WORK_BUDGET)
-      ledger = new_ledger(compile_limits, meter)
+      work_meter = meter || Regex.stack_object(Core::WorkMeter, COMPILE_WORK_BUDGET)
+      ledger = Regex.stack_object(AllocationLedger, compile_limits.max_compile_bytes)
+      charge_fixed_objects(ledger, meter)
       parsed, _estimate = front_half(pattern, dialect, compile_limits, options, ledger, work_meter)
       Translator.translate(parsed, dialect, ledger, work_meter)
     ensure
@@ -79,8 +81,9 @@ module Mica::Regex
     # meter's units. `Expression.new` is the public way in.
     def self.compile(pattern : String | Bytes, *, dialect : Dialect, compile_limits : CompileLimits,
                      options : CompileOptions = CompileOptions::None, meter : Core::WorkMeter? = nil) : Program
-      work_meter = meter || Core::WorkMeter.new(COMPILE_WORK_BUDGET)
-      ledger = new_ledger(compile_limits, meter)
+      work_meter = meter || Regex.stack_object(Core::WorkMeter, COMPILE_WORK_BUDGET)
+      ledger = Regex.stack_object(AllocationLedger, compile_limits.max_compile_bytes)
+      charge_fixed_objects(ledger, meter)
       parsed, estimate = front_half(pattern, dialect, compile_limits, options, ledger, work_meter)
       hir = Translator.translate(parsed, dialect, ledger, work_meter)
       work_meter.add_units(estimate)
@@ -94,9 +97,11 @@ module Mica::Regex
     # Parses *pattern* into its syntax tree (no class lowering or preflight).
     def self.parse(pattern : String | Bytes, *, dialect : Dialect, compile_limits : CompileLimits,
                    options : CompileOptions = CompileOptions::None, meter : Core::WorkMeter? = nil) : Ast::Pattern
-      work_meter = meter || Core::WorkMeter.new(COMPILE_WORK_BUDGET)
-      ledger = new_ledger(compile_limits, meter)
-      parser_for(pattern, dialect, compile_limits, options, ledger, work_meter).parse
+      work_meter = meter || Regex.stack_object(Core::WorkMeter, COMPILE_WORK_BUDGET)
+      ledger = Regex.stack_object(AllocationLedger, compile_limits.max_compile_bytes)
+      charge_fixed_objects(ledger, meter)
+      parser = Regex.stack_object(Parser, pattern_bytes(pattern, dialect, work_meter), options, compile_limits, ledger, work_meter)
+      parser.parse
     ensure
       ledger.try(&.free_owned_blocks)
     end
@@ -104,29 +109,31 @@ module Mica::Regex
     private def self.front_half(pattern : String | Bytes, dialect : Dialect, limits : CompileLimits,
                                 options : CompileOptions, ledger : AllocationLedger,
                                 meter : Core::WorkMeter) : {Ast::Pattern, Int64}
-      parsed = parser_for(pattern, dialect, limits, options, ledger, meter).parse
+      parser = Regex.stack_object(Parser, pattern_bytes(pattern, dialect, meter), options, limits, ledger, meter)
+      parsed = parser.parse
       estimate = Preflight.estimate(parsed, dialect, limits, ledger, meter, lower_sets: true)
       meter.enforce_deadline { Core::Position.new(0_i64) }
       {parsed, estimate}
     end
 
-    private def self.parser_for(pattern : String | Bytes, dialect : Dialect, limits : CompileLimits,
-                                options : CompileOptions, ledger : AllocationLedger, meter : Core::WorkMeter) : Parser
+    # The bytes of *pattern* for *dialect*'s parser, once the deadline has
+    # been checked.
+    private def self.pattern_bytes(pattern : String | Bytes, dialect : Dialect, meter : Core::WorkMeter) : Bytes
       unless dialect.parser_available?
         milestone = dialect.ecma262? ? "R6" : "R7"
         raise ArgumentError.new("The #{dialect} dialect's parser arrives in milestone #{milestone}")
       end
       bytes = pattern.is_a?(String) ? pattern.to_slice : pattern
       meter.enforce_deadline { Core::Position.new(0_i64) }
-      Parser.new(bytes, options, limits, ledger, meter)
+      bytes
     end
 
-    # The ledger for one compilation, charged first with the fixed objects
-    # every compilation allocates: the ledger, a meter when the caller gave
+    # Charges *ledger* with the fixed objects every compilation makes
+    # (whether in the collector's heap or in the compiling call's stack
+    # frame): the ledger, a meter when the caller gave
     # none, the parser with its two lists and three name tables, the
     # parsed pattern and the report.
-    private def self.new_ledger(limits : CompileLimits, meter : Core::WorkMeter?) : AllocationLedger
-      ledger = AllocationLedger.new(limits.max_compile_bytes)
+    private def self.charge_fixed_objects(ledger : AllocationLedger, meter : Core::WorkMeter?) : Nil
       fixed = AllocationLedger.granules(instance_sizeof(AllocationLedger)) +
               AllocationLedger.granules(instance_sizeof(Parser)) +
               AllocationLedger.granules(instance_sizeof(Array(Int32))) * 2 +
@@ -135,7 +142,6 @@ module Mica::Regex
               AllocationLedger.granules(sizeof(Report))
       fixed += AllocationLedger.granules(instance_sizeof(Core::WorkMeter)) unless meter
       ledger.charge(fixed, "a compilation", 0)
-      ledger
     end
   end
 end

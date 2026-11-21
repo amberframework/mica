@@ -27,8 +27,10 @@ module Mica::Regex
     def initialize(@list_of_edges : Array({Int32, UInt8, UInt8, Int32}), @node_count : Int32)
     end
 
-    @@mutex = Mutex.new
-    @@memo = {} of Array(Int32) => ReversedClass?
+    # Static objects, so a program that never reverses a class pays nothing
+    # for them.
+    Regex.static_object(mutex, Mutex)
+    Regex.static_object(memo, Hash(Array(Int32), ReversedClass?))
 
     # Returns the reversed class of *block*, or nil when the block is not a
     # plain class (only byte states, every edge inside the block or to its
