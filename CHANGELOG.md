@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+Adds Inflate (compression milestone Z1): `Mica::Deflate`, `Mica::Zlib` and
+`Mica::Gzip` decode raw DEFLATE (RFC 1951), zlib (RFC 1950) and gzip
+(RFC 1952) in pure Crystal.
+
+- One-shot (`decode`) and streaming (`Reader`, an `IO`) APIs. Every decode
+  takes required `limits:` (`DecodeLimits`: `max_output_bytes`,
+  `max_ratio`, `max_window_bytes`, `max_members`, `max_metadata_bytes` and
+  the work budget; presets `REQUEST_BODY`, `HTTP_CLIENT_RESPONSE`,
+  `WEBSOCKET_MESSAGE`, `TRUSTED_ASSET`) and a required `timeout:`. Limits
+  raise `DecodeLimitError` before the bytes they guard are written.
+- Stored, fixed and dynamic blocks; zlib FCHECK, CINFO, preset
+  dictionaries and Adler-32; gzip multi-member, FEXTRA, FNAME, FCOMMENT,
+  FHCRC, CRC-32 and ISIZE. Malformed streams raise
+  `MalformedStreamError`, `TruncatedStreamError` or `ChecksumError` with
+  the byte offset.
+- Differential fuzzing against system zlib, a zip-bomb and malformed
+  corpus, a port of zlib's `test/infcover.c`, and benchmarks against zlib
+  (`bench/deflate/`).
+- A Mica Inflate program links no libz (`scripts/check_linkage.sh`).
+
 ## 0.2.0 (2026-11-21)
 
 Adds `Mica::Regex`, a regular expression engine in pure Crystal. XML parsing

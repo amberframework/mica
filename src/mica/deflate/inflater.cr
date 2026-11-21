@@ -65,6 +65,9 @@ module Mica::Deflate
     # Order of the code length code lengths (RFC 1951, section 3.2.7).
     CODE_LENGTH_ORDER = StaticArray[16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15]
 
+    # The gzip magic bytes (RFC 1952, section 2.3.1).
+    MAGIC = StaticArray[0x1F_u8, 0x8B_u8]
+
     # For a back reference closer than 8 bytes: the smallest multiple of
     # its distance that is at least 8.
     PATTERN_PERIODS = StaticArray[0, 8, 8, 9, 8, 10, 12, 14]
@@ -464,10 +467,13 @@ module Mica::Deflate
     end
 
     private def read_gzip_header : Nil
-      start_member
       header = Bytes.new(10)
-      header.size.times { |index| header[index] = read_byte("the gzip header") }
-      malformed("Not a gzip member (bad magic bytes)") unless header[0] == 0x1F && header[1] == 0x8B
+      header.size.times do |index|
+        header[index] = read_byte("the gzip header")
+        next unless index < 2 && header[index] != MAGIC[index]
+        malformed(@members > 0 ? "Trailing data after the last gzip member" : "Not a gzip stream (bad magic bytes)")
+      end
+      start_member
       malformed("Unknown compression method #{header[2]} in the gzip header") unless header[2] == 8
       flags = header[3]
       malformed("Reserved gzip header flags are set") unless flags & 0xE0 == 0
