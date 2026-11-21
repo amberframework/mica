@@ -1,0 +1,39 @@
+# The Inflate benchmark corpus (bench/deflate). Tab-separated; see docs/benchmarks.md, "Inflate".
+# kind	corpus	path	bytes	sha256	source	pinned_on	hash_source
+#   archive  a download; bench/deflate/scripts/fetch_corpus.rb verifies it and extracts it under bench/data/deflate/<corpus>/
+#   file     a file of that archive, a benchmark input; verified after extraction
+#   http     a real HTTP response body committed under bench/deflate/corpus/http/ (pieces in corpus/http/parts.tsv)
+#   (json_1m.json, measured in the 2026-11-21 run, is not committed: the GitHub issue bodies it joins quote
+#   40-hex git commit hashes that the pre-commit secret scanner reads as keys. It is kept with the run evidence.)
+archive	canterbury	cantrbry.tar.gz	739071	f140e8a5b73d3f53198555a63bfb827889394a42f20825df33c810c3d5e3f8fb	https://corpus.canterbury.ac.nz/resources/cantrbry.tar.gz	2026-11-21	sha256 of the first download (2026-11-21); the corpus site publishes no hash; cross-check: alice29.txt, asyoulik.txt, lcet10.txt and plrabn12.txt extracted from it have the git blob hashes of the same files in github.com/google/snappy testdata at tag 1.2.2
+archive	silesia	silesia.zip	68182744	0626e25f45c0ffb5dc801f13b7c82a3b75743ba07e3a71835a41e3d9f63c77af	https://sun.aei.polsl.pl/~sdeor/corpus/silesia.zip	2026-11-21	sha256 of the first download (2026-11-21); the corpus site publishes no hash; cross-check: all 12 extracted files have the sha256 of the same files unzipped from github.com/MiloszKrajewski/SilesiaCorpus at commit 3f3fa2cdbbb3795c903b74e774acb309e1360337
+file	canterbury	alice29.txt	152089	7467306ee0feed4971260f3c87421154a05be571d944e9cb021a5713700c38f0	cantrbry.tar.gz	2026-11-21	extracted from the verified cantrbry.tar.gz; equals the google/snappy 1.2.2 testdata copy
+file	canterbury	asyoulik.txt	125179	eaa3526fe53859f34ecdf255712f9ecf0b2c903451d4755b2edaa2e2599cb0fc	cantrbry.tar.gz	2026-11-21	extracted from the verified cantrbry.tar.gz; equals the google/snappy 1.2.2 testdata copy
+file	canterbury	cp.html	24603	e0cd21cef5b6c4069461e949be100080c3ce887de6f1dd8626c480528efaaf61	cantrbry.tar.gz	2026-11-21	extracted from the verified cantrbry.tar.gz
+file	canterbury	fields.c	11150	85d73e354cc50cec76cb5a50537cf8dc035f8cbb8480f9e1cbe2f7d6c23393c7	cantrbry.tar.gz	2026-11-21	extracted from the verified cantrbry.tar.gz
+file	canterbury	grammar.lsp	3721	1b0805dfc0ae706b35aac2bb4e15f02485efd24dda5dbd29de7b2f84d1a88c15	cantrbry.tar.gz	2026-11-21	extracted from the verified cantrbry.tar.gz
+file	canterbury	kennedy.xls	1029744	9af47239ca29dfe20e633f80bbbb9a4cc9783d0803d7b2b5626f42e4c3790420	cantrbry.tar.gz	2026-11-21	extracted from the verified cantrbry.tar.gz
+file	canterbury	lcet10.txt	426754	5314ba1dbb03f471df88bec6cd120a938ef60d0fd3511c5c1dce61bf7463245f	cantrbry.tar.gz	2026-11-21	extracted from the verified cantrbry.tar.gz; equals the google/snappy 1.2.2 testdata copy
+file	canterbury	plrabn12.txt	481861	07e2e0b461af78c7c647cb53dab39de560198e16f799b4516eccf0fbd69f764c	cantrbry.tar.gz	2026-11-21	extracted from the verified cantrbry.tar.gz; equals the google/snappy 1.2.2 testdata copy
+file	canterbury	ptt5	513216	0ec3a75089bb52342813496b17e51377bc9eba3cb519a444d67025354841d650	cantrbry.tar.gz	2026-11-21	extracted from the verified cantrbry.tar.gz
+file	canterbury	sum	38240	ee5733cd76ecc2f9d8ff156adc3c02a7a851051dcf43a2d56ff4ee4ff606bdb3	cantrbry.tar.gz	2026-11-21	extracted from the verified cantrbry.tar.gz
+file	canterbury	xargs.1	4227	c58aeb5d2d1e12751d47e7412b45784405fc30a5671b03d480fa05776e183619	cantrbry.tar.gz	2026-11-21	extracted from the verified cantrbry.tar.gz
+file	silesia	dickens	10192446	b24c37886142e11d0ee687db6ab06f936207aa7f2ea1fd1d9a36763c7a507e6a	silesia.zip	2026-11-21	extracted from the verified silesia.zip; equals the MiloszKrajewski/SilesiaCorpus copy
+file	silesia	mozilla	51220480	657fc3764b0c75ac9de9623125705831ebbfbe08fed248df73bc2dc66e2a963b	silesia.zip	2026-11-21	extracted from the verified silesia.zip; equals the MiloszKrajewski/SilesiaCorpus copy
+file	silesia	mr	9970564	68637ed52e3e4860174ed2dc0840ac77d5f1a60abbcb13770d5754e3774d53e6	silesia.zip	2026-11-21	extracted from the verified silesia.zip; equals the MiloszKrajewski/SilesiaCorpus copy
+file	silesia	nci	33553445	fc63a31770947b8c2062d3b19ca94c00485a232bb91b502021948fee983e1635	silesia.zip	2026-11-21	extracted from the verified silesia.zip; equals the MiloszKrajewski/SilesiaCorpus copy
+file	silesia	ooffice	6152192	e7ee013880d34dd5208283d0d3d91b07f442e067454276095ded14f322a656eb	silesia.zip	2026-11-21	extracted from the verified silesia.zip; equals the MiloszKrajewski/SilesiaCorpus copy
+file	silesia	osdb	10085684	60f027179302ca3ad87c58ac90b6be72ec23588aaa7a3b7fe8ecc0f11def3fa3	silesia.zip	2026-11-21	extracted from the verified silesia.zip; equals the MiloszKrajewski/SilesiaCorpus copy
+file	silesia	reymont	6627202	0eac0114a3dfe6e2ee1f345a0f79d653cb26c3bc9f0ed79238af4933422b7578	silesia.zip	2026-11-21	extracted from the verified silesia.zip; equals the MiloszKrajewski/SilesiaCorpus copy
+file	silesia	samba	21606400	93ba07bc44d8267789c1d911992f40b089ffa2140b4a160fac11ccae9a40e7b2	silesia.zip	2026-11-21	extracted from the verified silesia.zip; equals the MiloszKrajewski/SilesiaCorpus copy
+file	silesia	sao	7251944	c2d0ea2cc59d4c21b7fe43a71499342a00cbe530a1d5548770e91ecd6214adcc	silesia.zip	2026-11-21	extracted from the verified silesia.zip; equals the MiloszKrajewski/SilesiaCorpus copy
+file	silesia	webster	41458703	6a68f69b26daf09f9dd84f7470368553194a0b294fcfa80f1604efb11143a383	silesia.zip	2026-11-21	extracted from the verified silesia.zip; equals the MiloszKrajewski/SilesiaCorpus copy
+file	silesia	x-ray	8474240	7de9fce1405dc44ae5e6813ed21cd5751e761bd4265655a005d39b9685d1c9ad	silesia.zip	2026-11-21	extracted from the verified silesia.zip; equals the MiloszKrajewski/SilesiaCorpus copy
+file	silesia	xml	5345280	0e82e54e695c1938e4193448022543845b33020c8be6bf3bf3ead2224903e08c	silesia.zip	2026-11-21	extracted from the verified silesia.zip; equals the MiloszKrajewski/SilesiaCorpus copy
+http	http	html_1k.html	577	25ddf2c883e0d1958ea971d279a7e4f0fd446724ee3db7db19dadabd4a62e484	https://example.com/	2026-11-21	sha256 of the body as captured
+http	http	html_16k.html	13142	e3ccc0e3c7d32d34798637dc99e0bd1249f4cfbf3378ba10deff9e116e709177	https://agentc.consulting/heatpilot	2026-11-21	sha256 of the body as captured
+http	http	html_64k.html	65085	65074a8d04e1c58a401ebdd8a8e0f098e76ef6bd74bce8ff59335156254a2ccd	https://agentc.consulting/resources	2026-11-21	sha256 of the body as captured
+http	http	html_1m.html	1059557	4f0ebe595afe10fb56636212409bc9a4de42121c66fac8a68014566e74176c17	9 responses joined, see corpus/http/parts.tsv	2026-11-21	sha256 of the body as captured
+http	http	json_1k.json	1282	0e9ebff7792460fb667b81345b5565efe9e74f924bf903d42c5fb1b6271ca123	https://api.github.com/repos/crystal-lang/crystal/tags?per_page=3	2026-11-21	sha256 of the body as captured
+http	http	json_16k.json	14995	b1ab4aa3b61e2ab356da4d477300e7970fb331220377bbbddc831c158d3b2d4c	https://api.github.com/repos/amberframework/amber/issues?state=all&per_page=2	2026-11-21	sha256 of the body as captured
+http	http	json_64k.json	74750	cfa6b09b2c89043e6150a1ed598eccfc1b07543f372b54a2d63447eb8c19b11f	https://api.github.com/repos/crystal-lang/crystal/releases?per_page=3	2026-11-21	sha256 of the body as captured

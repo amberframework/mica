@@ -1,0 +1,17 @@
+# The responses behind each committed HTTP body, in the order their bytes are joined.
+# file	part	bytes	sha256	captured_on	url
+html_1k.html	1	577	25ddf2c883e0d1958ea971d279a7e4f0fd446724ee3db7db19dadabd4a62e484	2026-11-21	https://example.com/
+html_16k.html	1	13142	e3ccc0e3c7d32d34798637dc99e0bd1249f4cfbf3378ba10deff9e116e709177	2026-11-21	https://agentc.consulting/heatpilot
+html_64k.html	1	65085	65074a8d04e1c58a401ebdd8a8e0f098e76ef6bd74bce8ff59335156254a2ccd	2026-11-21	https://agentc.consulting/resources
+html_1m.html	1	99955	418a26e8651ac9885305f1d85275455beb47a6b1d73a81a94d58d30777b1a06c	2026-11-21	https://agentc.consulting/agent-enhanced-development/chapter-1/why-agents-need-conventions
+html_1m.html	2	139283	eff07beeb19653a0bef664b4436a0d08ed6a6f252caa3599871b84b47dd30057	2026-11-21	https://agentc.consulting/agent-enhanced-development/chapter-2/vibe-coding-as-a-squad
+html_1m.html	3	95263	46ed2410678890955d7e89e80630823deb4cfbd7e70da9216e035b763a88f17b	2026-11-21	https://agentc.consulting/agent-enhanced-development/chapter-3/naming-that-reads-like-a-sentence
+html_1m.html	4	146688	82ab365c456e65c1ffe2aff8d4be4b0666558210bc02156ea83ec0eed626a640	2026-11-21	https://agentc.consulting/agent-enhanced-development/chapter-4/process-managers
+html_1m.html	5	102334	60cc88234a27c2d4c72a500fe6f7743f971c1ee25515b36fa17c4cba0fe6c6f7	2026-11-21	https://agentc.consulting/agent-enhanced-development/chapter-5/feature-stories
+html_1m.html	6	108762	0e6d4d3e9f4e465cbf142624ce3550da02bcaa302e1615a33483ff9b12a107c8	2026-11-21	https://agentc.consulting/agent-enhanced-development/chapter-6/edit-level-style
+html_1m.html	7	137485	184ee071c2c11bd596cd5ea83a51b4f441539a9ad81156d744c42420f07fb045	2026-11-21	https://agentc.consulting/agent-enhanced-development/chapter-7/control-flow
+html_1m.html	8	119431	4fadbc4a292fbccefdc36880e53bcdc8fd59d277f886fbc1c38a93e0dd3a2760	2026-11-21	https://agentc.consulting/agent-enhanced-development/chapter-8/how-the-workflow-runs
+html_1m.html	9	110356	2370f430227181d42ca8e3a1ba2fdd603aa4649b31b054e3dcb676b76c0fe9fa	2026-11-21	https://agentc.consulting/agent-enhanced-development/chapter-9/adopt-it-in-ten-minutes
+json_1k.json	1	1282	0e9ebff7792460fb667b81345b5565efe9e74f924bf903d42c5fb1b6271ca123	2026-11-21	https://api.github.com/repos/crystal-lang/crystal/tags?per_page=3
+json_16k.json	1	14995	b1ab4aa3b61e2ab356da4d477300e7970fb331220377bbbddc831c158d3b2d4c	2026-11-21	https://api.github.com/repos/amberframework/amber/issues?state=all&per_page=2
+json_64k.json	1	74750	cfa6b09b2c89043e6150a1ed598eccfc1b07543f372b54a2d63447eb8c19b11f	2026-11-21	https://api.github.com/repos/crystal-lang/crystal/releases?per_page=3
