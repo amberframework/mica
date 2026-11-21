@@ -5,13 +5,16 @@
 # the collector's heap and the off-heap bytes counted so far. A leak shows
 # as malloc bytes in use that keep climbing; freed memory read again shows
 # as a crash or a wrong match (every search is checked against the first
-# answer for its pattern).
+# answer for its pattern). The resident set size and the default
+# `CachePool`'s member count show the collector-side bookkeeping: both level
+# off once the pool prunes the references of collected leases.
 #
 #   crystal-alpha build --release bench/regex/off_heap/soak.cr -o soak
 #   ./soak [rounds] [report_every] [threads]
 #
 # Each line: round, malloc bytes in use, malloc blocks in use, GC heap
-# bytes, GC free bytes, off-heap bytes allocated so far.
+# bytes, GC free bytes, off-heap bytes allocated so far, resident set
+# size in KiB, default CachePool member count.
 require "../../../src/mica"
 
 {% if flag?(:darwin) %}
@@ -111,11 +114,17 @@ module OffHeapSoak
     {% end %}
   end
 
+  def self.resident_kib : Int64
+    output = IO::Memory.new
+    Process.run("ps", ["-o", "rss=", "-p", Process.pid.to_s], output: output)
+    output.to_s.strip.to_i64
+  end
+
   def self.report(round : Int32) : Nil
     3.times { GC.collect }
     bytes, blocks = malloc_in_use
     stats = GC.stats
-    STDOUT.puts "#{round} #{bytes} #{blocks} #{stats.heap_size} #{stats.free_bytes} #{Mica::Regex::OffHeap.allocated_bytes}"
+    STDOUT.puts "#{round} #{bytes} #{blocks} #{stats.heap_size} #{stats.free_bytes} #{Mica::Regex::OffHeap.allocated_bytes} #{resident_kib} #{Mica::Regex::CachePool.default.member_count}"
     STDOUT.flush
   end
 
