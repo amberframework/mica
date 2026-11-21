@@ -52,8 +52,16 @@ module Mica::Deflate
     SLACK = 16
     # The streaming output buffer: the window plus two runs.
     STREAM_BUFFER = WINDOW + 2 * RUN_BYTES
-    # The streaming input buffer.
-    INPUT_BUFFER = 65_536
+    # The streaming input buffer grows from `INITIAL_INPUT` to this as
+    # reads fill it.
+    INPUT_BUFFER  = 65_536
+    INITIAL_INPUT =  4_096
+    # Output buffers start this small and double as output arrives, so a
+    # small body costs a small allocation.
+    INITIAL_OUTPUT = 4_096
+    # A buffer grows (or, streaming at full size, slides) when less room
+    # than this remains.
+    LOW_ROOM = 1_024
     # Bytes kept before the read position when the input buffer is
     # compacted, so the decoder can hand back up to 7 bytes it loaded into
     # its bit buffer but did not use.
@@ -126,10 +134,10 @@ module Mica::Deflate
     @copy_distance : Int32 = 0
     @literal_length_table : UInt32*
     @distance_table : UInt32*
-    @dynamic_literal_length : Slice(UInt32)
-    @dynamic_distance : Slice(UInt32)
-    @code_length_table : Slice(UInt32)
-    @lengths : Slice(UInt8)
+    # The dynamic tables (literal/length, distance, code length, one
+    # allocation), made at the first dynamic block; null before.
+    @dynamic_tables : UInt32* = Pointer(UInt32).null
+    @lengths = StaticArray(UInt8, 320).new(0_u8)
 
     # Checks.
     @members : Int32 = 0
@@ -147,24 +155,23 @@ module Mica::Deflate
         @input = source.to_unsafe
         @in_end = source.size
         @io_done = true
-        initial = source.size.to_i64 * 4 + RUN_BYTES
+        # A first guess from the input size; the buffer doubles as output
+        # arrives, never past max_output_bytes (plus a dictionary).
+        initial = source.size.to_i64 * 4
+        initial = INITIAL_OUTPUT.to_i64 if initial < INITIAL_OUTPUT
         initial = @limits.max_output_bytes + WINDOW if initial > @limits.max_output_bytes + WINDOW
         @out_capacity = initial.to_i32
       else
         @one_shot = false
         @io = source
-        buffer = Bytes.new(INPUT_BUFFER)
+        buffer = Bytes.new(GC.malloc_atomic(INITIAL_INPUT).as(UInt8*), INITIAL_INPUT)
         @input_buffer = buffer
         @input = buffer.to_unsafe
-        @out_capacity = STREAM_BUFFER
+        @out_capacity = INITIAL_OUTPUT
       end
       @out = GC.malloc_atomic((@out_capacity + SLACK).to_u64).as(UInt8*)
-      @dynamic_literal_length = Slice(UInt32).new(HuffmanTable::LITERAL_LENGTH_ENTRIES, HuffmanTable::INVALID)
-      @dynamic_distance = Slice(UInt32).new(HuffmanTable::DISTANCE_ENTRIES, HuffmanTable::INVALID)
-      @code_length_table = Slice(UInt32).new(HuffmanTable::CODE_LENGTH_ENTRIES, HuffmanTable::INVALID)
-      @lengths = Slice(UInt8).new(320, 0_u8)
-      @literal_length_table = @dynamic_literal_length.to_unsafe
-      @distance_table = @dynamic_distance.to_unsafe
+      @literal_length_table = HuffmanTable::FIXED_LITERAL_LENGTH.to_unsafe
+      @distance_table = HuffmanTable::FIXED_DISTANCE.to_unsafe
       @meter.enforce_deadline("while decoding") { position }
     end
 
@@ -257,6 +264,12 @@ module Mica::Deflate
         @in_pos -= keep_from
         @in_end = kept
       end
+      if @in_end == buffer.size && buffer.size < INPUT_BUFFER
+        grown = Bytes.new(GC.malloc_atomic(buffer.size.to_u64 * 2).as(UInt8*), buffer.size * 2)
+        grown.copy_from(buffer.to_unsafe, @in_end)
+        @input_buffer = buffer = grown
+        @input = grown.to_unsafe
+      end
       count = io.read(buffer[@in_end, buffer.size - @in_end])
       @meter.enforce_deadline("while decoding") { position }
       if count == 0
@@ -333,10 +346,12 @@ module Mica::Deflate
     # and whether that index is `max_output_bytes` (so that writing past it
     # must raise rather than wait for room).
     private def prepare_output : {Int32, Bool}
-      if @one_shot
-        grow_output if @out_capacity - @out_pos < RUN_BYTES
-      elsif @out_pos > WINDOW + RUN_BYTES
-        slide_window
+      if @out_capacity - @out_pos < LOW_ROOM
+        if @one_shot || @out_capacity < STREAM_BUFFER
+          grow_output
+        else
+          slide_window
+        end
       end
       space = @out_capacity - @out_pos
       space = RUN_BYTES if space > RUN_BYTES
@@ -349,9 +364,8 @@ module Mica::Deflate
     end
 
     private def grow_output : Nil
-      ceiling = @limits.max_output_bytes + @result_start
+      ceiling = @one_shot ? @limits.max_output_bytes + @result_start : STREAM_BUFFER.to_i64
       wanted = @out_capacity.to_i64 * 2
-      wanted = @out_pos.to_i64 + RUN_BYTES if wanted < @out_pos.to_i64 + RUN_BYTES
       wanted = ceiling if wanted > ceiling
       wanted = Int32::MAX.to_i64 - SLACK if wanted > Int32::MAX - SLACK
       return if wanted <= @out_capacity
@@ -458,6 +472,14 @@ module Mica::Deflate
     private def load_dictionary(dictionary : Bytes) : Nil
       used = dictionary.size > WINDOW ? dictionary[dictionary.size - WINDOW, WINDOW] : dictionary
       charge_work(used.size)
+      needed = @out_pos + used.size + LOW_ROOM
+      if needed > @out_capacity
+        # Room for the history plus a first run; the streaming buffer
+        # (160 KiB) always has it.
+        needed = STREAM_BUFFER if !@one_shot && needed < STREAM_BUFFER
+        @out = GC.realloc(@out.as(Void*), (needed + SLACK).to_u64).as(UInt8*)
+        @out_capacity = needed
+      end
       (@out + @out_pos).copy_from(used.to_unsafe, used.size)
       @lowest_reference = @out_pos
       @out_pos += used.size
@@ -580,8 +602,8 @@ module Mica::Deflate
         @phase = Phase::Huffman
       when 2
         read_dynamic_tables
-        @literal_length_table = @dynamic_literal_length.to_unsafe
-        @distance_table = @dynamic_distance.to_unsafe
+        @literal_length_table = @dynamic_tables
+        @distance_table = @dynamic_tables + HuffmanTable::LITERAL_LENGTH_ENTRIES
         @phase = Phase::Huffman
       else
         malformed("Invalid block type 3")
@@ -595,16 +617,25 @@ module Mica::Deflate
       if literal_count > 286 || distance_count > 30
         malformed("Too many length or distance symbols (HLIT #{literal_count}, HDIST #{distance_count})")
       end
+      if @dynamic_tables.null?
+        entries = HuffmanTable::LITERAL_LENGTH_ENTRIES + HuffmanTable::DISTANCE_ENTRIES +
+                  HuffmanTable::CODE_LENGTH_ENTRIES
+        # Not cleared: the builder writes every entry a lookup can reach.
+        @dynamic_tables = GC.malloc_atomic(entries.to_u64 * sizeof(UInt32)).as(UInt32*)
+      end
+      literal_length_table = @dynamic_tables
+      distance_table = literal_length_table + HuffmanTable::LITERAL_LENGTH_ENTRIES
+      code_length_table = distance_table + HuffmanTable::DISTANCE_ENTRIES
       lengths = @lengths.to_unsafe
       19.times { |index| lengths[index] = 0_u8 }
       code_length_count.times do |index|
         lengths[CODE_LENGTH_ORDER[index]] = take_bits(3, "the code length code").to_u8
       end
-      build_table(@code_length_table, lengths, 19, HuffmanTable::CODE_LENGTH_ROOT,
+      build_table(code_length_table, HuffmanTable::CODE_LENGTH_ENTRIES, lengths, 19, HuffmanTable::CODE_LENGTH_ROOT,
         HuffmanTable::Alphabet::CodeLength, "code length")
 
       total = literal_count + distance_count
-      table = @code_length_table.to_unsafe
+      table = code_length_table
       index = 0
       while index < total
         entry = decode_careful(table, CODE_LENGTH_MASK, HuffmanTable::CODE_LENGTH_ROOT, "the code lengths")
@@ -632,16 +663,16 @@ module Mica::Deflate
         end
       end
       malformed("The literal/length code has no end-of-block code") if lengths[256] == 0
-      build_table(@dynamic_literal_length, lengths, literal_count, HuffmanTable::LITERAL_LENGTH_ROOT,
+      build_table(literal_length_table, HuffmanTable::LITERAL_LENGTH_ENTRIES, lengths, literal_count, HuffmanTable::LITERAL_LENGTH_ROOT,
         HuffmanTable::Alphabet::LiteralLength, "literal/length")
-      build_table(@dynamic_distance, lengths + literal_count, distance_count, HuffmanTable::DISTANCE_ROOT,
+      build_table(distance_table, HuffmanTable::DISTANCE_ENTRIES, lengths + literal_count, distance_count, HuffmanTable::DISTANCE_ROOT,
         HuffmanTable::Alphabet::Distance, "distance")
       charge_work(total)
     end
 
-    private def build_table(table : Slice(UInt32), lengths : UInt8*, count : Int32, root : Int32,
+    private def build_table(table : UInt32*, capacity : Int32, lengths : UInt8*, count : Int32, root : Int32,
                             alphabet : HuffmanTable::Alphabet, name : String) : Nil
-      problem, written = HuffmanTable.build(table.to_unsafe, table.size, lengths, count, root, alphabet)
+      problem, written = HuffmanTable.build(table, capacity, lengths, count, root, alphabet)
       case problem
       in .oversubscribed? then malformed("Oversubscribed #{name} code")
       in .incomplete?     then malformed("Incomplete #{name} code")
