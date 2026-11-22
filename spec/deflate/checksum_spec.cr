@@ -48,6 +48,23 @@ describe Mica::Deflate::CRC32 do
     crc32(ones).should eq(DeflateConformance.reference_crc32(ones))
   end
 
+  it_satisfies "DEFLATE-1952-8-crc32-algorithm", "matches the table formula around every size where the folding changes" do
+    # Three streams of 256 or 4,096 bytes are folded side by side where the
+    # CPU has CRC-32 instructions: sizes around 768 and 12,288 bytes and
+    # their multiples take every path through the fold and its tails.
+    data = DeflateConformance.sample_bytes(40_000, 11_u32)
+    sizes = [0, 1, 7, 8, 9, 31, 32, 33, 255, 256, 257]
+    [768, 1_536, 2_304, 12_288, 13_056, 24_576, 36_864].each { |edge| (edge - 9..edge + 9).each { |size| sizes << size } }
+    sizes << 40_000 - 3
+    sizes.each do |size|
+      3.times do |offset|
+        piece = data[offset, size]
+        Mica::Deflate::CRC32.update(0x1234_5678_u32, piece).should eq(
+          Mica::Deflate::CRC32.update_with_tables(0x1234_5678_u32, piece.to_unsafe, piece.size))
+      end
+    end
+  end
+
   it_satisfies "DEFLATE-API-checksums", "continues a running CRC-32 across every split of the input" do
     data = DeflateConformance.sample_bytes(200, 3_u32)
     whole = DeflateConformance.reference_crc32(data)

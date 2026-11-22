@@ -14,7 +14,7 @@ module Mica::Zlib
   # the stream's DICTID). Nothing may follow the Adler-32.
   def self.decode(input : Bytes, *, limits : Deflate::DecodeLimits, timeout : Time::Span?,
                   dictionary : Bytes? = nil) : Bytes
-    Deflate::Inflater.new(input, Deflate::Format::Zlib, limits, timeout, dictionary).decode_all
+    Deflate::Inflater.decode(input, Deflate::Format::Zlib, limits, timeout, dictionary)
   end
 
   # Encodes *input* as a zlib stream in one call, at *level* 0 to 9. With

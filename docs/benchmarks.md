@@ -234,9 +234,32 @@ engine, and what `Mica::Regex.static` gains), kept for re-measuring:
 ## Inflate (`bench/deflate/`)
 
 Mica's Inflate decoders (`Mica::Deflate`, `Mica::Zlib`, `Mica::Gzip`)
-against the system zlib. The interim bar for Z1 is a geometric-mean speed
-of at least 0.5x zlib's one-shot inflate, with zlib allocating its output
-buffer per decode as Mica's one-shot API does; the report states the gap.
+against the system zlib. The bar is a speed of at least 1.0x zlib's on
+every case, one-shot and streaming, with zlib allocating its output buffer
+per decode as Mica's one-shot API does; the report lists every case below
+it.
+
+**Measured** (2026-11-22, Apple M1 Max, zlib 1.2.12, 93 cases, 8 to 12
+interleaved rounds on a shared machine with a 1-minute load average
+between 26 and 152):
+
+| | Geometric mean, Mica / zlib (95% interval) | Cases at or above 1.0x | Cases whose whole interval is at or above 1.0x |
+|---|---|---|---|
+| One-shot | 1.023 (1.016 to 1.029) | 54 of 93 | 27 of 93 |
+| Streaming, 64 KiB buffers | 1.082 (1.075 to 1.090) | 84 of 93 | 70 of 93 |
+
+The Z1 run of 2026-11-21 measured 0.691 one-shot and 0.548 streaming. The
+bar is met at the geometric mean and not on every case. The one-shot cases
+furthest below it are 0.79 to 0.92: `ptt5`, the 64 KiB and 1 MiB JSON
+bodies, the 1 MiB HTML body and `kennedy.xls`. For an output over 160 KiB
+zlib's engine is handed the output size and Mica's decoder is not; and in
+a process that only decodes 0.5 to 1 MiB outputs, the collector ran once
+per decode for Mica against once every two or three decodes for zlib at
+the same bytes allocated. With a 256 MiB initial heap for both engines the
+one-shot geometric mean over the Canterbury and HTTP cases is 1.094 and
+the lowest case 0.91. The same cases built with a newer compiler measured
+1.041 one-shot and 1.063 streaming at the geometric mean, with the 64 KiB
+JSON body at 1.29 to 1.49 one-shot and the 1 MiB JSON body at 0.84 to 0.87.
 
 ```sh
 bench/deflate/run.sh            # every corpus; 8 rounds, 16 where an interval reaches 0.5x or 1.0x

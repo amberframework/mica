@@ -12,6 +12,13 @@ text of macro bodies, including code no spec reaches. Libraries run it in
 CI so a pattern that stops a build on a Mica-default compiler is caught
 before release.
 
+Adds `scripts/vendor_into.rb`: it places a pinned copy of one Mica component
+(today `deflate`: `Mica::Deflate`, `Mica::Zlib` and `Mica::Gzip` with
+`Mica::Core`) inside a library that cannot name the Mica shard as a
+dependency, under that library's namespace (`Amber::Mica::Gzip`), with a
+manifest of the commit and each file's sha256. `--check` fails on a file
+that is missing, extra or edited.
+
 Adds YAML (milestone M4): `Mica::YAML` reads and writes YAML in pure
 Crystal.
 
@@ -53,6 +60,14 @@ Adds Inflate (compression milestone Z1): `Mica::Deflate`, `Mica::Zlib` and
   corpus, a port of zlib's `test/infcover.c`, and benchmarks against zlib
   (`bench/deflate/`).
 - A Mica Inflate program links no libz (`scripts/check_linkage.sh`).
+- Decoder speed: a spare decoder (tables and buffers) is reused by the next
+  decode; Huffman tables are two-level 32-bit entries built in canonical
+  order; the fast loop keeps 64 bits of input and looks the next entry up
+  before each refill and each copy; CRC-32 uses the ARMv8 CRC instructions
+  in three streams; a `Reader` decodes straight into a slice of 32 KiB or
+  more; a one-shot result over 160 KiB is sized from the ratio the stream
+  has shown. Every limit is enforced where it was. Numbers against zlib:
+  `docs/benchmarks.md`, "Inflate".
 
 Adds the Deflate encoders (compression milestone Z2): `Mica::Deflate`,
 `Mica::Zlib` and `Mica::Gzip` encode raw DEFLATE, zlib and gzip in pure

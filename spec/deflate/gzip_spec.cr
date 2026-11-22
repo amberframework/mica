@@ -19,6 +19,20 @@ private def member(content : String, **options) : Bytes
   DeflateConformance.gzip_member(fixed_stream(content), content.to_slice, **options)
 end
 
+# One member of *byte_count* sample bytes in stored blocks, and those bytes.
+private def large_member(byte_count : Int32, seed : UInt32, **options) : {Bytes, Bytes}
+  data = DeflateConformance.sample_bytes(byte_count, seed)
+  deflated = DeflateConformance.deflate do |deflate|
+    offset = 0
+    while offset < byte_count
+      length = Math.min(60_000, byte_count - offset)
+      deflate.stored(data[offset, length], final: offset + length == byte_count)
+      offset += length
+    end
+  end
+  {DeflateConformance.gzip_member(deflated.to_slice, data, **options), data}
+end
+
 # The member whose optional fields are the ones the five low bits of
 # *flags* select.
 private def member_with_flags(flags : Int32, text : String) : Bytes
@@ -237,6 +251,34 @@ describe Mica::Gzip do
       end
       error.should be_a(Mica::Deflate::MalformedStreamError)
       (input.size - 8..input.size).should contain(error.byte_offset)
+    end
+  end
+
+  # A one-shot decode of a large stream moves between result buffers as
+  # output arrives; the size a member states is checked and sizes nothing.
+  describe "large members and the size they state (RFC 1952 2.3)" do
+    large, large_data = large_member(400_000, 3_u32)
+    small, small_data = large_member(5_000, 4_u32)
+
+    it_decodes_vector "DEFLATE-1952-2.3-isize", "decodes a 400,000-byte member", :gzip, large, large_data
+    it_decodes_vector({"DEFLATE-1952-2.2-members", "DEFLATE-1952-2.3-isize"}, "decodes a large member followed by a small one", :gzip,
+      DeflateConformance.join(large, small), DeflateConformance.join(large_data, small_data))
+    it_decodes_vector({"DEFLATE-1952-2.2-members", "DEFLATE-1952-2.3-isize"}, "decodes a small member followed by a large one", :gzip,
+      DeflateConformance.join(small, large), DeflateConformance.join(small_data, large_data))
+    it_rejects_vector "DEFLATE-1952-2.3-isize", "reports an ISIZE eight times too large for a large member as a checksum error", :gzip,
+      large_member(400_000, 3_u32, size: 3_200_000_u32)[0], :checksum
+    it_rejects_vector "DEFLATE-1952-2.3-isize", "reports an ISIZE of 0xFFFFFFFF for a large member as a checksum error", :gzip,
+      large_member(400_000, 3_u32, size: UInt32::MAX)[0], :checksum
+
+    it_satisfies "DEFLATE-LIMIT-max-output-bytes", "holds a large member to max_output_bytes whatever size it states" do
+      limits = Mica::Deflate::DecodeLimits.custom(max_output_bytes: 300_000_i64)
+      [400_000_u32, 200_000_u32, UInt32::MAX].each do |stated|
+        input = large_member(400_000, 3_u32, size: stated)[0]
+        error = expect_raises(Mica::Deflate::DecodeLimitError) do
+          Mica::Gzip.decode(input, limits: limits, timeout: nil)
+        end
+        error.limit.should eq("max_output_bytes")
+      end
     end
   end
 

@@ -18,7 +18,7 @@ module Mica::Gzip
 
   # Decodes the gzip stream *input* (every member) in one call.
   def self.decode(input : Bytes, *, limits : Deflate::DecodeLimits, timeout : Time::Span?) : Bytes
-    Deflate::Inflater.new(input, Deflate::Format::Gzip, limits, timeout).decode_all
+    Deflate::Inflater.decode(input, Deflate::Format::Gzip, limits, timeout)
   end
 
   # Encodes *input* as one gzip member in one call, at *level* 0 to 9.
@@ -49,13 +49,11 @@ module Mica::Gzip
 
   # Decodes a gzip stream (every member) as it is read.
   class Reader < Deflate::StreamReader
-    def initialize(io : IO, *, limits : Deflate::DecodeLimits, timeout : Time::Span?, sync_close : Bool = false)
-      super(io, Deflate::Format::Gzip, limits, timeout, nil, sync_close)
-    end
-
     # The headers of the members read so far.
-    def list_of_headers : Array(Header)
-      @inflater.list_of_headers
+    getter list_of_headers = [] of Header
+
+    def initialize(io : IO, *, limits : Deflate::DecodeLimits, timeout : Time::Span?, sync_close : Bool = false)
+      super(io, Deflate::Format::Gzip, limits, timeout, nil, sync_close, @list_of_headers)
     end
   end
 end
