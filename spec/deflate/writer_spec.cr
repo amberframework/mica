@@ -28,6 +28,34 @@ private class DiscardingIO < IO
   end
 end
 
+# A destination that refers back to the writer that writes to it, as a
+# response does whose output is the writer.
+private class DestinationThatHoldsItsWriter < DiscardingIO
+  property writer : IO?
+end
+
+# Counts the guards the collector has finalized.
+class Mica::Deflate::Deflater::ReleaseGuard
+  class_getter finalized_count = Atomic(Int32).new(0)
+
+  def finalize
+    previous_def
+    @@finalized_count.add(1)
+  end
+end
+
+# Leaves *count* unclosed writers, each reachable from its own destination,
+# for the collector.
+@[NoInline]
+private def drop_unclosed_writers_held_by_their_destination(count : Int32) : Nil
+  count.times do
+    destination = DestinationThatHoldsItsWriter.new
+    writer = Mica::Gzip::Writer.new(destination, level: 6)
+    destination.writer = writer
+    writer.write("hello hello hello".to_slice)
+  end
+end
+
 # Writes *input* through a writer in pieces whose sizes *next_size* gives.
 private def encode_in_pieces(format : DeflateOracle::Format, input : Bytes, level : Int32, & : -> Int32) : Bytes
   io = IO::Memory.new
@@ -374,6 +402,26 @@ describe "Mica::Deflate encoders, streaming" do
       (tables + output_buffer + workspace + for_the_first_bytes).should be < 384 * 1_024
       # 2.6 MB more input allocates nothing more.
       (for_the_whole_stream - for_the_first_bytes).should be < 4_096
+    end
+
+    it "frees the tables of an unclosed writer whose destination refers back to it" do
+      Mica::Gzip::Writer.new(DiscardingIO.new).responds_to?(:finalize).should be_false
+
+      before = Mica::Deflate::Deflater::ReleaseGuard.finalized_count.get
+      drop_unclosed_writers_held_by_their_destination(200)
+      3.times { GC.collect }
+      # The collector is conservative: a stale word on the stack can keep
+      # a few of the 200 alive.
+      (Mica::Deflate::Deflater::ReleaseGuard.finalized_count.get - before).should be > 150
+    end
+
+    it "records the blocks a deflater holds and none once it is released" do
+      guard = Mica::Deflate::Deflater::ReleaseGuard.new
+      deflater = Mica::Deflate::Deflater.new(Mica::Deflate::Format::Gzip, 6, DiscardingIO.new, release_guard: guard)
+      guard.holds_blocks?.should be_true
+      deflater.write("hello".to_slice)
+      deflater.release
+      guard.holds_blocks?.should be_false
     end
   end
 end

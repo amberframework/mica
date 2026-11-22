@@ -2,15 +2,12 @@
 
 ## Unreleased
 
-Adds `scripts/check_regex_literals.cr`, which checks every regex in a tree
-of Crystal source against the Crystal dialect and exits 1 when a pattern
-uses a construct Mica leaves out (lookaround, backreferences, atomic
-groups, possessive quantifiers, `\K` and the others in docs/regex.md,
-"Excluded constructs"). It reads literals, interpolated literals,
-`Regex.new` with a string literal, literals in macro expressions and the
-text of macro bodies, including code no spec reaches. Libraries run it in
-CI so a pattern that stops a build on a Mica-default compiler is caught
-before release.
+Fixes a leak in the streaming encoders: a `Deflate::Writer`, `Zlib::Writer`
+or `Gzip::Writer` that was dropped without `close` kept its 270 KB of
+tables when its destination referred back to the writer (a response whose
+output is the writer), because the collector does not finalize an object it
+reaches from itself. The tables now belong to a guard that holds addresses
+only, which the collector finalizes in every case.
 
 Adds `scripts/vendor_into.rb`: it places a pinned copy of one Mica component
 (today `deflate`: `Mica::Deflate`, `Mica::Zlib` and `Mica::Gzip` with
@@ -96,6 +93,16 @@ Crystal, so a program that compresses with Mica links no libz.
   levels 1, 6 and 9 (`bench/deflate_encode/`; results in
   `docs/benchmarks.md`).
 - `scripts/check_linkage.sh` also checks a minimal encoder program.
+
+Adds `scripts/check_regex_literals.cr`, which checks every regex in a tree
+of Crystal source against the Crystal dialect and exits 1 when a pattern
+uses a construct Mica leaves out (lookaround, backreferences, atomic
+groups, possessive quantifiers, `\K` and the others in docs/regex.md,
+"Excluded constructs"). It reads literals, interpolated literals,
+`Regex.new` with a string literal, literals in macro expressions and the
+text of macro bodies, including code no spec reaches. Libraries run it in
+CI so a pattern that stops a build on a Mica-default compiler is caught
+before release.
 
 ## 0.2.0 (2026-11-21)
 
