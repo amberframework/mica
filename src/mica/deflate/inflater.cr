@@ -67,6 +67,9 @@ module Mica::Deflate
     # Output buffers start this small and double as output arrives, so a
     # small body costs a small allocation.
     INITIAL_OUTPUT = 4_096
+    # A one-shot decode stays in the inflater's own buffer for this much
+    # output, then moves to a result buffer sized from the ratio so far.
+    ONE_SHOT_PREFIX = STREAM_BUFFER
     # A buffer grows (or, streaming at full size, slides) when less room
     # than this remains.
     LOW_ROOM = 1_024
@@ -248,7 +251,7 @@ module Mica::Deflate
         @buffer_capacity = INITIAL_OUTPUT
       end
       @out = @buffer
-      @out_capacity = @buffer_capacity
+      @out_capacity = @one_shot && @buffer_capacity > ONE_SHOT_PREFIX ? ONE_SHOT_PREFIX : @buffer_capacity
     end
 
     # Ends this inflater's decode and makes it the spare one. The caller
@@ -456,10 +459,14 @@ module Mica::Deflate
     # must raise rather than wait for room).
     private def prepare_output : {Int32, Bool}
       if @out_capacity - @out_pos < LOW_ROOM
-        if @out == @buffer && @buffer_capacity < STREAM_BUFFER
+        if @one_shot
+          if @out == @buffer && @out_capacity < ONE_SHOT_PREFIX
+            grow_own_buffer
+          else
+            grow_result
+          end
+        elsif @buffer_capacity < STREAM_BUFFER
           grow_own_buffer
-        elsif @one_shot
-          grow_result
         else
           slide_window
         end
@@ -484,7 +491,7 @@ module Mica::Deflate
       @buffer = GC.realloc(@buffer.as(Void*), (wanted + SLACK).to_u64).as(UInt8*)
       @buffer_capacity = wanted
       @out = @buffer
-      @out_capacity = wanted
+      @out_capacity = @one_shot && wanted > ONE_SHOT_PREFIX ? ONE_SHOT_PREFIX : wanted
     end
 
     # Moves a one-shot decode to a larger result buffer: the size the
@@ -496,9 +503,6 @@ module Mica::Deflate
       consumed = 1_i64 if consumed < 1
       predicted = (@out_pos - @result_start).to_i64 * @in_end // consumed
       wanted = predicted + predicted // 8 + LOW_ROOM + @result_start
-      # At least four times the input (most text needs no second move) and
-      # at least double the buffer it leaves.
-      wanted = @in_end.to_i64 * 4 if wanted < @in_end.to_i64 * 4
       wanted = @out_capacity.to_i64 * 2 if wanted < @out_capacity.to_i64 * 2
       # Past half the ceiling, go straight to it: a buffer just under the
       # ceiling would need one more nearly ceiling-sized copy, and the
@@ -1236,15 +1240,21 @@ module Mica::Deflate
         # A length: its extra bits sit above the code bits in *saved*.
         length = ((entry >> 16) &+ (saved & (1_u64.unsafe_shl(entry & 63) &- 1)).unsafe_shr((entry >> 8) & 0xF)).to_i32!
         entry = distances[(bit_buffer & distance_mask).to_u32!]
-        # A distance takes up to 28 bits; two literals and a length may
-        # have left as few as 16.
-        if bits_left & 0xFF < 28
+        # After the distance the next literal/length entry is looked up
+        # from the bits still in the buffer, so its lookup does not wait
+        # for a refill: a distance found in the root table takes up to 21
+        # bits (28 through a subtable) and the lookup 10 more. Two
+        # literals and a length may have left as few as 16.
+        if bits_left & 0xFF < 31
           refill_fast_bits
         end
         if entry & HuffmanTable::EXCEPTIONAL != 0
           if entry & HuffmanTable::SUBTABLE == 0
             problem = 2
             break
+          end
+          if bits_left & 0xFF < 38
+            refill_fast_bits
           end
           bit_buffer = bit_buffer.unsafe_shr(entry & 63)
           bits_left &-= entry
@@ -1266,8 +1276,8 @@ module Mica::Deflate
         source = out_next + (0_i64 &- distance.to_i64!)
         out_next += length
         # Look the next symbol up before copying, so the two overlap.
-        refill_fast_bits
         entry = literal_lengths[(bit_buffer & literal_length_mask).to_u32!]
+        refill_fast_bits
         if distance >= 16
           destination.copy_from(source, 16)
           (destination + 16).copy_from(source + 16, 16)
