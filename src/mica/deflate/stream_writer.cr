@@ -19,6 +19,11 @@ module Mica::Deflate
       @deflater = Deflater.new(format, level, @destination, dictionary, header)
     end
 
+    # Frees the encoder's tables when a writer is dropped unclosed.
+    def finalize
+      @deflater.release
+    end
+
     # Raises `IO::Error`: the writer is write-only.
     def read(slice : Bytes) : NoReturn
       raise IO::Error.new("Can't read from #{self.class}")

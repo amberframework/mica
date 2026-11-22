@@ -1,4 +1,9 @@
 module Mica::Deflate
+  # Raised when libc's allocator cannot supply the memory an encoder asks
+  # for (under 300,000 bytes per stream).
+  class OutOfMemoryError < Mica::Error
+  end
+
   # The encoding engine behind `Mica::Deflate`, `Mica::Zlib` and
   # `Mica::Gzip`, one-shot and streaming.
   #
@@ -18,16 +23,27 @@ module Mica::Deflate
   #   copied;
   # - streaming (and any encode with a preset dictionary): bytes are
   #   copied into a window of `WINDOW_CAPACITY` bytes, and when it fills
-  #   the last 32 KiB slide to its front.
+  #   the last 32 KiB move to its front.
   #
-  # The hash table holds stream positions, so nothing in it changes when
-  # the window slides, and the chain table holds each position's distance
-  # to the previous position with the same hash. Candidates are compared
-  # eight bytes at a time.
+  # The hash table and the chain table hold stream positions modulo
+  # 65,536, as zlib's hold window offsets, so nothing in them changes when
+  # the window moves and following a chain is one masked load per
+  # candidate. A position more than 32,768 back is out of reach, and one
+  # 65,536 back would look near again; so every `CLEAN_PERIOD` positions
+  # the hash table's entries that are out of reach are overwritten with a
+  # position that stays out of reach until the next cleaning (the work of
+  # zlib's `slide_hash`). A chain ends where the next position is not
+  # farther back than the last one, which is how an overwritten chain slot
+  # shows. Candidates are compared eight bytes at a time.
   #
-  # Memory per stream at any level from 1 to 9: the window (66,560 bytes,
-  # streaming only), the hash table (131,072), the chain table (65,536) and
-  # the symbol buffer (65,536): 328,704 bytes, plus the output buffer.
+  # Memory per stream at any level from 1 to 9: the window (65,536 bytes,
+  # streaming only), the hash table (65,536), the chain table (65,536) and
+  # the symbol buffer (65,536): 262,144 bytes, from libc's allocator
+  # rather than the collector's heap, so that an encode per request does
+  # not drive collections. `release` frees them (`finish` calls it), and a
+  # deflater that is dropped unfinished frees them when it is collected.
+  # The output buffer and the code builders are a further 30 KiB or so of
+  # collector memory.
   #
   # WARNING: A deflater belongs to one fiber at a time.
   #
@@ -35,7 +51,7 @@ module Mica::Deflate
   class Deflater
     # The DEFLATE history.
     WINDOW      = 32_768
-    WINDOW_MASK = WINDOW - 1
+    WINDOW_MASK = (WINDOW - 1).to_u32
     # The shortest and longest match.
     MIN_MATCH =   3
     MAX_MATCH = 258
@@ -53,12 +69,21 @@ module Mica::Deflate
     # literals; zlib drops it.
     TOO_FAR = 4_096
     # The streaming window: the history plus the room new input is copied
-    # into. One byte more than the history is kept on a slide so the byte
+    # into.
+    WINDOW_CAPACITY = 2 * WINDOW
+    # The history a slide keeps: one byte more than the window, so the byte
     # 32,768 back stays reachable.
-    WINDOW_CAPACITY = 2 * WINDOW + 1_024
-    WINDOW_KEEP     = WINDOW + 1
-    # The streaming output buffer starts at this size and grows only when
-    # one block needs more.
+    WINDOW_KEEP = WINDOW + 1
+    # Positions encoded between two cleanings of the hash table. With the
+    # up to 258 positions one step can add, a kept entry is at most 65,026
+    # positions old when it is next looked at, so its distance modulo
+    # 65,536 is its distance.
+    CLEAN_PERIOD = 32_000
+    # A cleaned entry holds the position this far ahead of the cleaning:
+    # it reads as more than 32,768 back until the next cleaning.
+    STALE_LEAD = 32_767
+    # The streaming output buffer. A stored block's bytes bypass it and a
+    # compressed block is written through it in pieces, so it never grows.
     STREAM_OUTPUT_BYTES = 16_384
 
     # zlib's parameters of one level (its `configuration_table`): stop
@@ -91,12 +116,16 @@ module Mica::Deflate
     def self.encode(input : Bytes, format : Format, level : Int32, dictionary : Bytes? = nil,
                     header : Gzip::Header? = nil) : Bytes
       deflater = new(format, level, nil, dictionary, header, input.size)
-      if dictionary
-        deflater.write(input)
-      else
-        deflater.write_in_place(input)
+      begin
+        if dictionary
+          deflater.write(input)
+        else
+          deflater.write_in_place(input)
+        end
+        deflater.finish
+      ensure
+        deflater.release
       end
-      deflater.finish
       deflater.result
     end
 
@@ -108,10 +137,11 @@ module Mica::Deflate
     @blocks : BlockWriter
 
     # The byte at offset `n` of the input the engine can still see is
-    # `@source[n]`; `@base` is the stream position of offset 0.
+    # `@source[n]`. `@slid_bytes` counts how far the window has moved, so
+    # offset `n` is stream position `@slid_bytes + n`.
     @source : UInt8* = Pointer(UInt8).null
-    @base : UInt32 = 0_u32
-    @window : Bytes?
+    @slid_bytes : UInt32 = 0_u32
+    @window : UInt8* = Pointer(UInt8).null
     # The offset being encoded, the end of the input seen so far, and the
     # start of the block being collected.
     @position : Int32 = 0
@@ -121,11 +151,15 @@ module Mica::Deflate
     # collected: its bytes cannot be written as a stored block any more.
     @block_bytes_available : Bool = true
 
-    # For each hash, the stream position that last had it.
-    @head : UInt32* = Pointer(UInt32).null
-    # For each position (modulo the window), the distance back to the
-    # previous position with the same hash, or 0.
+    # The block from libc that holds the code builders' workspace, the
+    # hash table and a streaming encoder's output buffer.
+    @tables : UInt8* = Pointer(UInt8).null
+    # For each hash, the position (modulo 65,536) that last had it.
+    @head : UInt16* = Pointer(UInt16).null
+    # For each position (modulo the window), the position that had the
+    # same hash before it.
     @previous : UInt16* = Pointer(UInt16).null
+    @positions_until_cleaning : Int32 = CLEAN_PERIOD
     @symbols : UInt32* = Pointer(UInt32).null
     @symbol_count : Int32 = 0
 
@@ -152,9 +186,10 @@ module Mica::Deflate
       Deflater.check_level(@level)
       @parameters = LEVELS[@level]
       check_header
-      capacity = sink ? STREAM_OUTPUT_BYTES : Math.max(expected_input_bytes // 2, 0) + 1_024
-      @blocks = BlockWriter.new(sink, capacity)
       @checksum = @format.zlib? ? 1_u32 : 0_u32
+      symbol_bytes = 0
+      chain_bytes = 0
+      hash_bytes = 0
       if @level > 0
         chain_entries = WINDOW
         symbol_entries = SYMBOL_LIMIT + 1
@@ -162,25 +197,67 @@ module Mica::Deflate
           chain_entries = Math.min(chain_entries, expected_input_bytes + 1)
           symbol_entries = Math.min(symbol_entries, expected_input_bytes + 1)
         end
-        @head = Pointer(UInt32).malloc(HASH_SIZE)
-        @previous = GC.malloc_atomic(chain_entries.to_u64 * 2).as(UInt16*)
-        @symbols = GC.malloc_atomic(symbol_entries.to_u64 * 4).as(UInt32*)
+        symbol_bytes = symbol_entries * 4
+        chain_bytes = chain_entries * 2
+        hash_bytes = HASH_SIZE * 2
       end
+      # Three blocks come from libc, each small enough for the allocator
+      # to hand back a block it has just been given back, which costs a
+      # short-lived encoder far less than one large block of fresh pages:
+      # the code builders' workspace with the hash table and, with a
+      # sink, the output buffer, which then never grows; the symbol
+      # buffer; and the chain table. Without a sink the output is the
+      # result and belongs to the collector. The workspace and the hash
+      # table start zeroed: a hash entry of 0 names stream position 0,
+      # which nothing matches.
+      workspace_bytes = BlockWriter::WORKSPACE_BYTES
+      output_bytes = sink ? STREAM_OUTPUT_BYTES + BlockWriter::SLACK : 0
+      @tables = allocate(workspace_bytes + hash_bytes + output_bytes)
+      @tables.clear(workspace_bytes + hash_bytes)
+      @head = (@tables + workspace_bytes).as(UInt16*)
+      @symbols = allocate(symbol_bytes).as(UInt32*) if symbol_bytes > 0
+      @previous = allocate(chain_bytes).as(UInt16*) if chain_bytes > 0
+      buffer = if sink
+                 Bytes.new(@tables + workspace_bytes + hash_bytes, output_bytes)
+               else
+                 BlockWriter.buffer_for(Math.max(expected_input_bytes // 2, 0) + 1_024)
+               end
+      @blocks = BlockWriter.new(sink, buffer, @tables)
       load_dictionary
     end
 
+    # Frees the tables and the window. The deflater encodes nothing after
+    # this; `result` stays readable. `finish` calls it; whoever builds a
+    # deflater and may drop it unfinished calls it too (`Deflater.encode`
+    # in an `ensure`, `StreamWriter` in its finalizer), which keeps the
+    # one-shot path free of a finalizer per call.
+    def release : Nil
+      LibC.free(@tables.as(Void*)) unless @tables.null?
+      LibC.free(@symbols.as(Void*)) unless @symbols.null?
+      LibC.free(@previous.as(Void*)) unless @previous.null?
+      LibC.free(@window.as(Void*)) unless @window.null?
+      @tables = Pointer(UInt8).null
+      @symbols = Pointer(UInt32).null
+      @previous = Pointer(UInt16).null
+      @window = Pointer(UInt8).null
+    end
+
     # Bytes the engine holds for the window, the hash and chain tables and
-    # the symbol buffer.
+    # the symbol buffer of a stream of any length.
     def table_bytes : Int32
-      window = @window
-      bytes = window ? window.size : 0
-      bytes += HASH_SIZE * 4 + WINDOW * 2 + (SYMBOL_LIMIT + 1) * 4 if @level > 0
+      bytes = @window.null? ? 0 : WINDOW_CAPACITY
+      bytes += HASH_SIZE * 2 + WINDOW * 2 + (SYMBOL_LIMIT + 1) * 4 if @level > 0
       bytes
     end
 
     # Bytes the engine holds for its output buffer.
     def output_buffer_bytes : Int32
       @blocks.buffer_bytes
+    end
+
+    # Bytes the engine holds for the Huffman code builders.
+    def workspace_bytes : Int32
+      BlockWriter::WORKSPACE_BYTES
     end
 
     # Encodes the whole of *input* where it lies. The engine reads *input*
@@ -197,6 +274,7 @@ module Mica::Deflate
     # without knowing what follows.
     def write(input : Bytes) : Nil
       return if input.empty?
+      raise IO::Error.new("The stream is finished") if @finished
       write_header
       add_to_checksum(input)
       window = window_for_writing
@@ -204,7 +282,7 @@ module Mica::Deflate
       while offset < input.size
         slide_window if @fill == WINDOW_CAPACITY
         count = Math.min(WINDOW_CAPACITY - @fill, input.size - offset)
-        (window.to_unsafe + @fill).copy_from(input.to_unsafe + offset, count)
+        (window + @fill).copy_from(input.to_unsafe + offset, count)
         @fill += count
         offset += count
         hash_the_unhashed_positions
@@ -219,6 +297,7 @@ module Mica::Deflate
     # dropped too: the bytes that follow refer to nothing before this
     # point (Z_FULL_FLUSH). A flush right after a flush writes nothing.
     def flush(is_full : Bool = false) : Nil
+      return if @finished
       unless @flushed
         write_header
         compress(true)
@@ -230,7 +309,8 @@ module Mica::Deflate
       @blocks.drain
     end
 
-    # Writes the final block and the trailer. The stream is complete.
+    # Writes the final block and the trailer and frees the tables. The
+    # stream is complete.
     def finish : Nil
       return if @finished
       write_header
@@ -239,6 +319,7 @@ module Mica::Deflate
       write_trailer
       @blocks.drain
       @finished = true
+      release
     end
 
     # The whole stream, for a deflater without a sink.
@@ -356,15 +437,19 @@ module Mica::Deflate
       @input_size &+= input.size.to_u32!
     end
 
-    # ---- The window ----------------------------------------------------
+    # ---- Memory, the window and slides ---------------------------------
 
-    private def window_for_writing : Bytes
-      window = @window
-      return window if window
-      window = Bytes.new(GC.malloc_atomic(WINDOW_CAPACITY).as(UInt8*), WINDOW_CAPACITY)
-      @window = window
-      @source = window.to_unsafe
-      window
+    private def allocate(bytes : Int32) : UInt8*
+      pointer = LibC.malloc(bytes.to_u64).as(UInt8*)
+      raise OutOfMemoryError.new("Cannot allocate #{bytes} bytes for the Deflate encoder") if pointer.null?
+      pointer
+    end
+
+    private def window_for_writing : UInt8*
+      return @window unless @window.null?
+      @window = allocate(WINDOW_CAPACITY)
+      @source = @window
+      @window
     end
 
     # Puts the last 32 KiB of the preset dictionary in front of the input
@@ -374,44 +459,73 @@ module Mica::Deflate
       return unless dictionary
       return if @level == 0 || dictionary.empty?
       tail = dictionary.size > WINDOW ? dictionary[dictionary.size - WINDOW, WINDOW] : dictionary
-      window = window_for_writing
-      window.to_unsafe.copy_from(tail.to_unsafe, tail.size)
+      window_for_writing.copy_from(tail.to_unsafe, tail.size)
       @fill = tail.size
       @position = tail.size
       @block_start = tail.size
       @unhashed_positions = tail.size
       hash_the_unhashed_positions
+      clean_the_hash_table
     end
 
     # Moves the history to the front of the window to make room. Offsets
-    # move down by the same amount and `@base` up, so stream positions (what
-    # the hash table holds) stay as they are.
+    # drop by the amount moved and `@slid_bytes` grows by it, so stream
+    # positions (what the tables hold) stay as they are.
     private def slide_window : Nil
-      window = window_for_writing
       history = @level == 0 ? 0 : WINDOW_KEEP
       shift = @position - history
       return if shift <= 0
-      window.to_unsafe.move_from(window.to_unsafe + shift, @fill - shift)
+      @window.move_from(@window + shift, @fill - shift)
       @fill -= shift
       @position -= shift
+      @block_bytes_available = false if @block_start < shift
       @block_start -= shift
-      @block_bytes_available = false if @block_start < 0
-      @base &+= shift.to_u32!
+      @slid_bytes &+= shift.to_u32!
+    end
+
+    # Fills the hash table with a position no match can reach before the
+    # first cleaning: the table is empty.
+    private def mark_every_hash_stale : Nil
+      stale = ((@slid_bytes &+ @position.to_u32!) &+ STALE_LEAD).to_u16!
+      head = @head
+      index = 0
+      while index < HASH_SIZE
+        head[index] = stale
+        index &+= 1
+      end
+      @positions_until_cleaning = CLEAN_PERIOD
+    end
+
+    # Overwrites every hash table entry that is more than 32,768 positions
+    # back (or exactly 65,536) with a position that stays out of reach
+    # until the next cleaning.
+    private def clean_the_hash_table : Nil
+      now = (@slid_bytes &+ @position.to_u32!).to_u16!
+      stale = now &+ STALE_LEAD.to_u16
+      head = @head
+      index = 0
+      while index < HASH_SIZE
+        entry = head[index]
+        head[index] = (now &- entry) &- 1_u16 < WINDOW.to_u16 ? entry : stale
+        index &+= 1
+      end
+      @positions_until_cleaning = CLEAN_PERIOD
     end
 
     # Forgets everything before the current position (a full flush): no
     # match may reach back past it.
     private def drop_history : Nil
       return if @level == 0
-      @head.clear(HASH_SIZE)
       @unhashed_positions = 0
-      return unless @window
-      # Everything is encoded, so the window restarts empty.
-      @position = 0
-      @fill = 0
-      @block_start = 0
-      @block_bytes_available = true
-      @base = 0_u32
+      unless @window.null?
+        # Everything is encoded, so the window restarts empty.
+        @position = 0
+        @fill = 0
+        @block_start = 0
+        @block_bytes_available = true
+        @slid_bytes = 0_u32
+      end
+      mark_every_hash_stale
     end
 
     # ---- Blocks --------------------------------------------------------
@@ -437,10 +551,17 @@ module Mica::Deflate
     private def compress(is_flushing : Bool) : Nil
       if @level == 0
         store_whole_blocks
-      elsif @parameters.is_lazy
-        compress_lazily(is_flushing)
-      else
-        compress_greedily(is_flushing)
+        return
+      end
+      loop do
+        if @parameters.is_lazy
+          compress_lazily(is_flushing)
+        else
+          compress_greedily(is_flushing)
+        end
+        # The loops also stop when a cleaning is due; clean and go on.
+        break if @positions_until_cleaning > 0
+        clean_the_hash_table
       end
     end
 
@@ -477,17 +598,15 @@ module Mica::Deflate
       ((pointer[0].to_u32 << 10) ^ (pointer[1].to_u32 << 5) ^ pointer[2].to_u32) & HASH_MASK
     end
 
-    # Records the position at offset *offset* under its hash and returns
-    # its distance to the previous position with that hash (a value past
-    # the window when there is none).
+    # Records *position* under the hash of its three bytes and returns the
+    # position (modulo 65,536) that had that hash before.
     @[AlwaysInline]
-    private def insert_position(source : UInt8*, head : UInt32*, previous : UInt16*, base : UInt32, offset : Int32) : UInt32
-      hash = hash_at(source + offset)
-      stream_position = base &+ offset.to_u32!
-      distance = stream_position &- head[hash]
-      head[hash] = stream_position
-      previous[stream_position & WINDOW_MASK] = distance < 65_536_u32 ? distance.to_u16! : 0_u16
-      distance
+    private def insert_position(source : UInt8*, head : UInt16*, previous : UInt16*, position : Int32) : UInt32
+      hash = hash_at(source + position)
+      earlier = head[hash]
+      head[hash] = position.to_u16!
+      previous[position.to_u32! & WINDOW_MASK] = earlier
+      earlier.to_u32
     end
 
     # Returns how many of the first *limit* bytes at *first* and *second*
@@ -508,13 +627,15 @@ module Mica::Deflate
       length
     end
 
-    # Walks the hash chain from the candidate *distance* back (zlib's
-    # `longest_match`) and returns the longest match longer than
-    # *best_length* with its distance, or *best_length* and 0. A candidate
-    # is compared in full only when its two bytes at the current best
-    # length match, since only then can it be longer.
+    # Walks the hash chain (zlib's `longest_match`) from the candidate
+    # *earlier*, which lies *distance* back from *position*, and returns
+    # the longest match longer than *best_length* with its distance, or
+    # *best_length* and 0. A candidate is compared in full only when its
+    # two bytes at the current best length match, since only then can it
+    # be longer. The chain ends at a position that is not farther back
+    # than the last one or is past *max_distance*.
     @[AlwaysInline]
-    private def longest_match(scan : UInt8*, previous : UInt16*, stream_position : UInt32, distance : UInt32,
+    private def longest_match(scan : UInt8*, previous : UInt16*, position : UInt32, earlier : UInt32, distance : UInt32,
                               max_distance : UInt32, best_length : Int32, nice_length : Int32, chain : Int32,
                               max_length : Int32) : {Int32, UInt32}
       best_distance = 0_u32
@@ -531,10 +652,10 @@ module Mica::Deflate
             scan_end = load_u16(scan + (best_length &- 1))
           end
         end
-        step = previous[(stream_position &- distance) & WINDOW_MASK]
-        break if step == 0
-        distance &+= step
-        break if distance > max_distance
+        earlier = previous[earlier & WINDOW_MASK].to_u32
+        next_distance = (position &- earlier) & 0xFFFF_u32
+        break unless next_distance &- distance &- 1 < max_distance &- distance
+        distance = next_distance
         chain &-= 1
         break if chain == 0
       end
@@ -544,7 +665,10 @@ module Mica::Deflate
     # Levels 1 to 3 (zlib's `deflate_fast`): take the longest match at each
     # position, or a literal.
     private def compress_greedily(is_flushing : Bool) : Nil
-      source = @source
+      # Inside the loop a position is its stream position modulo 65,536
+      # plus the offset, so the tables take its low 16 bits as they are.
+      first_position = (@slid_bytes & 0xFFFF).to_i32!
+      source = @source - first_position
       head = @head
       previous = @previous
       symbols = @symbols
@@ -552,15 +676,16 @@ module Mica::Deflate
       distance_frequencies = @blocks.distance_frequencies
       length_symbols = BlockWriter::LENGTH_SYMBOLS.to_unsafe
       distance_symbols = BlockWriter::DISTANCE_SYMBOLS.to_unsafe
-      base = @base
-      position = @position
-      fill = @fill
+      position = @position &+ first_position
+      fill = @fill &+ first_position
+      cleaning_position = position &+ @positions_until_cleaning
+      started_at = position
       symbol_count = @symbol_count
       nice_length = @parameters.nice_length
       max_chain = @parameters.max_chain
       max_insert = @parameters.max_lazy
 
-      loop do
+      while position < cleaning_position
         lookahead = fill &- position
         if lookahead < MIN_LOOKAHEAD
           break if !is_flushing || lookahead == 0
@@ -568,10 +693,11 @@ module Mica::Deflate
         length = MIN_MATCH - 1
         match_distance = 0_u32
         if lookahead >= MIN_MATCH
-          distance = insert_position(source, head, previous, base, position)
-          max_distance = Math.min(Math.max(position &- 1, 0), WINDOW).to_u32!
+          earlier = insert_position(source, head, previous, position)
+          distance = (position.to_u32! &- earlier) & 0xFFFF_u32
+          max_distance = Math.min(Math.max(position &- first_position &- 1, 0), WINDOW).to_u32!
           if distance &- 1 < max_distance
-            length, match_distance = longest_match(source + position, previous, base &+ position.to_u32!, distance,
+            length, match_distance = longest_match(source + position, previous, position.to_u32!, earlier, distance,
               max_distance, MIN_MATCH - 1, Math.min(nice_length, lookahead), max_chain, Math.min(MAX_MATCH, lookahead))
           end
         end
@@ -586,7 +712,7 @@ module Mica::Deflate
           if length <= max_insert && fill &- match_end >= MIN_MATCH
             position &+= 1
             while position < match_end
-              insert_position(source, head, previous, base, position)
+              insert_position(source, head, previous, position)
               position &+= 1
             end
           else
@@ -601,23 +727,25 @@ module Mica::Deflate
         end
 
         if symbol_count == SYMBOL_LIMIT
-          @position = position
+          @position = position &- first_position
           @symbol_count = symbol_count
           write_block(false)
           symbol_count = 0
         end
       end
 
-      @position = position
+      @position = position &- first_position
       @symbol_count = symbol_count
-      @unhashed_positions = Math.min(position, MIN_MATCH - 1) if is_flushing
+      @positions_until_cleaning -= position &- started_at
+      @unhashed_positions = Math.min(@position, MIN_MATCH - 1) if is_flushing && position == fill
     end
 
     # Levels 4 to 9 (zlib's `deflate_slow`): a match found at one position
     # is sent only if the next position has none longer; otherwise the
     # byte goes out as a literal and the longer match takes over.
     private def compress_lazily(is_flushing : Bool) : Nil
-      source = @source
+      first_position = (@slid_bytes & 0xFFFF).to_i32!
+      source = @source - first_position
       head = @head
       previous = @previous
       symbols = @symbols
@@ -625,9 +753,10 @@ module Mica::Deflate
       distance_frequencies = @blocks.distance_frequencies
       length_symbols = BlockWriter::LENGTH_SYMBOLS.to_unsafe
       distance_symbols = BlockWriter::DISTANCE_SYMBOLS.to_unsafe
-      base = @base
-      position = @position
-      fill = @fill
+      position = @position &+ first_position
+      fill = @fill &+ first_position
+      cleaning_position = position &+ @positions_until_cleaning
+      started_at = position
       symbol_count = @symbol_count
       good_length = @parameters.good_length
       max_lazy = @parameters.max_lazy
@@ -637,7 +766,7 @@ module Mica::Deflate
       match_distance = @match_distance
       is_byte_pending = @match_available
 
-      loop do
+      while position < cleaning_position
         lookahead = fill &- position
         if lookahead < MIN_LOOKAHEAD
           break if !is_flushing || lookahead == 0
@@ -646,11 +775,12 @@ module Mica::Deflate
         previous_distance = match_distance
         match_length = MIN_MATCH - 1
         if lookahead >= MIN_MATCH
-          distance = insert_position(source, head, previous, base, position)
-          max_distance = Math.min(Math.max(position &- 1, 0), WINDOW).to_u32!
+          earlier = insert_position(source, head, previous, position)
+          distance = (position.to_u32! &- earlier) & 0xFFFF_u32
+          max_distance = Math.min(Math.max(position &- first_position &- 1, 0), WINDOW).to_u32!
           if previous_length < max_lazy && distance &- 1 < max_distance
             chain = previous_length >= good_length ? max_chain >> 2 : max_chain
-            match_length, found_distance = longest_match(source + position, previous, base &+ position.to_u32!, distance,
+            match_length, found_distance = longest_match(source + position, previous, position.to_u32!, earlier, distance,
               max_distance, previous_length, Math.min(nice_length, lookahead), chain, Math.min(MAX_MATCH, lookahead))
             if match_length > previous_length
               match_distance = found_distance
@@ -670,13 +800,13 @@ module Mica::Deflate
           last_hashable = fill &- MIN_MATCH
           position &+= 1
           while position < match_end
-            insert_position(source, head, previous, base, position) if position <= last_hashable
+            insert_position(source, head, previous, position) if position <= last_hashable
             position &+= 1
           end
           is_byte_pending = false
           match_length = MIN_MATCH - 1
           if symbol_count == SYMBOL_LIMIT
-            @position = position
+            @position = position &- first_position
             @symbol_count = symbol_count
             write_block(false)
             symbol_count = 0
@@ -687,7 +817,7 @@ module Mica::Deflate
           symbol_count &+= 1
           literal_frequencies[byte] &+= 1
           if symbol_count == SYMBOL_LIMIT
-            @position = position
+            @position = position &- first_position
             @symbol_count = symbol_count
             write_block(false)
             symbol_count = 0
@@ -699,7 +829,7 @@ module Mica::Deflate
         end
       end
 
-      if is_flushing
+      if is_flushing && position == fill
         if is_byte_pending
           byte = source[position &- 1]
           symbols[symbol_count] = byte.to_u32
@@ -708,10 +838,11 @@ module Mica::Deflate
           is_byte_pending = false
         end
         match_length = MIN_MATCH - 1
-        @unhashed_positions = Math.min(position, MIN_MATCH - 1)
+        @unhashed_positions = Math.min(position &- first_position, MIN_MATCH - 1)
       end
-      @position = position
+      @position = position &- first_position
       @symbol_count = symbol_count
+      @positions_until_cleaning -= position &- started_at
       @match_length = match_length
       @match_distance = match_distance
       @match_available = is_byte_pending
@@ -722,7 +853,8 @@ module Mica::Deflate
     private def hash_the_unhashed_positions : Nil
       return if @level == 0
       while @unhashed_positions > 0 && @position - @unhashed_positions + MIN_MATCH <= @fill
-        insert_position(@source, @head, @previous, @base, @position - @unhashed_positions)
+        first_position = (@slid_bytes & 0xFFFF).to_i32!
+        insert_position(@source - first_position, @head, @previous, first_position + @position - @unhashed_positions)
         @unhashed_positions -= 1
       end
     end

@@ -107,7 +107,7 @@ module Mica::Deflate
       HuffmanCodeBuilder.assign_canonical_codes(FIXED_LITERAL_LENGTHS.to_unsafe, literal_codes.to_unsafe, 288)
       HuffmanCodeBuilder.assign_canonical_codes(FIXED_DISTANCE_LENGTHS.to_unsafe, distance_codes.to_unsafe, 30)
       tables = SymbolTables.new
-      tables.fill(FIXED_LITERAL_LENGTHS.to_unsafe, literal_codes.to_unsafe, FIXED_DISTANCE_LENGTHS.to_unsafe,
+      tables.fill(FIXED_LITERAL_LENGTHS.to_unsafe, literal_codes.to_unsafe, 288, FIXED_DISTANCE_LENGTHS.to_unsafe,
         distance_codes.to_unsafe, DISTANCE_CODES)
       tables
     end
@@ -138,11 +138,15 @@ module Mica::Deflate
         @end_of_block
       end
 
-      def fill(literal_lengths : UInt8*, literal_codes : UInt16*, distance_lengths : UInt8*, distance_codes : UInt16*,
-               distance_count : Int32) : Nil
+      # Fills the entries of the first *literal_count* literal and length
+      # symbols and the first *distance_count* distance symbols, which
+      # are the ones the block uses.
+      def fill(literal_lengths : UInt8*, literal_codes : UInt16*, literal_count : Int32, distance_lengths : UInt8*,
+               distance_codes : UInt16*, distance_count : Int32) : Nil
         table = @literal_and_length.to_unsafe
+        literal_end = Math.min(literal_count, 256)
         symbol = 0
-        while symbol < 256
+        while symbol < literal_end
           table[symbol] = literal_codes[symbol].to_u32 | (literal_lengths[symbol].to_u32 << 24)
           symbol += 1
         end
@@ -154,6 +158,7 @@ module Mica::Deflate
         while length < 256
           length_symbol = length_symbols[length].to_i32
           symbol = 257 + length_symbol
+          break if symbol >= literal_count
           code_bits = literal_lengths[symbol].to_u32
           extra = (length - length_bases[length_symbol].to_i32).to_u32!
           table[256 + length] = literal_codes[symbol].to_u32 | (extra << code_bits) |
@@ -184,11 +189,29 @@ module Mica::Deflate
     # Bytes handed to the sink so far.
     getter drained_bytes : Int64 = 0_i64
 
-    def initialize(@sink : IO?, capacity : Int32)
-      @buffer = Bytes.new(GC.malloc_atomic(capacity + SLACK).as(UInt8*), capacity + SLACK)
-      @literal = HuffmanCodeBuilder.new(LITERAL_CODES, 15, LENGTH_EXTRA.to_slice, 257, FIXED_LITERAL_LENGTHS.to_slice)
-      @distance = HuffmanCodeBuilder.new(DISTANCE_CODES, 15, DISTANCE_EXTRA.to_slice, 0, FIXED_DISTANCE_LENGTHS.to_slice)
-      @code_length = HuffmanCodeBuilder.new(CODE_LENGTH_CODES, 7, CODE_LENGTH_EXTRA.to_slice, 0, nil)
+    # Returns an output buffer from the collector with room for *capacity*
+    # bytes and the slack.
+    def self.buffer_for(capacity : Int32) : Bytes
+      Bytes.new(GC.malloc_atomic(capacity + SLACK).as(UInt8*), capacity + SLACK)
+    end
+
+    # Bytes of workspace the three code builders share.
+    WORKSPACE_BYTES = HuffmanCodeBuilder.storage_bytes(LITERAL_CODES) + HuffmanCodeBuilder.storage_bytes(DISTANCE_CODES) +
+                      HuffmanCodeBuilder.storage_bytes(CODE_LENGTH_CODES)
+
+    # *buffer* is the first output buffer. A writer with a sink drains it
+    # and never needs another; a writer without one replaces it with a
+    # larger buffer from the collector when a block needs more room.
+    # *workspace* is `WORKSPACE_BYTES` of zeroed memory aligned to 4 bytes
+    # that outlives every block written.
+    def initialize(@sink : IO?, @buffer : Bytes, workspace : UInt8*)
+      @literal = HuffmanCodeBuilder.new(LITERAL_CODES, 15, LENGTH_EXTRA.to_slice, 257, FIXED_LITERAL_LENGTHS.to_slice,
+        workspace)
+      workspace += HuffmanCodeBuilder.storage_bytes(LITERAL_CODES)
+      @distance = HuffmanCodeBuilder.new(DISTANCE_CODES, 15, DISTANCE_EXTRA.to_slice, 0, FIXED_DISTANCE_LENGTHS.to_slice,
+        workspace)
+      workspace += HuffmanCodeBuilder.storage_bytes(DISTANCE_CODES)
+      @code_length = HuffmanCodeBuilder.new(CODE_LENGTH_CODES, 7, CODE_LENGTH_EXTRA.to_slice, 0, nil, workspace)
       @tables = SymbolTables.new
       start_block
     end
@@ -262,7 +285,8 @@ module Mica::Deflate
         reserve(@sink ? MAX_DYNAMIC_HEADER_BYTES : dynamic_bytes + 1)
         put_bits((2_u32 << 1) | (is_final ? 1_u32 : 0_u32), 3)
         write_code_lengths(last_code_length_index)
-        @tables.fill(@literal.lengths, @literal.codes, @distance.lengths, @distance.codes, @distance.max_code + 1)
+        @tables.fill(@literal.lengths, @literal.codes, @literal.max_code + 1, @distance.lengths, @distance.codes,
+          @distance.max_code + 1)
         write_symbols(symbols, symbol_count, pointerof(@tables))
       end
       start_block

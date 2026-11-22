@@ -350,7 +350,7 @@ describe "Mica::Deflate encoders, streaming" do
   end
 
   describe "memory" do
-    it_satisfies "DEFLATE-ENC-MEMORY-bounded", "allocates under 384 KiB for a level 9 stream of any size" do
+    it_satisfies "DEFLATE-ENC-MEMORY-bounded", "holds under 384 KiB for a level 9 stream of any size" do
       sink = DiscardingIO.new
       piece = EncoderSamples.text(65_536, 59)
       before = allocated_bytes_so_far
@@ -361,10 +361,17 @@ describe "Mica::Deflate encoders, streaming" do
       40.times { writer.write(piece) }
       writer.close
       for_the_whole_stream = allocated_bytes_so_far - before
-      # The window, the hash and chain tables and the symbol buffer
-      # (328,704 bytes), a 16 KiB output buffer and the code builders.
-      for_the_first_bytes.should be > 328_704
-      for_the_first_bytes.should be < 384 * 1_024
+      # The window, the hash and chain tables and the symbol buffer are
+      # 262,144 bytes from libc, with a 16 KiB output buffer and the code
+      # builders' workspace beside them; the collector supplies the
+      # objects.
+      tables = Mica::Deflate::Deflater::WINDOW_CAPACITY + 3 * 65_536
+      tables.should eq(262_144)
+      output_buffer = Mica::Deflate::Deflater::STREAM_OUTPUT_BYTES + Mica::Deflate::BlockWriter::SLACK
+      workspace = Mica::Deflate::BlockWriter::WORKSPACE_BYTES
+      workspace.should be < 16_000
+      for_the_first_bytes.should be < 8_000
+      (tables + output_buffer + workspace + for_the_first_bytes).should be < 384 * 1_024
       # 2.6 MB more input allocates nothing more.
       (for_the_whole_stream - for_the_first_bytes).should be < 4_096
     end

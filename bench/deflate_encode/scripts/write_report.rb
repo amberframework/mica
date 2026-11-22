@@ -272,8 +272,9 @@ end
 unless encoder_memory.empty? && peak_rss.empty?
   lines << '## Memory'
   lines << ''
-  lines << 'A Mica streaming encoder\'s allocation is the collector\'s byte count from before the encoder is built to after the stream is finished, ' \
-           'writing to a sink that discards; "tables" is the window, the hash and chain tables and the symbol buffer (the bound is 393,216 bytes, 384 KiB). ' \
+  lines << 'A Mica streaming encoder\'s allocation is what it takes from libc ("tables": the window, the hash and chain tables and the symbol buffer; ' \
+           'then the output buffer and the code builders\' workspace) plus the collector\'s byte count from before the encoder is built to after the stream is finished, ' \
+           'writing to a sink that discards (the bound is 393,216 bytes, 384 KiB). ' \
            'Peak resident set size is that of a separate process that does one encode (`/usr/bin/time -l`), runtime included: ' \
            'streaming engines read the file in 64 KiB pieces and keep no output; one-shot engines hold the whole input and output.'
   lines << ''

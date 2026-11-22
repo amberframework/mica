@@ -357,9 +357,12 @@ describe "Mica::Deflate encoders, one-shot" do
     it_satisfies "DEFLATE-ENC-MEMORY-bounded", "holds at most 384 KiB of tables for a stream at level 9" do
       deflater = Mica::Deflate::Deflater.new(Mica::Deflate::Format::Gzip, 9, IO::Memory.new)
       deflater.write(EncoderSamples.text(300_000, 19))
-      deflater.table_bytes.should eq(328_704)
+      deflater.table_bytes.should eq(262_144)
       deflater.table_bytes.should be <= 384 * 1_024
-      Mica::Deflate::Deflater.new(Mica::Deflate::Format::Raw, 0, IO::Memory.new).table_bytes.should eq(0)
+      deflater.release
+      stored_only = Mica::Deflate::Deflater.new(Mica::Deflate::Format::Raw, 0, IO::Memory.new)
+      stored_only.table_bytes.should eq(0)
+      stored_only.release
     end
   end
 end

@@ -25,58 +25,72 @@ module Mica::Deflate
     # The same total under the fixed code whose lengths were given.
     getter static_bits : Int32 = 0
 
-    @frequency : Slice(Int32)
-    @length : Slice(UInt8)
-    @code : Slice(UInt16)
-    @parent : Slice(Int32)
-    @heap : Slice(Int32)
-    @depth : Slice(UInt8)
+    @frequency : Int32*
+    @parent : Int32*
+    @heap : Int32*
+    @code : UInt16*
+    @length : UInt8*
+    # A node's place in the order the tree is built in: its frequency
+    # above bit 8 and the depth of its subtree in the low 8 bits.
+    @key : UInt64*
     @max_bits : Int32
     @extra_bits : Slice(UInt8)?
     @extra_base : Int32
     @static_length : Slice(UInt8)?
 
+    # Bytes of storage a builder for *symbol_count* symbols works in: a
+    # tree has up to 2n + 1 nodes (n leaves, n - 1 joins and slot 0 of the
+    # heap). The count is a multiple of 8, so builders can share one block.
+    def self.storage_bytes(symbol_count : Int32) : Int32
+      nodes = 2 * symbol_count + 1
+      (nodes * 17 + symbol_count * 6 + 7) & ~7
+    end
+
     # *extra_bits* holds the extra bits of symbol `extra_base + index`;
     # *static_length* the fixed code's lengths, for alphabets that have one.
+    # *storage* is `storage_bytes` of zeroed memory aligned to 8 bytes that
+    # outlives the builder; without it the collector supplies the memory.
     def initialize(@symbol_count : Int32, @max_bits : Int32, @extra_bits : Slice(UInt8)? = nil, @extra_base : Int32 = 0,
-                   @static_length : Slice(UInt8)? = nil)
+                   @static_length : Slice(UInt8)? = nil, storage : UInt8* = Pointer(UInt8).null)
+      # One block holds the six arrays, widest elements first.
       nodes = 2 * @symbol_count + 1
-      @frequency = Slice(Int32).new(nodes, 0)
-      @length = Slice(UInt8).new(nodes, 0_u8)
-      @code = Slice(UInt16).new(@symbol_count, 0_u16)
-      @parent = Slice(Int32).new(nodes, 0)
-      @heap = Slice(Int32).new(nodes, 0)
-      @depth = Slice(UInt8).new(nodes, 0_u8)
+      storage = Pointer(UInt8).malloc(HuffmanCodeBuilder.storage_bytes(@symbol_count)) if storage.null?
+      @key = storage.as(UInt64*)
+      @parent = (storage + nodes * 8).as(Int32*)
+      @heap = (storage + nodes * 12).as(Int32*)
+      @frequency = (storage + nodes * 16).as(Int32*)
+      @code = (storage + nodes * 16 + @symbol_count * 4).as(UInt16*)
+      @length = storage + nodes * 16 + @symbol_count * 6
     end
 
     # The frequency counters, one per symbol; the encoder's loops add to
     # them through this pointer.
     def frequencies : Int32*
-      @frequency.to_unsafe
+      @frequency
     end
 
     # The code length of each symbol after `build` (0 for unused symbols).
     def lengths : UInt8*
-      @length.to_unsafe
+      @length
     end
 
     # The bit-reversed code of each symbol after `build`.
     def codes : UInt16*
-      @code.to_unsafe
+      @code
     end
 
     # Clears every frequency for the next block.
     def reset : Nil
-      @frequency.to_unsafe.clear(@symbol_count)
+      @frequency.clear(@symbol_count)
     end
 
     # Computes lengths and codes from the current frequencies.
     def build : Nil
-      frequency = @frequency.to_unsafe
-      length = @length.to_unsafe
-      parent = @parent.to_unsafe
-      heap = @heap.to_unsafe
-      depth = @depth.to_unsafe
+      frequency = @frequency
+      length = @length
+      parent = @parent
+      heap = @heap
+      key = @key
       static_length = @static_length
       heap_size = 2 * @symbol_count + 1
       heap_length = 0
@@ -91,7 +105,7 @@ module Mica::Deflate
           heap_length += 1
           heap[heap_length] = symbol
           max_code = symbol
-          depth[symbol] = 0_u8
+          key[symbol] = frequency[symbol].to_u64! << 8
         else
           length[symbol] = 0_u8
         end
@@ -107,7 +121,7 @@ module Mica::Deflate
         heap_length += 1
         heap[heap_length] = forced
         frequency[forced] = 1
-        depth[forced] = 0_u8
+        key[forced] = 1_u64 << 8
         optimal_bits -= 1
         static_bits -= static_length[forced].to_i32 if static_length
       end
@@ -115,7 +129,7 @@ module Mica::Deflate
 
       index = heap_length // 2
       while index >= 1
-        sift_down(frequency, heap, depth, heap_length, index)
+        sift_down(heap, key, heap_length, index)
         index -= 1
       end
 
@@ -124,22 +138,24 @@ module Mica::Deflate
       loop do
         least = heap[1]
         heap[1] = heap[heap_length]
-        heap_length -= 1
-        sift_down(frequency, heap, depth, heap_length, 1)
+        heap_length &-= 1
+        sift_down(heap, key, heap_length, 1)
         next_least = heap[1]
 
-        heap_max -= 1
+        heap_max &-= 1
         heap[heap_max] = least
-        heap_max -= 1
+        heap_max &-= 1
         heap[heap_max] = next_least
 
-        frequency[node] = frequency[least] + frequency[next_least]
-        depth[node] = (Math.max(depth[least], depth[next_least]) &+ 1).to_u8!
+        least_key = key[least]
+        next_least_key = key[next_least]
+        depth = (Math.max(least_key & 0xFF, next_least_key & 0xFF) &+ 1) & 0xFF
+        key[node] = (((least_key >> 8) &+ (next_least_key >> 8)) << 8) | depth
         parent[least] = node
         parent[next_least] = node
         heap[1] = node
-        node += 1
-        sift_down(frequency, heap, depth, heap_length, 1)
+        node &+= 1
+        sift_down(heap, key, heap_length, 1)
         break if heap_length < 2
       end
       heap_max -= 1
@@ -153,17 +169,23 @@ module Mica::Deflate
 
     # Restores the heap property below *start* (zlib's `pqdownheap`): the
     # node with the smaller frequency rises, and of two equal frequencies
-    # the shallower subtree.
+    # the shallower subtree, which is the order of the keys.
     @[AlwaysInline]
-    private def sift_down(frequency : Int32*, heap : Int32*, depth : UInt8*, heap_length : Int32, start : Int32) : Nil
+    private def sift_down(heap : Int32*, key : UInt64*, heap_length : Int32, start : Int32) : Nil
       value = heap[start]
+      value_key = key[value]
       position = start
       child = position << 1
       while child <= heap_length
-        if child < heap_length && smaller?(frequency, depth, heap[child + 1], heap[child])
-          child += 1
+        child_key = key[heap[child]]
+        if child < heap_length
+          sibling_key = key[heap[child &+ 1]]
+          if sibling_key <= child_key
+            child &+= 1
+            child_key = sibling_key
+          end
         end
-        break if smaller?(frequency, depth, value, heap[child])
+        break if value_key <= child_key
         heap[position] = heap[child]
         position = child
         child <<= 1
@@ -171,20 +193,15 @@ module Mica::Deflate
       heap[position] = value
     end
 
-    @[AlwaysInline]
-    private def smaller?(frequency : Int32*, depth : UInt8*, first : Int32, second : Int32) : Bool
-      frequency[first] < frequency[second] || (frequency[first] == frequency[second] && depth[first] <= depth[second])
-    end
-
     # Turns the tree into code lengths (zlib's `gen_bitlen`): each node is
     # one bit longer than its parent; lengths past `max_bits` are cut to it
     # and the code is rebalanced by moving leaves down.
     private def assign_lengths(heap_max : Int32, heap_size : Int32, max_code : Int32, optimal_bits : Int32,
                                static_bits : Int32) : {Int32, Int32}
-      frequency = @frequency.to_unsafe
-      length = @length.to_unsafe
-      parent = @parent.to_unsafe
-      heap = @heap.to_unsafe
+      frequency = @frequency
+      length = @length
+      parent = @parent
+      heap = @heap
       extra_bits = @extra_bits
       static_length = @static_length
       max_bits = @max_bits
@@ -249,7 +266,7 @@ module Mica::Deflate
 
     # Assigns canonical codes to the lengths (zlib's `gen_codes`).
     private def assign_codes(max_code : Int32) : Nil
-      HuffmanCodeBuilder.assign_canonical_codes(@length.to_unsafe, @code.to_unsafe, max_code + 1)
+      HuffmanCodeBuilder.assign_canonical_codes(@length, @code, max_code + 1)
     end
 
     # Writes into *code* the bit-reversed canonical code of each of the
