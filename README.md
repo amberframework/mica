@@ -1,5 +1,8 @@
 <a href="#install">
-  <img src="docs/brand/hero.svg" width="100%" alt="Mica: reads untrusted bytes, never guesses. Mica, the Amber crew's reader, at a lectern in a library. A brass loupe sweeps across a request line and lights up the date a regex matches.">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/brand/hero-dark.svg">
+  <img src="docs/brand/hero-light.svg" width="100%" alt="Mica: reads untrusted bytes, never guesses. Mica, the Amber crew's reader, at a lectern in a library, beside her character mark. A loupe sweeps across a request line and lights up the date a regex matches.">
+</picture>
 </a>
 
 <p align="center">
@@ -131,9 +134,9 @@ flowchart TD
     budget[["Work budget + deadline<br/>charged on every step"]] -.-> fast
     budget -.-> dfa
     budget -.-> nfa
-    classDef step fill:#1A2130,stroke:#7E9BEA,color:#EDEFF5
-    classDef brass fill:#E2B65B,stroke:#8A6A1F,color:#1C2231
-    classDef stop fill:#F7913A,stroke:#A93C08,color:#1C2231
+    classDef step fill:#FFFDF9,stroke:#D9AD7E,color:#211914
+    classDef brass fill:#FFC777,stroke:#A93D08,color:#211914
+    classDef stop fill:#F47A16,stroke:#A93D08,color:#211914
     class parser,limits,hir,compiler,fast,dfa,nfa step
     class source,static,found,plan brass
     class refused,budget stop
@@ -224,9 +227,10 @@ MIT. `src/mica/xml/composing_characters.cr` is generated from the Unicode 17.0.0
 
 <br>
 
-<p align="center">
-  <a href="https://amberframework.org"><img src="docs/brand/amber-crystal.svg" width="40" alt="Amber framework"></a>
-</p>
+<p align="center"><a href="https://amberframework.org"><picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/brand/amber-lockup-dark.svg">
+  <img src="docs/brand/amber-lockup-light.svg" height="40" alt="Amber Framework">
+</picture></a></p>
 <p align="center"><sub>Part of the <a href="https://amberframework.org">Amber framework</a>. Built and maintained by</sub></p>
 <p align="center"><a href="https://agentc.consulting"><picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/AgentC-Consulting/.github/main/brand/wordmark-dark.png">
