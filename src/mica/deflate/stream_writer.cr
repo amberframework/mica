@@ -16,12 +16,11 @@ module Mica::Deflate
 
     def initialize(@destination : IO, format : Format, level : Int32, dictionary : Bytes?, header : Gzip::Header?,
                    @sync_close : Bool)
-      @deflater = Deflater.new(format, level, @destination, dictionary, header)
-    end
-
-    # Frees the encoder's tables when a writer is dropped unclosed.
-    def finalize
-      @deflater.release
+      # A writer dropped unclosed has its tables freed by the guard, which
+      # the collector can finalize even when *destination* refers back to
+      # this writer.
+      @deflater = Deflater.new(format, level, @destination, dictionary, header,
+        release_guard: Deflater::ReleaseGuard.new)
     end
 
     # Raises `IO::Error`: the writer is write-only.

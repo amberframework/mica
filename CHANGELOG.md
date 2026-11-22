@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+Fixes a leak in the streaming encoders: a `Deflate::Writer`, `Zlib::Writer`
+or `Gzip::Writer` that was dropped without `close` kept its 270 KB of
+tables when its destination referred back to the writer (a response whose
+output is the writer), because the collector does not finalize an object it
+reaches from itself. The tables now belong to a guard that holds addresses
+only, which the collector finalizes in every case.
+
 Adds `scripts/vendor_into.rb`: it places a pinned copy of one Mica component
 (today `deflate`: `Mica::Deflate`, `Mica::Zlib` and `Mica::Gzip` with
 `Mica::Core`) inside a library that cannot name the Mica shard as a
