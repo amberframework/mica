@@ -21,6 +21,14 @@ Adds Inflate (compression milestone Z1): `Mica::Deflate`, `Mica::Zlib` and
   corpus, a port of zlib's `test/infcover.c`, and benchmarks against zlib
   (`bench/deflate/`).
 - A Mica Inflate program links no libz (`scripts/check_linkage.sh`).
+- Decoder speed: a spare decoder (tables and buffers) is reused by the next
+  decode; Huffman tables are two-level 32-bit entries built in canonical
+  order; the fast loop keeps 64 bits of input and looks the next entry up
+  before each refill and each copy; CRC-32 uses the ARMv8 CRC instructions
+  in three streams; a `Reader` decodes straight into a slice of 32 KiB or
+  more; a one-shot result over 160 KiB is sized from the ratio the stream
+  has shown. Every limit is enforced where it was. Numbers against zlib:
+  `docs/benchmarks.md`, "Inflate".
 
 ## 0.2.0 (2026-11-21)
 
