@@ -1,48 +1,25 @@
-# Mica
+<a href="#install">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/brand/hero-dark.svg">
+  <img src="docs/brand/hero-light.svg" width="100%" alt="Mica: reads untrusted bytes, never guesses. Mica, the Amber crew's reader, at a lectern in a library, beside her character mark. A loupe sweeps across a request line and lights up the date a regex matches.">
+</picture>
+</a>
 
-A pure-Crystal parsing library for the Amber ecosystem. Mica is a family of
-format parsers on one shared core:
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/brand/badges-dark.svg">
+    <img src="docs/brand/badges-light.svg" width="860" alt="Pure Crystal · No PCRE2, no libz, no libxml2 · Linear-time search · Work budgets and deadlines · v0.2.0 · MIT">
+  </picture>
+</p>
 
-- `Mica::Core`: input with positions (bytes or streams), strict UTF-8, the
-  UTF-16/UTF-32/ISO-8859-1 transcoder, encodings, limits, the work budget
-  and deadline, and the error types every format raises.
-- `Mica::XML`: XML 1.0 (5th edition) and XML 1.1 (2nd edition) with
-  Namespaces 1.0 and 1.1: a streaming reader, a DOM, a builder and
-  XPath 1.0.
-- `Mica::Regex`: a pure-Crystal regular expression engine whose searches
-  run in time linear in the haystack (the RE2 and Rust regex family).
-  Milestones R1 to R3 are in: the Crystal-dialect parser (PCRE2 syntax,
-  with backreferences, lookaround and the other backtracking-only
-  constructs refused by name), compile limits, Unicode 17 classes and case
-  folding, the Pike VM and bounded backtracker, the forward and reverse
-  lazy DFAs, the one-pass DFA, literal prefilters, a process-wide DFA
-  cache pool, and `Mica::Regex::Expression`, whose methods follow
-  Crystal's `Regex` with required compile and search limits. See
-  [docs/regex.md](docs/regex.md).
-- `Mica::Deflate`, `Mica::Zlib` and `Mica::Gzip`: raw DEFLATE (RFC 1951),
-  zlib (RFC 1950) and gzip (RFC 1952), one-shot and streaming. Decoding
-  (Inflate, multi-member gzip) takes required output, ratio, window,
-  member, metadata and work limits and a deadline. Encoding has levels 0
-  to 9 with zlib's algorithm and sizes, sync and full flush, preset
-  dictionaries and gzip headers. See [docs/compression.md](docs/compression.md).
-- `Mica::Testing` (opt-in, `require "mica/testing"`): the complexity,
-  fuzzing and requirement-traceability harnesses every format uses.
+<p align="center">
+  <b>Mica is Amber's pure-Crystal parsing library.</b><br>
+  Regex, gzip, zlib, DEFLATE, XML and UTF-8, with a work budget and a deadline on every parse.
+</p>
 
-More formats (JSON, YAML, CBOR, COSE, HTTP/1.1, URIs, multipart, CSV, TOML,
-Markdown) plug into the same core; see
-[docs/ADDING_A_FORMAT.md](docs/ADDING_A_FORMAT.md).
+<br>
 
-Mica has no C parsing dependencies: no libxml2, no PCRE2 and no libz. A Mica
-program links only libgc, libiconv and libSystem, which the Crystal runtime
-itself needs (`scripts/check_linkage.sh` checks this). Mica never reads the
-network or the file system while parsing, and it is secure by default:
-every parse and every XPath evaluation runs in time linear in its input,
-under a work budget and a deadline.
-
-The XML API follows stdlib `XML` closely; porting is mostly renaming `XML`
-to `Mica::XML`.
-
-## Installation
+## Install
 
 ```yaml
 dependencies:
@@ -55,353 +32,207 @@ dependencies:
 require "mica"
 ```
 
-## Parsing into a document
+> [!NOTE]
+> 0.2.0 has `Mica::Regex` and `Mica::XML`. Inflate (`Mica::Gzip`, `Mica::Zlib`, `Mica::Deflate`) is on `main` and ships in the next release. To use it now, pin the merge commit: `commit: 25b528051464b7ce795478a3519f729eec10b590`.
+
+## Two ways to use it
+
+### 1. Mica's own API, on any Crystal compiler
 
 ```crystal
-document = Mica::XML.parse(File.read("feed.xml")) # String, Bytes or IO
-feed = document.root || raise "empty document"      # Mica::XML::Node
-feed.name                                           # local name, like stdlib
-feed["version"]?                                    # attribute or nil
-feed.children.select(&.element?)
-document.xpath_nodes("//item/title").map(&.content)
+limits = Mica::Regex::SearchLimits::REQUEST
+date = Mica::Regex::Expression.new("(?<year>\\d{4})-(?<month>\\d{2})",
+  compile_limits: Mica::Regex::CompileLimits::TRUSTED_PATTERN)
+date.match("due 2026-11", limits: limits).try(&.["year"]) # => "2026"
+
+# Compiled while the app builds: read-only tables, no allocation per search.
+SLUG = Mica::Regex.static(/\A[a-z0-9]+(?:-[a-z0-9]+)*\z/)
+SLUG.matches?("pure-crystal-parsing") # => true
+
+body = Mica::Gzip.decode(gzipped, limits: Mica::Deflate::DecodeLimits::REQUEST_BODY, timeout: 2.seconds)
+document = Mica::XML.parse(File.read("feed.xml"))
 ```
 
-`Mica::XML::Node` is a small struct (document + index); nodes live in an
-arena owned by `Mica::XML::Document`. It supports the stdlib `XML::Node`
-API: `[]`, `[]?`, `[]=`, `delete`, `attributes`, `children`,
-`content`/`text`/`inner_text`, `content=`, `name`, `name=`, `namespace`,
-`namespaces`, `namespace_definitions`, `namespace_scopes`, `parent`,
-`next`/`previous` (and `_sibling`/`_element` forms), `first_element_child`,
-`root`, `type` and the type predicates, `unlink`, `to_s`,
-`to_xml(indent:, indent_text:)`, and the XPath methods. Extras:
-`qualified_name`, `prefix`, `namespace_uri`.
+`Mica::Regex::Expression` follows stdlib `Regex` method for method, plus the limits. Guides: [Regex](docs/regex.md) · [Inflate](docs/compression.md) · [YAML](docs/yaml.md) · [XML](docs/xml.md).
 
-## Streaming with the reader
+### 2. Crystal's own `Regex` on Mica, with crystal-alpha
 
-```crystal
-File.open("s3-listing.xml") do |file|
-  reader = Mica::XML::Reader.new(file)
-  while reader.read
-    if reader.node_type.element? && reader.local_name == "Key"
-      reader.read
-      puts reader.value
-    end
-  end
-end
+```sh
+crystal-alpha build -Duse_mica src/app.cr
 ```
 
-The reader keeps one buffer holding the current token, so memory stays flat
-(about 4 MB peak RSS on a 50 MB file). Methods: `read`, `node_type`, `name`,
-`local_name`, `prefix`, `namespace_uri`, `value`, `depth`,
-`empty_element?`, `has_attributes?`, `attributes_count`,
-`move_to_first_attribute`, `move_to_next_attribute`, `move_to_attribute`,
-`move_to_element`, `[]`, `[]?`, `next`, `next_sibling`, `expand`,
-`read_inner_xml`, `read_outer_xml`, `line_number`, `column_number`,
-`renew_meter` (see the work budget below).
+With `-Duse_mica`, Crystal's own `Regex` (regex literals, `$~`, `String#match`, `gsub`, `scan`, `split`) runs on Mica with no code changes, and the binary links no PCRE2. It arrived in [crimson-knight/crystal#17](https://github.com/crimson-knight/crystal/pull/17) (merged).
 
-## Building XML
+> [!IMPORTANT]
+> This is opt-in today. PCRE2 stays the default without the flag, and stock Crystal does not have `-Duse_mica`: it needs the crystal-alpha compiler.
 
-```crystal
-xml = Mica::XML.build(indent: 2) do |builder|
-  builder.element("ListBucketResult", xmlns: "http://s3.amazonaws.com/doc/2006-03-01/") do
-    builder.element("Key") { builder.text "photos/a&b.jpg" }
-  end
-end
+## What Mica leaves out, and the rewrite
+
+Mica's searches run in time linear in the input, so it refuses the constructs that need backtracking. `Mica::Regex` raises `UnsupportedConstructError` naming the construct and its byte; under `-Duse_mica`, a regex literal that uses one is a compile error.
+
+| Instead of | Write | Then, in Crystal |
+|---|---|---|
+| Backreference `(\w+) \1` | `(\w+) (\w+)` | `match[1] == match[2]` |
+| Lookahead `\d+(?= USD)` | `(\d+) USD` | use `match[1]` |
+| Lookbehind `(?<=\$)\d+` | `\$(\d+)` | use `match[1]` |
+| Negative lookahead `\A(?!admin\z)\w+\z` | `\A\w+\z` | `&& name != "admin"` |
+| Atomic group `(?>a+)`, possessive `a++` | `a+` | nothing: Mica never backtracks |
+
+The full list (recursion, conditionals, `\K`, verbs, newline conventions) is in [Excluded constructs](docs/regex.md#excluded-constructs).
+
+## Speed
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/brand/regex-speed-dark.svg">
+  <img src="docs/brand/regex-speed-light.svg" width="100%" alt="Mica::Regex against PCRE2 with JIT, geometric means over 479 cases. Compiled at run time: warm search 2.4× as fast (29.85 µs vs 72.39 µs), compile 1.7× as fast, cold first search 3.0× as fast, process-cold 2.3× as fast. Mica::Regex.static over 412 cases: warm search 2.0×, compile 24×, cold first search 11×, process-cold 6.2× as fast.">
+</picture>
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/brand/amber-patterns-dark.svg">
+  <img src="docs/brand/amber-patterns-light.svg" width="100%" alt="The 26 patterns Amber apps run, process-cold, against PCRE2 with JIT: routes 2.5× as fast, templates 2.6×, Markdown 2.8×, logs 2.6×, CSV 2.7×, contacts 2.1×, identifiers 2.9×. All 104 Amber cases: 2.6× as fast (210.91 µs vs 552.64 µs).">
+</picture>
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/brand/redos-dark.svg">
+  <img src="docs/brand/redos-light.svg" width="100%" alt="Hostile patterns finish. Over 112 ReDoS cases Mica::Regex is 8.8× as fast on warm search (330.1 ns vs 2.91 µs) and hits no limit, where PCRE2 with JIT stopped on a limit 28 times and timed out once. All 13 ReDoS families finish inside 1,000 ms, with linear growth.">
+</picture>
+
+<details>
+<summary><b>See it run: the ReDoS corpus in a terminal</b></summary>
+<br>
+
+<img src="docs/img/redos-run.png" width="100%" alt="Terminal output of bench/regex/run.sh on the ReDoS corpus. At 262,144 and 1,048,576 input units, pcre2-jit lines end in 'JIT stack limit reached' or 'match limit exceeded', while every mica line reads ok with its warm, compile and process-cold times.">
+
+<sub>`bench/regex/run.sh --quick --corpora redos --engines pcre2-jit,mica`, run on 2026-11-22 at `main` (25b5280). PCRE2-JIT stops on its stack or match limit; Mica finishes all 143 cases.</sub>
+
+</details>
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/brand/inflate-dark.svg">
+  <img src="docs/brand/inflate-light.svg" width="100%" alt="Inflate against system zlib, decode time over 93 cases. One-shot: 1.45× slower than zlib. Streaming with 64 KiB buffers: 1.83× slower. Against zlib reusing one output buffer: 1.86× slower. The Z1 milestone allowed up to 2× slower.">
+</picture>
+
+Regex numbers come from the full harness at commit `f0bb0f6`, the code tagged v0.2.0; Inflate numbers from the Z1 run merged in #18. How they are measured, and how to rerun them: [docs/benchmarks.md](docs/benchmarks.md).
+
+## How a search runs
+
+```mermaid
+flowchart TD
+    source(["Pattern text"]) --> parser["Parser<br/>Crystal dialect, PCRE2 syntax"]
+    parser -- "backreference, lookaround ..." --> refused{{"UnsupportedConstructError<br/>names the construct and byte"}}
+    parser --> limits["Compile limits<br/>size preflight"]
+    limits --> hir["Hir<br/>Unicode 17 classes, case folding"]
+    hir --> compiler["Compiler<br/>byte-level NFA program"]
+    static(["Mica::Regex.static<br/>tables built at app build time"]) --> plan
+    compiler --> plan{"Search plan<br/>picked per search"}
+    plan --> fast["Required bytes<br/>literal prefilters"]
+    plan --> dfa["One-pass DFA<br/>lazy DFAs, forward and reverse"]
+    plan --> nfa["Pike VM<br/>bounded backtracker"]
+    fast --> found(["Match"])
+    dfa --> found
+    nfa --> found
+    budget[["Work budget + deadline<br/>charged on every step"]] -.-> fast
+    budget -.-> dfa
+    budget -.-> nfa
+    classDef step fill:#FFFDF9,stroke:#D9AD7E,color:#211914
+    classDef brass fill:#FFC777,stroke:#A93D08,color:#211914
+    classDef stop fill:#F47A16,stroke:#A93D08,color:#211914
+    class parser,limits,hir,compiler,fast,dfa,nfa step
+    class source,static,found,plan brass
+    class refused,budget stop
 ```
 
-The builder escapes text and attribute values, checks names and
-characters, splits `]]>` in CDATA, and raises `Mica::XML::BuilderError` for
-misuse (an attribute after content, a second root, a `--` in a comment).
-Methods match stdlib `XML::Builder`. It writes UTF-8 only, and when writing
-XML 1.1 it escapes control characters as character references.
+Every engine is linear in the input; the plan only picks the fastest one that fits the pattern and the question asked.
 
-## Request bodies as fields
+## Formats
 
-`require "mica/xml/fields"` (opt-in; it pulls in stdlib `JSON`) reads an XML
-document into the same `Hash(String, JSON::Any)` a JSON object body
-produces, so one schema validates either format. The root element stands
-for the object; child elements become fields by local name; repeated names
-become arrays; attributes become `"@name"` keys; mixed text becomes
-`"#text"`. Values stay strings for the schema to convert.
+| Module | Reads | Guide |
+|---|---|---|
+| `Mica::Regex` | Regular expressions in Crystal's PCRE2 syntax, linear-time | [docs/regex.md](docs/regex.md) |
+| `Mica::Gzip`, `Mica::Zlib`, `Mica::Deflate` | gzip (RFC 1952, multi-member), zlib (RFC 1950), raw DEFLATE (RFC 1951); one-shot and streaming, decoding under limits and encoding at levels 0 to 9 | [docs/compression.md](docs/compression.md) |
+| `Mica::YAML` | YAML 1.2 (402 of 402 yaml-test-suite cases) and a libyaml 0.2.5 dialect: pull parser, node API with aliases and merge keys, emitter. On `main`, ships in the next release | [docs/yaml.md](docs/yaml.md) |
+| `Mica::XML` | XML 1.0 and 1.1 with Namespaces: streaming reader, DOM, builder, XPath 1.0 | [docs/xml.md](docs/xml.md) |
+| `Mica::Core` | Strict UTF-8, UTF-16/UTF-32/ISO-8859-1 transcoding, positions, limits, work budgets | [docs/ADDING_A_FORMAT.md](docs/ADDING_A_FORMAT.md) |
 
-A request body is untrusted, so `Fields.read` streams it once through the
-reader (no DOM), refuses a document type declaration (DTD) at its
-`<!DOCTYPE` before reading any declaration (`ParserOptions#allow_document_type`), names that collide across namespaces, and nesting deeper than 64
-levels (`Mica::XML::Fields::RejectedDocumentError`), requires a body size cap
-(1 MiB by default), and charges every event and copied byte to the parse's
-work budget.
+More formats (JSON, CBOR, HTTP/1.1, URIs, multipart, CSV, TOML, Markdown) plug into the same core.
 
-```crystal
-require "mica/xml/fields"
+## Safe by default
 
-Mica::XML::Fields.read(%(<user id="7"><name>Ada</name><role>admin</role><role>dev</role></user>))
-# => {"@id" => "7", "name" => "Ada", "role" => ["admin", "dev"]}
-```
+Mica is built for bytes from strangers: request bodies, uploads, storage listings.
 
-`Fields.read` parses with `Fields::REQUEST_BODY_OPTIONS` (the secure
-defaults, nesting capped at 64 levels, bodies at 1 MiB) unless you pass
-other options; the DTD, namespace and depth checks apply either way.
-In an Amber V2 application, register it as the XML body parser:
+- **Work budgets.** Every parse and search counts its work and stops at its allowance, so no input can buy superlinear time.
+- **Deadlines.** A timeout adds a wall-clock limit, checked as the work runs.
+- **Limits.** Output size, decompression ratio, entity expansion, nesting depth and pattern size are capped before the bytes they guard are written.
+- **No fetching.** Mica never reads the network or the file system while parsing.
+- **No C parsers.** A Mica program links only libgc, libiconv and libSystem, which Crystal itself needs (`scripts/check_linkage.sh`).
 
-```crystal
-# config/initializers/request_body_parsers.cr
-require "mica/xml/fields"
+> [!TIP]
+> Each format ships presets for the common jobs, such as `SearchLimits::REQUEST` and `DecodeLimits::REQUEST_BODY`. Start from one and tighten it.
 
-{"application/xml", "text/xml"}.each do |media_type|
-  Amber::Schema::Parser::ParserRegistry.register_body_parser(media_type) do |body|
-    Mica::XML::Fields.read(body)
-  end
-end
-```
+Found a way past a limit? Please report it privately: [SECURITY.md](SECURITY.md).
 
-## Security and limits
+## Questions
 
-Every parse is secure by default:
+<details>
+<summary><b>Why no backreferences or lookaround?</b></summary>
+<br>
 
-- External DTD subsets and external entities (general and parameter) are
-  never fetched. A reference to an external parsed entity in content is
-  reported as an `ENTITY_REFERENCE` node and kept as `&name;` on output.
-- Entity expansion is bounded by count and by total bytes; attributes added
-  from DTD defaults have their own count and byte limits; entity nesting
-  and element nesting are bounded; recursion is a well-formedness error.
-- Token size, name length, attributes per element and total input size are
-  bounded. The parser is iterative, as are the serializer and the XPath
-  axes, so deep documents cannot overflow the stack.
-- Every parse and every XPath evaluation runs in time linear in its input.
-  The specs prove it with operation counts at n and 4n for every pattern
-  that is superlinear in other parsers, including the REXML 2024 CVE
-  inputs (CVE-2024-35176, -39908, -41123, -41946, -43398 and -49761).
-  Mica's name table caps its hash probes outright; other hash-table steps
-  count as one operation in expectation, because Crystal keys its hashing
-  with a secure random seed chosen once per process.
-- Scanners and node storage read memory only through bounds-checked
-  slices.
+They need backtracking, and backtracking is what lets one hostile input stall a server (ReDoS). Mica keeps every search linear instead. Each construct has a short rewrite above, usually one capture group and one comparison in Crystal.
 
-### Work budget and deadline
+</details>
 
-Each parse and each XPath evaluation counts its work in abstract operations
-(about one per byte scanned, plus one per step of any loop that does not
-advance through the input) against a `Mica::Core::WorkBudget`:
+<details>
+<summary><b>Does my app still link PCRE2?</b></summary>
+<br>
 
-    allowance = base_operations + operations_per_unit * units
+With Mica's own API, Mica adds no PCRE2, but Crystal's stdlib `Regex` still uses it wherever your code or your shards do. Build with crystal-alpha and `-Duse_mica` to move all of it onto Mica and drop the library.
 
-The units are the input bytes for a parse, and the document's nodes plus
-the expression's bytes for XPath. A timeout adds a wall-clock deadline,
-checked at least every 65,536 operations, at every read from a stream, and
-when each XPath compilation, evaluation and edit starts (and, for compilation
-and evaluation, before it returns).
+</details>
 
-| Operation | Default budget | Default deadline | Measured cost of valid input |
-|---|---|---|---|
-| Parse (`ParserOptions::DEFAULT_WORK_BUDGET`) | 1,000,000 + 64 per byte | 60 s | at most 5.6 operations per byte (fuzz maximum over 2M cases) |
-| XPath (`XPath::DEFAULT_WORK_BUDGET`) | 1,000,000 + 64 per node | 10 s | about 2 operations per node for `count(//*)` |
-| DOM edits (`Document::DEFAULT_EDIT_BUDGET`) | 1,000,000 + 64 per node, name byte, edit call and byte given to edits | none | a few operations per edit |
+<details>
+<summary><b>I use stdlib <code>XML</code>. How much changes?</b></summary>
+<br>
 
-The defaults leave more than ten times headroom over the most expensive
-valid input that the fuzzer and the benchmarks found, and they stop any
-input that needs superlinear work. When a budget trips, Mica raises
-`Mica::WorkBudgetExceededError` (with `operations` and `allowance`) or
-`Mica::DeadlineExceededError` (with `elapsed`). Both are
-`Mica::LimitExceededError`s and carry the position where the work stopped,
-in the document or in the XPath expression.
+Mostly the name: `XML` becomes `Mica::XML`. Parsing is strict (the first error raises), and nodes are small structs. The differences are listed in [docs/xml.md](docs/xml.md#differences-from-stdlib-xml).
 
-```crystal
-options = Mica::XML::ParserOptions.new(
-  namespace_aware: true,
-  max_entity_expansions: 10_000,                 # default
-  max_entity_expansion_bytes: 16 * 1024 * 1024,  # default
-  max_entity_depth: 16,                          # default
-  max_default_attributes: 1_000_000,             # default
-  max_default_attribute_bytes: 16 * 1024 * 1024, # default
-  max_element_depth: 1024,                       # default
-  max_name_bytes: 50_000,                        # default
-  max_attributes: 10_000,                        # default
-  max_token_bytes: 10 * 1024 * 1024,             # default
-  max_input_bytes: nil,                          # default: no cap
-  work_budget: Mica::Core::WorkBudget.new(operations_per_unit: 64, timeout: 2.seconds),
-  check_normalization: false,                    # default; XML 1.1 section 2.13
-)
-Mica::XML.parse(body, options)
+</details>
 
-# One meter shared by a parse and the queries that follow it. Each call
-# adds its own input to the allowance (a query re-reads the document), so a
-# request that makes many calls is bounded by max_operations or a timeout:
-meter = Mica::Core::WorkMeter.new(Mica::Core::WorkBudget.new(timeout: 1.second))
-document = Mica::XML.parse(body, meter: meter)
-document.xpath_nodes("//item", meter: meter)
-```
+<details>
+<summary><b>Is Inflate as fast as zlib?</b></summary>
+<br>
 
-Edits through `Node` (`[]=`, `delete`, `name=`, `content=`, `unlink`) are
-charged to `Document#edit_meter`, whose units are the document's nodes and
-name bytes plus one per edit call and the bytes each call is given; a
-document edited in rounds over a long life calls
-`Document#renew_edit_meter` between rounds.
+Not yet. One-shot decoding is 1.45× slower than system zlib today, inside the Z1 goal of 2×. Encoders follow in milestone Z2.
 
-A long-lived stream (a protocol session over a socket) calls
-`Reader#renew_meter` between messages instead of disabling the budget. The
-deadline is checked whenever the reader asks its IO for more bytes; a read
-that blocks forever never returns to Mica, so give sockets a read timeout
-(`IO#read_timeout`).
-
-## Errors
-
-All errors inherit from `Mica::Error`:
-
-| Error | Raised for |
-|---|---|
-| `Mica::ParseError` | well-formedness or namespace errors; has `position` (`byte_offset`, `line_number`, `column_number` in characters) and `detail` |
-| `Mica::EncodingError` | unsupported encodings and invalid UTF-8 or UTF-16, at the exact source byte (subclass of `ParseError`) |
-| `Mica::LimitExceededError` | a `ParserOptions` limit (subclass of `ParseError`) |
-| `Mica::WorkBudgetExceededError` | the work budget (subclass of `LimitExceededError`) |
-| `Mica::DeadlineExceededError` | the deadline (subclass of `LimitExceededError`) |
-| `Mica::XML::NormalizationError` | XML 1.1 text that is not fully normalized, with `check_normalization` (subclass of `ParseError`) |
-| `Mica::XML::XPathError` | XPath syntax errors and unsupported XPath features |
-| `Mica::XML::BuilderError` | builder misuse |
-
-## Encodings
-
-`Mica::XML` decodes UTF-8 (with or without a byte order mark), UTF-16 (big
-or little endian, byte order mark required) and ISO-8859-1 in Crystal;
-`US-ASCII` is accepted and enforced. Invalid input is never replaced with
-U+FFFD: it raises `Mica::EncodingError` at the offset of the bad byte in the
-original input. UTF-32, EBCDIC and any other declared encoding raise
-`Mica::EncodingError` naming it. (`Mica::Core::Transcoder` also decodes
-UTF-32, for formats that allow it.)
-
-## XML 1.1
-
-A document that declares `version="1.1"` follows the XML 1.1 rules: NEL
-(U+0085), LSEP (U+2028), CR NEL and CR LF become LF in the document entity;
-character references may name C0 controls other than NUL; DEL and the C1
-controls other than NEL may not appear literally; names use the XML 1.1
-ranges; and `xmlns:p=""` undeclares a prefix (Namespaces 1.1).
-`check_normalization: true` verifies full normalization (section 2.13):
-names, attribute values, character content, CDATA sections, comments and
-PIs must be in Unicode NFC and must not start with a composing character.
-
-## Differences from stdlib `XML`
-
-- Parsing is strict: the first error raises (stdlib's default options
-  recover from errors and collect them).
-- `Reader#expand`, `read_inner_xml` and `read_outer_xml` consume the
-  element's subtree: afterwards the reader sits on the element's end.
-- `Node` is a struct; nodes from one document compare equal by position.
-- `xpath_string`, `xpath_float` and `xpath_bool` convert any result type
-  with the XPath conversion rules instead of requiring that type.
-- No HTML parser.
-
-## XPath
-
-`Node#xpath`, `xpath_nodes`, `xpath_node`, `xpath_string`, `xpath_float`,
-`xpath_bool` take an optional prefix map. Without one, the namespaces
-declared on the root element are registered (the default namespace under
-the prefix `xmlns`), as in stdlib. `Mica::XML::XPath.compile(path)` returns
-a reusable expression. Every evaluation takes `budget:` and `meter:` named
-arguments (see the work budget above).
-
-```crystal
-s3 = {"s3" => "http://s3.amazonaws.com/doc/2006-03-01/"}
-document.xpath_nodes("//s3:Contents[s3:Size > 1024]/s3:Key", s3)
-document.xpath_string("string(//s3:NextContinuationToken)", s3)
-document.xpath_float("count(//s3:Contents)", s3)
-```
-
-Supported grammar (XPath 1.0, section numbers from the recommendation):
-
-```
-Expr            ::= OrExpr
-OrExpr          ::= AndExpr ('or' AndExpr)*
-AndExpr         ::= EqualityExpr ('and' EqualityExpr)*
-EqualityExpr    ::= RelationalExpr (('=' | '!=') RelationalExpr)*
-RelationalExpr  ::= AdditiveExpr (('<' | '>' | '<=' | '>=') AdditiveExpr)*
-AdditiveExpr    ::= MultiplicativeExpr (('+' | '-') MultiplicativeExpr)*
-MultiplicativeExpr ::= UnaryExpr (('*' | 'div' | 'mod') UnaryExpr)*
-UnaryExpr       ::= UnionExpr | '-' UnaryExpr
-UnionExpr       ::= PathExpr ('|' PathExpr)*
-PathExpr        ::= LocationPath | FilterExpr (('/' | '//') RelativeLocationPath)?
-FilterExpr      ::= PrimaryExpr Predicate*
-PrimaryExpr     ::= '$' QName | '(' Expr ')' | Literal | Number | FunctionCall
-LocationPath    ::= '/' RelativeLocationPath? | '//' RelativeLocationPath | RelativeLocationPath
-RelativeLocationPath ::= Step (('/' | '//') Step)*
-Step            ::= AxisSpecifier NodeTest Predicate* | '.' | '..'
-AxisSpecifier   ::= AxisName '::' | '@'?
-NodeTest        ::= '*' | NCName ':*' | QName
-                  | 'node()' | 'text()' | 'comment()' | 'processing-instruction(' Literal? ')'
-Predicate       ::= '[' Expr ']'
-```
-
-- Axes: `child`, `descendant`, `descendant-or-self`, `self`, `parent`,
-  `ancestor`, `ancestor-or-self`, `following`, `following-sibling`,
-  `preceding`, `preceding-sibling`, `attribute`. Not supported:
-  `namespace`.
-- Functions: `last`, `position`, `count`, `local-name`, `namespace-uri`,
-  `name`, `string`, `concat`, `starts-with`, `contains`,
-  `substring-before`, `substring-after`, `substring`, `string-length`,
-  `normalize-space`, `translate`, `not`, `true`, `false`, `boolean`,
-  `number`, `sum`, `floor`, `ceiling`, `round`. Not supported: `id`,
-  `lang`.
-- Unprefixed names match only elements in no namespace (XPath 1.0 rule);
-  use a prefix map for namespaced documents.
-- Unsupported features and unknown functions raise `Mica::XML::XPathError`.
-- Evaluation is linear in the document for every axis from any number of
-  context nodes, for node-set comparisons and for the string functions
-  (`contains` and its relatives use Knuth-Morris-Pratt search). Number
-  conversion handles digit strings of any length in linear time.
+</details>
 
 ## Development
 
 ```sh
 shards-alpha install --frozen
-# Build and run the specs: complexity, hostile bytes, fuzzing, XML 1.1,
-# budgets, core, testing harnesses and requirement traceability
 crystal-alpha build $(find spec -name '*_spec.cr' | sort) -o bin/specs && bin/specs
 crystal-alpha tool format --check
-bin/ameba                    # build: crystal-alpha build lib/ameba/bin/ameba.cr -o bin/ameba
-scripts/check_linkage.sh     # no Regex in src; otool -L of a minimal program
-
-# Reports from the spec run
-MICA_COMPLEXITY_REPORT=complexity.tsv MICA_TRACEABILITY_REPORT=traceability.tsv bin/specs
-
-# W3C XML Conformance Test Suite (xmlconf 2013-09-23,
-# sha256 9b61db9f5dbffa545f4b8d78422167083a8568c59bd1129f94138f936cf6fc1f);
-# scores the XML 1.0 and XML 1.1 suites separately
-crystal-alpha run --release conformance/run.cr -- /path/to/xmlconf
-crystal-alpha run --release conformance/run_libxml2.cr -- /path/to/xmlconf   # baseline
-
-# Fuzz campaigns (release build) and the libxml2 differential
-crystal-alpha build --release fuzz/campaign.cr -o bin/fuzz_campaign
-bin/fuzz_campaign SEED ITERATIONS [FIRST]
-MICA_FUZZ_SEED=7 MICA_FUZZ_ITERATIONS=300000 crystal-alpha spec spec/xml/fuzz_spec.cr
-crystal-alpha run --release fuzz/differential.cr -- 20261024 20000
-
-# Inflate: differential fuzzing against system zlib, and benchmarks
-crystal-alpha build --release fuzz/deflate_campaign.cr -o bin/deflate_campaign
-bin/deflate_campaign SEED ITERATIONS [FIRST]
-bench/deflate/run.sh --quick
-
-# Deflate encoders: round-trip fuzzing through system zlib and Mica's
-# decoder, and benchmarks against system zlib
-crystal-alpha build --release fuzz/deflate_encode_campaign.cr -o bin/deflate_encode_campaign
-bin/deflate_encode_campaign SEED ITERATIONS [FIRST]
-bench/deflate_encode/run.sh --quick
-
-# Benchmarks against stdlib XML (libxml2)
-crystal-alpha run --release bench/generate.cr
-bench/run.sh
+scripts/check_linkage.sh     # no PCRE2, libz, libyaml or libxml2 in a Mica program
+bench/regex/run.sh --quick   # Mica::Regex against PCRE2
+bench/deflate/run.sh --quick # Inflate against zlib
+bench/yaml/run.sh            # Mica::YAML against libyaml
 ```
 
-Requirement ids in `spec/requirements/*.tsv` map specification sections and
-Mica's hardening requirements to the specs that cover them; specs declare
-them with `it_satisfies "ID", "description"`.
+Fuzzing, conformance suites and the XML benchmarks: [docs/xml.md](docs/xml.md), [docs/regex.md](docs/regex.md), [docs/compression.md](docs/compression.md), [docs/yaml.md](docs/yaml.md) and [docs/benchmarks.md](docs/benchmarks.md). Requirement ids in `spec/requirements/*.tsv` map each standard's sections to the specs that cover them.
 
-The libxml2 comparison programs (`conformance/run_libxml2.cr`,
-`bench/bench_stdlib.cr`, `fuzz/differential.cr`) are the only code that
-requires stdlib `xml`; the library and its specs never link libxml2.
+Something off? [Open an issue](../../issues/new/choose). Questions go to [SUPPORT.md](SUPPORT.md).
 
 ## License
 
-MIT
+MIT. `src/mica/xml/composing_characters.cr` is generated from the Unicode 17.0.0 character data that ships with the Crystal standard library, under the Unicode License v3.
 
-`src/mica/xml/composing_characters.cr` is generated from the Unicode 17.0.0
-character data that ships with the Crystal standard library; that data is
-under the Unicode License v3.
+<br>
+
+<p align="center"><a href="https://amberframework.org"><picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/brand/amber-lockup-dark.svg">
+  <img src="docs/brand/amber-lockup-light.svg" height="40" alt="Amber Framework">
+</picture></a></p>
+<p align="center"><sub>Part of the <a href="https://amberframework.org">Amber framework</a>. Built and maintained by</sub></p>
+<p align="center"><a href="https://agentc.consulting"><picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/AgentC-Consulting/.github/main/brand/wordmark-dark.png">
+  <img src="https://raw.githubusercontent.com/AgentC-Consulting/.github/main/brand/wordmark-light.png" alt="AgentC Consulting" width="220">
+</picture></a></p>

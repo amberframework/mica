@@ -8,3 +8,6 @@ conformance/xmlconf/
 lib/
 tmp/
 .minecart/audit/
+conformance/yaml-test-suite/
+docs/brand/fonts/
+docs/brand/source/textpath

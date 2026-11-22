@@ -428,3 +428,74 @@ every file larger than 4 KiB except two whose intervals reach 1.0
 A streaming encoder holds 294,992 bytes at each level. The first
 measurement of the branch, before tuning, had the same sizes and
 geometric means of 0.79× to 1.00× one-shot and 0.74× to 0.83× streaming.
+
+## YAML (`bench/yaml/`)
+
+Mica's YAML parser against libyaml 0.2.5 (through the standard library's
+`YAML::PullParser` and `YAML.parse_all`) on real configuration files. The
+bar for M4 is a speed of at least 1.0x libyaml's on every corpus.
+
+```sh
+bench/yaml/run.sh                 # 7 interleaved rounds
+bench/yaml/run.sh --rounds 3      # options after the script name go to scripts/run_ab.rb
+```
+
+One command fetches and verifies the corpus, builds the runner with
+`--release`, runs the rounds and prints the path of the report
+(`bench/data/yaml/runs/<UTC time>/REPORT.md`, with `results.json`,
+`samples.tsv` and `run.json` beside it). With `CRYSTAL_MICA_STDLIB` set to
+the `src/` directory of a crystal-alpha fork checkout that has the
+`-Duse_mica` YAML engine and `CRYSTAL_BIN` to its compiler binary, a second
+runner is built from that standard library with `-Duse_mica` (the script
+checks that it links no libyaml), and the report also measures the
+standard library's own calls on Mica.
+
+**Corpus** (`bench/yaml/corpus.tsv`, every row pinned by sha256; `url`
+rows also by the commit in their URL): Kubernetes manifests (ingress-nginx
+`deploy.yaml`, Argo CD `install.yaml` at 2.1 MB, two kube-prometheus
+manifests), GitHub Actions workflows (Crystal's Linux, Windows and macOS
+workflows and two starter workflows), `shard.yml` and `shard.lock` files
+(Crystal, Shards, Amber), and the configuration of a generated Amber V2
+application (`config/environments/*.yml`, `shard.yml`, `shard.lock`, with
+the secret key replaced by zeros): 19 files, 2,260,224 bytes.
+
+**Engines.** `mica-events` reads every event and takes every scalar's
+value with `Mica::YAML::PullParser` in the YAML 1.2 dialect;
+`mica-events-libyaml-dialect` does the same in the libyaml dialect;
+`stdlib-events` does the same with `YAML::PullParser` on libyaml.
+`mica-parse` is `Mica::YAML.parse_all` and `stdlib-parse` is
+`YAML.parse_all` (both build values under the core schema). `flag-events`
+and `flag-parse` are the stdlib calls in the `-Duse_mica` build.
+`stdlib-emit` and `flag-emit` write every document of the file back with
+`to_yaml` (parsed once before the clock starts), which measures
+`YAML::Builder` on libyaml's emitter and on Mica's; their MB/s counts the
+bytes of the source file. The event
+engines print a checksum (events plus scalar bytes); the driver stops when
+the libyaml-dialect engines and libyaml disagree on it.
+
+**Method.** Every round measures every engine on every file once, one
+process at a time, with the engine order reversed on alternate rounds.
+Each Mica engine is compared with the libyaml engine doing the same work
+round by round; a file's ratio is the median of its paired ratios, and a
+corpus or the whole set combines file ratios with the geometric mean.
+MB/s is total bytes over total time (MB is 10^6 bytes).
+
+**Result** (Apple M1 Max, macOS 26.5.2, 7 rounds, 2026-11-22T16:30:58Z; libyaml sha256 4970f13ebb9075a72f171d232ea9e990141e25806bf5c231cd0cf483dcb71552; load average { 104.42 102.62 118.11 }; the `to_yaml` row is from its own 7-round run right after):
+
+| Comparison | Whole corpus | Mica MB/s | libyaml MB/s | kubernetes | github-actions | shards | amber | Slowest file |
+|---|---|---|---|---|---|---|---|---|
+| Events, YAML 1.2 dialect | **1.91x** | 128.7 | 66.0 | 1.98x | 1.95x | 1.86x | 1.87x | 1.44x (starter-crystal.yml) |
+| Events, libyaml dialect | **1.79x** | 117.7 | 66.0 | 1.87x | 1.66x | 1.76x | 1.90x | 1.25x (starter-crystal.yml) |
+| Values (`parse_all`) | **1.50x** | 95.3 | 61.4 | 1.55x | 1.36x | 1.63x | 1.48x | 1.20x (starter-crystal.yml) |
+| `YAML::PullParser` with `-Duse_mica` | **1.84x** | 137.5 | 66.0 | 2.05x | 1.84x | 1.64x | 1.89x | 1.19x (crystal-shard.yml) |
+| `YAML.parse_all` with `-Duse_mica` | **1.61x** | 95.7 | 61.4 | 1.52x | 1.65x | 1.53x | 1.74x | 1.16x (starter-crystal.yml) |
+| `to_yaml` (`YAML::Builder`) with `-Duse_mica` | **1.26x** | 42.6 | 45.6 | 1.01x | 1.10x | 1.55x | 1.41x | 0.86x (argo-cd-install.yaml) |
+
+Read as "N times as fast as libyaml". The machine was busy with
+other builds during the run (the load average above), so single rounds
+swing widely (`results.json` has every file's range and `samples.tsv`
+every measurement); the paired medians are what the table reports. Every
+file's median ratio is above 1.0 in every parsing comparison (the lowest
+is 1.16x). Writing is 1.26x on the geometric mean, because short files
+gain most; by total bytes it is 0.93x (42.6 against 45.6 MB/s), since the
+2.1 MB Argo CD manifest, most of the corpus, is written at 0.86x.

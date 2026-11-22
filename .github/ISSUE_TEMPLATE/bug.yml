@@ -1,0 +1,69 @@
+name: Bug report
+description: Mica parsed something wrong, refused valid input, or took too long.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. If the input gets past a limit, a budget or a deadline, please report it privately through [SECURITY.md](https://github.com/amberframework/mica/security/policy) instead.
+  - type: dropdown
+    id: format
+    attributes:
+      label: Which part of Mica?
+      options:
+        - Mica::Regex
+        - Crystal's Regex under -Duse_mica (crystal-alpha)
+        - Mica::Gzip / Mica::Zlib / Mica::Deflate
+        - Mica::XML
+        - Mica::Core (UTF-8, transcoding, budgets)
+        - Something else
+    validations:
+      required: true
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What went wrong?
+      options:
+        - Wrong result (a match, a decode or a parse differs from the standard)
+        - Valid input refused
+        - Slower than expected
+        - Crash or exception
+        - Compile error
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Mica version or commit
+      placeholder: 0.2.0, or the commit from shard.lock
+    validations:
+      required: true
+  - type: dropdown
+    id: compiler
+    attributes:
+      label: Compiler
+      options:
+        - Stock Crystal
+        - crystal-alpha
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Smallest program that shows it
+      description: The pattern and input, or a short Crystal program. Attach input files if they are large.
+      render: crystal
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+      description: What the standard says, or what PCRE2, zlib or libxml2 returns for the same input.
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Output or error
+      render: shell
