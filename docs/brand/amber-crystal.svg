@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title description">
+  <title id="title">Amber Framework crystal</title>
+  <desc id="description">A faceted amber-orange crystal mark</desc>
+  <defs>
+    <linearGradient id="amber-a" x1="9" y1="9" x2="54" y2="58" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#ffbf59"/>
+      <stop offset="1" stop-color="#ef5f0c"/>
+    </linearGradient>
+  </defs>
+  <path fill="url(#amber-a)" d="M22 4h25l11 20-7 28-20 9L8 46 5 19z"/>
+  <path fill="#ffcc78" d="M22 4 5 19l22 6z"/>
+  <path fill="#f68a20" d="m22 4 5 21 20-21z"/>
+  <path fill="#dc4c0a" d="m27 25 24 27 7-28z"/>
+  <path fill="#f57613" d="M8 46 27 25l4 36z"/>
+  <path fill="#ffa53a" d="M5 19 8 46l19-21z"/>
+  <path fill="#ffb44c" d="m27 25 31-1L47 4z"/>
+  <path fill="#b93708" d="m31 61 20-9-24-27z"/>
+  <path fill="none" stroke="#9f3008" stroke-linejoin="round" stroke-width="1.4" d="M22 4h25l11 20-7 28-20 9L8 46 5 19 22 4Zm0 0 5 21m20-21L27 25M5 19l22 6M8 46l19-21m4 36-4-36m24 27L27 25m31-1-31 1" opacity=".72"/>
+</svg>
