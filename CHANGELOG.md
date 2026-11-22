@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+Fixes a crash on x86_64: the guard that frees an unclosed writer's tables
+had a finalizer whose last expression returned its `StaticArray`, so the
+compiler gave the finalizer a hidden result pointer in the first argument
+register, where the collector passes the object. The finalizer then ran
+with a null `self` ("Invalid memory access at address 0x8" inside
+`ReleaseGuard#finalize`). It now returns nil. Apple silicon passes that
+pointer in a register of its own, which is why only x86_64 crashed.
+
 Builds the CRC-32 for Apple silicon with the stock Crystal compiler. The
 CRC32X and CRC32B instructions are now inline assembly that enables the
 CRC extension itself; the LLVM intrinsics they replace stopped the build
