@@ -140,7 +140,7 @@ module Mica::YAML
       unless @ascii_only
         if invalid = Core::UTF8.first_invalid_offset(@buffer)
           stop = invalid
-          @invalid_message = "invalid UTF-8"
+          @invalid_message = describe_invalid_utf8(invalid)
         end
       end
       index = 0
@@ -171,6 +171,43 @@ module Mica::YAML
         stop = index
       end
       @limit = stop
+    end
+
+    # Names what is wrong with the UTF-8 sequence at *offset*, in the
+    # words of libyaml's reader.
+    private def describe_invalid_utf8(offset : Int32) : String
+      lead = @buffer[offset]
+      width = if lead & 0x80 == 0x00
+                1
+              elsif lead & 0xE0 == 0xC0
+                2
+              elsif lead & 0xF0 == 0xE0
+                3
+              elsif lead & 0xF8 == 0xF0
+                4
+              else
+                0
+              end
+      return "invalid leading UTF-8 octet" if width == 0
+      return "incomplete UTF-8 octet sequence" if offset + width > @buffer.size
+      value = if width == 1
+                lead.to_u32
+              elsif width == 2
+                (lead & 0x1F).to_u32
+              elsif width == 3
+                (lead & 0x0F).to_u32
+              else
+                (lead & 0x07).to_u32
+              end
+      (1...width).each do |step|
+        octet = @buffer[offset + step]
+        return "invalid trailing UTF-8 octet" unless octet & 0xC0 == 0x80
+        value = (value << 6) + (octet & 0x3F)
+      end
+      unless width == 1 || (width == 2 && value >= 0x80) || (width == 3 && value >= 0x800) || (width == 4 && value >= 0x10000)
+        return "invalid length of a UTF-8 sequence"
+      end
+      "invalid Unicode character"
     end
 
     # --- Positions ----------------------------------------------------
