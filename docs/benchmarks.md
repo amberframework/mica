@@ -234,9 +234,29 @@ engine, and what `Mica::Regex.static` gains), kept for re-measuring:
 ## Inflate (`bench/deflate/`)
 
 Mica's Inflate decoders (`Mica::Deflate`, `Mica::Zlib`, `Mica::Gzip`)
-against the system zlib. The interim bar for Z1 is a geometric-mean speed
-of at least 0.5x zlib's one-shot inflate, with zlib allocating its output
-buffer per decode as Mica's one-shot API does; the report states the gap.
+against the system zlib. The bar is a speed of at least 1.0x zlib's on
+every case, one-shot and streaming, with zlib allocating its output buffer
+per decode as Mica's one-shot API does; the report lists every case below
+it.
+
+**Measured** (2026-11-22, Apple M1 Max, zlib 1.2.12, 93 cases, 8 to 12
+interleaved rounds on a shared machine with a 1-minute load average
+between 26 and 152):
+
+| | Geometric mean, Mica / zlib (95% interval) | Cases at or above 1.0x | Cases whose whole interval is at or above 1.0x |
+|---|---|---|---|
+| One-shot | 1.023 (1.016 to 1.029) | 54 of 93 | 27 of 93 |
+| Streaming, 64 KiB buffers | 1.082 (1.075 to 1.090) | 84 of 93 | 70 of 93 |
+
+The Z1 run of 2026-11-21 measured 0.691 one-shot and 0.548 streaming. The
+bar is met at the geometric mean and not on every case. The one-shot cases
+furthest below it are outputs over 160 KiB (0.83 to 0.92 on the 1 MiB
+bodies, `kennedy.xls` and `ptt5`): zlib's engine is handed the output size
+and Mica's decoder is not, and in a process that only decodes, the
+collector runs more often for Mica (once per decode against once every
+two or three for zlib at the same bytes allocated). With a 256 MiB initial
+heap for both engines the one-shot geometric mean over the Canterbury and
+HTTP cases is 1.094 and the lowest case 0.91.
 
 ```sh
 bench/deflate/run.sh            # every corpus; 8 rounds, 16 where an interval reaches 0.5x or 1.0x
