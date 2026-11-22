@@ -133,6 +133,8 @@ applications link. Where it differs from YAML 1.2 it keeps libyaml's
 reading: NEL, LS and PS end a line; a tab may follow a block indicator; an
 anchor name ends at the first character that is not a word character;
 unknown directives are errors; a comment may touch the token before it;
+a `%00` escape ends a tag prefix or suffix (libyaml keeps them as C
+strings);
 and the documents libyaml rejects although YAML 1.2 allows them stay
 rejected (72 of the suite's 402 cases, the same 72 that libyaml itself
 fails).
