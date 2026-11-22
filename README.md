@@ -109,10 +109,10 @@ The full list (recursion, conditionals, `\K`, verbs, newline conventions) is in 
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/brand/inflate-dark.svg">
-  <img src="docs/brand/inflate-light.svg" width="100%" alt="Inflate against system zlib, decode time over 93 cases. One-shot: 1.45× slower than zlib. Streaming with 64 KiB buffers: 1.83× slower. Against zlib reusing one output buffer: 1.86× slower. The Z1 milestone allowed up to 2× slower.">
+  <img src="docs/brand/inflate-light.svg" width="100%" alt="Inflate against system zlib 1.2.12, geometric means over 93 cases. One-shot: 1.09× as fast, 74 of 93 cases at or above zlib. Streaming with 64 KiB buffers: 1.12× as fast, 92 of 93 cases at or above zlib.">
 </picture>
 
-Regex numbers come from the full harness at commit `f0bb0f6`, the code tagged v0.2.0; Inflate numbers from the Z1 run merged in #18. How they are measured, and how to rerun them: [docs/benchmarks.md](docs/benchmarks.md).
+Regex numbers come from the full harness at commit `f0bb0f6`, the code tagged v0.2.0; Inflate numbers from the Z3 run at `8c1f61e` (2026-11-22), every case listed in [docs/benchmarks.md](docs/benchmarks.md#z3-run-every-case). How they are measured, and how to rerun them: [docs/benchmarks.md](docs/benchmarks.md).
 
 ## How a search runs
 
@@ -201,7 +201,7 @@ Mostly the name: `XML` becomes `Mica::XML`. Parsing is strict (the first error r
 <summary><b>Is Inflate as fast as zlib?</b></summary>
 <br>
 
-Not yet. One-shot decoding is 1.45× slower than system zlib today, inside the Z1 goal of 2×. Encoders follow in milestone Z2.
+On the geometric mean, yes: against system zlib 1.2.12 over 93 cases, one-shot decoding is 1.09× as fast and streaming 1.12× as fast. Not yet on every case: 19 one-shot cases are still slower, the slowest `http/json_1m.json` as raw DEFLATE (1.21× slower); one streaming case is 1.01× slower. The list is in [docs/benchmarks.md](docs/benchmarks.md#z3-run-every-case).
 
 </details>
 

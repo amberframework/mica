@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+Speeds up Inflate (milestone Z3). Against system zlib 1.2.12 over 93
+cases, one-shot decoding goes from 1.02× to 1.09× as fast and streaming
+from 1.08× to 1.12× as fast (geometric means; per case in
+docs/benchmarks.md, "Z3 run: every case"):
+
+- The fast loop comes in two builds: one for runs with no history behind
+  the output (one-shot decodes and the inflater's own buffer), which
+  checks a back reference against the output alone, and one for reads
+  straight into a caller's slice, which may reach into the history.
+- A back reference the careful path finishes is copied in whole pieces
+  instead of a byte at a time.
+- 19 one-shot cases are still slower than zlib (the slowest 1.21×
+  slower), and one streaming case 1.01× slower. The decoder passed a
+  2,000,000-case differential campaign against zlib with 0
+  disagreements, and the encoder a 1,000,000-case round trip with 0
+  failures.
+
 Fixes a crash on x86_64: the guard that frees an unclosed writer's tables
 had a finalizer whose last expression returned its `StaticArray`, so the
 compiler gave the finalizer a hidden result pointer in the first argument
