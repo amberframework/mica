@@ -27,9 +27,11 @@ mkdir -p "$BIN"
 crystal-alpha build --release bench/yaml/runner.cr -o "$BIN/runner"
 rm -f "$BIN/runner_flag"
 if [ -n "${CRYSTAL_MICA_STDLIB:-}" ]; then
-  CRYSTAL_PATH="lib:$CRYSTAL_MICA_STDLIB" "${CRYSTAL_BIN:?set CRYSTAL_BIN to the compiler binary}" build --release \
+  # Its own cache directory: the two builds share a main file and differ
+  # in standard library and flags.
+  CRYSTAL_CACHE_DIR="$CRYSTAL_CACHE_DIR-use-mica" CRYSTAL_PATH="lib:$CRYSTAL_MICA_STDLIB" "${CRYSTAL_BIN:?set CRYSTAL_BIN to the compiler binary}" build --release \
     -Duse_mica -Dyaml_stdlib_only bench/yaml/runner.cr -o "$BIN/runner_flag"
-  if otool -L "$BIN/runner_flag" | grep -q yaml; then
+  if otool -L "$BIN/runner_flag" | grep -q libyaml; then
     echo "runner_flag links libyaml: the standard library at $CRYSTAL_MICA_STDLIB has no -Duse_mica YAML engine" >&2
     exit 1
   fi

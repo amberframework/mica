@@ -160,7 +160,7 @@ rescue StandardError => error
   "unavailable (#{error.class})"
 end
 
-libyaml_path = capture('otool', '-L', File.join(bin, 'runner')).lines.map(&:split).map(&:first).find { |path| path.to_s.include?('yaml') }
+libyaml_path = capture('otool', '-L', File.join(bin, 'runner')).lines.map(&:split).map(&:first).find { |path| path.to_s.include?('libyaml') }
 run = {
   started: started.iso8601,
   finished: Time.now.utc.iso8601,

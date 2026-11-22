@@ -23,14 +23,20 @@ format parsers on one shared core:
   (RFC 1951), zlib (RFC 1950) and gzip (RFC 1952, multi-member), one-shot
   and streaming, with required output, ratio, window, member, metadata
   and work limits and a deadline. See [docs/compression.md](docs/compression.md).
+- `Mica::YAML`: YAML 1.2 (all 402 cases of the official yaml-test-suite)
+  and a libyaml 0.2.5 dialect that matches libyaml event for event: a pull
+  parser, a node API with aliases, merge keys and the core schema, and an
+  emitter, with required input, depth, node, alias-expansion and work
+  limits and a deadline. See [docs/yaml.md](docs/yaml.md).
 - `Mica::Testing` (opt-in, `require "mica/testing"`): the complexity,
   fuzzing and requirement-traceability harnesses every format uses.
 
-More formats (JSON, YAML, CBOR, COSE, HTTP/1.1, URIs, multipart, CSV, TOML,
+More formats (JSON, CBOR, COSE, HTTP/1.1, URIs, multipart, CSV, TOML,
 Markdown) plug into the same core; see
 [docs/ADDING_A_FORMAT.md](docs/ADDING_A_FORMAT.md).
 
-Mica has no C parsing dependencies: no libxml2, no PCRE2 and no libz. A Mica
+Mica has no C parsing dependencies: no libxml2, no PCRE2, no libz and no
+libyaml. A Mica
 program links only libgc, libiconv and libSystem, which the Crystal runtime
 itself needs (`scripts/check_linkage.sh` checks this). Mica never reads the
 network or the file system while parsing, and it is secure by default:
@@ -377,6 +383,15 @@ crystal-alpha build --release fuzz/deflate_campaign.cr -o bin/deflate_campaign
 bin/deflate_campaign SEED ITERATIONS [FIRST]
 bench/deflate/run.sh --quick
 
+# YAML: the official test suite (pinned and verified by sha256), the
+# differential campaign against libyaml 0.2.5, and benchmarks
+/usr/bin/ruby conformance/yaml/fetch_suite.rb
+crystal-alpha run --release conformance/run_yaml.cr -- yaml12 results.tsv
+scripts/libyaml_oracle_identity.sh
+crystal-alpha build --release fuzz/yaml_campaign.cr -o bin/yaml_campaign
+MICA_YAML_SUITE=conformance/yaml-test-suite bin/yaml_campaign SEED ITERATIONS [FIRST]
+bench/yaml/run.sh
+
 # Benchmarks against stdlib XML (libxml2)
 crystal-alpha run --release bench/generate.cr
 bench/run.sh
@@ -388,7 +403,10 @@ them with `it_satisfies "ID", "description"`.
 
 The libxml2 comparison programs (`conformance/run_libxml2.cr`,
 `bench/bench_stdlib.cr`, `fuzz/differential.cr`) are the only code that
-requires stdlib `xml`; the library and its specs never link libxml2.
+requires stdlib `xml`; the library and its specs never link libxml2. In the
+same way only `fuzz/yaml_oracle.cr` (used by the YAML campaigns, the fixture
+recorder and `conformance/run_yaml_libyaml.cr`) and `bench/yaml/runner.cr`
+require stdlib `yaml`; the YAML specs replay recorded libyaml results.
 
 ## License
 
