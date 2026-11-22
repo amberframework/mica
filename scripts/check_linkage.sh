@@ -17,7 +17,10 @@
 #    no libz entry in its linker map and no PCRE2. A control program that
 #    uses stdlib Compress::Gzip, built the same way, shows libz in all
 #    three probes.
-# 5. The spec binary links the same plus libpcre2-8 and libz: the standard
+# 5. A minimal Mica::Gzip encoder program (one-shot and Writer, with zlib
+#    and raw DEFLATE beside it, each decoded again) passes the same three
+#    libz probes: the encoders link no libz either.
+# 6. The spec binary links the same plus libpcre2-8 and libz: the standard
 #    library's spec runner and the specs' expect_raises(..., /message/)
 #    use Regex, and the differential specs use system zlib as the oracle.
 #    No Mica code calls either.
@@ -46,6 +49,8 @@ crystal-alpha build --release scripts/linkage/stdlib_regex_control.cr -o "$out/s
   --link-flags="-Wl,-map,$out/stdlib_regex_control.map"
 crystal-alpha build --release scripts/linkage/minimal_inflate.cr -o "$out/minimal_inflate" \
   --link-flags="-Wl,-map,$out/minimal_inflate.map"
+crystal-alpha build --release scripts/linkage/minimal_deflate.cr -o "$out/minimal_deflate" \
+  --link-flags="-Wl,-map,$out/minimal_deflate.map"
 crystal-alpha build --release scripts/linkage/stdlib_compress_control.cr -o "$out/stdlib_compress_control" \
   --link-flags="-Wl,-map,$out/stdlib_compress_control.map"
 # shellcheck disable=SC2046 # spec paths contain no spaces
@@ -69,6 +74,7 @@ check() {
 check minimal_xml '/libgc\.|/libiconv\.|/libSystem\.'
 check minimal_regex '/libgc\.|/libiconv\.|/libSystem\.'
 check minimal_inflate '/libgc\.|/libiconv\.|/libSystem\.'
+check minimal_deflate '/libgc\.|/libiconv\.|/libSystem\.'
 check spec_binary '/libgc\.|/libiconv\.|/libSystem\.|/libpcre2-8\.|/libz\.'
 otool -L "$out/stdlib_regex_control" | tail -n +2 | awk '{print $1}' > "$out/stdlib_regex_control.libs"
 if grep -q pcre "$out/minimal_xml.libs"; then
@@ -96,20 +102,20 @@ for binary in minimal_regex stdlib_regex_control; do
   fi
 done
 
-zlib_symbols=' _(inflate|inflateInit2_|inflateEnd|deflate|deflateInit2_|crc32|adler32|zlibVersion)$'
+zlib_symbols=' _(inflate|inflateInit2_|inflateEnd|deflate|deflateInit2_|deflateEnd|deflateBound|crc32|adler32|zlibVersion)$'
 otool -L "$out/stdlib_compress_control" | tail -n +2 | awk '{print $1}' > "$out/stdlib_compress_control.libs"
-for binary in minimal_inflate stdlib_compress_control; do
+for binary in minimal_inflate minimal_deflate stdlib_compress_control; do
   symbols=$(nm "$out/$binary" | grep -cE "$zlib_symbols" || true)
   map_lines=$(grep -cE '/libz[.0-9]*(dylib|tbd)' "$out/$binary.map" || true)
   libraries=$(grep -cE '/libz\.' "$out/$binary.libs" || true)
   pcre=$(nm "$out/$binary" | grep -c pcre2_ || true)
   echo "$binary: $symbols zlib symbols, $map_lines libz linker-map lines, $libraries libz libraries, $pcre pcre2_ symbols"
-  if [ "$binary" = minimal_inflate ]; then
+  if [ "$binary" != stdlib_compress_control ]; then
     if [ "$symbols" != 0 ] || [ "$map_lines" != 0 ] || [ "$libraries" != 0 ] || [ "$pcre" != 0 ]; then
-      echo "FAIL: minimal_inflate reaches libz or PCRE2"
+      echo "FAIL: $binary reaches libz or PCRE2"
       status=1
     else
-      echo "ok: minimal_inflate has no zlib symbol, map entry or library, and no PCRE2"
+      echo "ok: $binary has no zlib symbol, map entry or library, and no PCRE2"
     fi
   elif [ "$symbols" = 0 ] || [ "$map_lines" = 0 ] || [ "$libraries" = 0 ]; then
     echo "FAIL: the stdlib Compress control shows no libz, so the probes prove nothing"
@@ -121,5 +127,6 @@ done
 
 "$out/minimal_xml" '<r><i/><i/></r>'
 "$out/minimal_inflate"
+"$out/minimal_deflate"
 "$out/minimal_regex"
 exit $status

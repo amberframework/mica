@@ -19,10 +19,12 @@ format parsers on one shared core:
   cache pool, and `Mica::Regex::Expression`, whose methods follow
   Crystal's `Regex` with required compile and search limits. See
   [docs/regex.md](docs/regex.md).
-- `Mica::Deflate`, `Mica::Zlib` and `Mica::Gzip`: Inflate for raw DEFLATE
-  (RFC 1951), zlib (RFC 1950) and gzip (RFC 1952, multi-member), one-shot
-  and streaming, with required output, ratio, window, member, metadata
-  and work limits and a deadline. See [docs/compression.md](docs/compression.md).
+- `Mica::Deflate`, `Mica::Zlib` and `Mica::Gzip`: raw DEFLATE (RFC 1951),
+  zlib (RFC 1950) and gzip (RFC 1952), one-shot and streaming. Decoding
+  (Inflate, multi-member gzip) takes required output, ratio, window,
+  member, metadata and work limits and a deadline. Encoding has levels 0
+  to 9 with zlib's algorithm and sizes, sync and full flush, preset
+  dictionaries and gzip headers. See [docs/compression.md](docs/compression.md).
 - `Mica::Testing` (opt-in, `require "mica/testing"`): the complexity,
   fuzzing and requirement-traceability harnesses every format uses.
 
@@ -376,6 +378,12 @@ crystal-alpha run --release fuzz/differential.cr -- 20261024 20000
 crystal-alpha build --release fuzz/deflate_campaign.cr -o bin/deflate_campaign
 bin/deflate_campaign SEED ITERATIONS [FIRST]
 bench/deflate/run.sh --quick
+
+# Deflate encoders: round-trip fuzzing through system zlib and Mica's
+# decoder, and benchmarks against system zlib
+crystal-alpha build --release fuzz/deflate_encode_campaign.cr -o bin/deflate_encode_campaign
+bin/deflate_encode_campaign SEED ITERATIONS [FIRST]
+bench/deflate_encode/run.sh --quick
 
 # Benchmarks against stdlib XML (libxml2)
 crystal-alpha run --release bench/generate.cr
