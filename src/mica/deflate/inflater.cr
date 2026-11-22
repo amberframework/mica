@@ -1282,8 +1282,10 @@ module Mica::Deflate
       out_stop = out_base + stop
       lowest = out_base + @lowest_reference
       window = @window_limit.to_u32!
-      history_end = @history_end
       history_bytes = @history_bytes.to_i64
+      # From a place in the slice to the same place counted back from the
+      # end of the history.
+      history_shift = @history_end - lowest
       bit_buffer = @bit_buffer
       bits_left = @bit_count.to_u32!
       literal_lengths = @literal_length_table
@@ -1386,37 +1388,36 @@ module Mica::Deflate
         end
         consume_fast_entry
         distance = ((entry >> 16) &+ (saved & (1_u64.unsafe_shl(entry & 63) &- 1)).unsafe_shr((entry >> 8) & 0xF)).to_u32!
-        if distance.to_u64 > (out_next - lowest).to_u64! || distance > window
-          behind = out_next - lowest
-          if distance > window || distance.to_i64! > behind &+ history_bytes
-            problem = 3
-            far_distance = distance.to_i32!
-            break
-          end
-          # The reference starts in the history before a reader's slice:
-          # copy from there, then (when it runs on into the slice) from
-          # the start of the slice.
-          from_history = (distance.to_i64! &- behind).to_i32!
-          source = history_end + (0_i64 &- from_history)
-          first = length < from_history ? length : from_history
-          out_next.copy_from(source, first)
-          out_next += first
-          rest = length &- first
-          source = lowest
-          while rest > 0
-            out_next.value = source.value
+        behind = out_next - lowest
+        if distance.to_i64! > behind &+ history_bytes || distance > window
+          problem = 3
+          far_distance = distance.to_i32!
+          break
+        end
+
+        # A reference that reaches before a reader's slice starts in the
+        # history: the same copy, from a source moved there. Chosen
+        # without a branch, since in a slice's first 32 KiB either is as
+        # likely as the other.
+        is_far = distance.to_i64! > behind
+        destination = out_next
+        source = out_next + (0_i64 &- distance.to_i64!)
+        source += history_shift if is_far
+        if is_far & ((distance < 16) | (length.to_i64! > distance.to_i64! &- behind))
+          # Rare: the reference runs on from the history into the slice,
+          # or sits in the slice's first bytes. Byte by byte.
+          from_history = distance.to_i64! &- behind
+          copied = 0_i64
+          while copied < length
+            out_next.value = copied < from_history ? source[copied] : lowest[copied &- from_history]
             out_next += 1
-            source += 1
-            rest &-= 1
+            copied &+= 1
           end
           entry = literal_lengths[(bit_buffer & literal_length_mask).to_u32!]
           refill_fast_bits
           break unless in_next <= in_stop && out_next <= out_stop
           next
         end
-
-        destination = out_next
-        source = out_next + (0_i64 &- distance.to_i64!)
         out_next += length
         # Look the next symbol up before copying, so the two overlap.
         entry = literal_lengths[(bit_buffer & literal_length_mask).to_u32!]
