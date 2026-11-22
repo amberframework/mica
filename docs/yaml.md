@@ -210,7 +210,7 @@ shared nodes, so alias-heavy documents resolve each node once.
   release `data-2022-01-17` (commit
   `6e6c296ae9c9d2d5c4134b4b64d01b29ac19ff6f`, tarball sha256
   `cc4a08f9ccc1cb2e66f32b3f1192bf1f07b3175682bbb715bf709bafa70322d4`);
-  `crystal-alpha run --release conformance/run_yaml.cr -- yaml12 results.tsv`
+  `crystal-alpha run --release conformance/run_yaml.cr -- conformance/yaml-test-suite/data yaml12 results.tsv`
   writes a verdict per case, `run_yaml_values.cr` compares the node API's
   values with the suite's `in.json`, and `run_yaml_libyaml.cr` scores
   libyaml itself for comparison. With the suite fetched,
