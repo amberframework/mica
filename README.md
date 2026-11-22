@@ -114,7 +114,7 @@ Regex numbers come from the full harness at commit `f0bb0f6`, the code tagged v0
 ## How a search runs
 
 ```mermaid
-flowchart LR
+flowchart TD
     source(["Pattern text"]) --> parser["Parser<br/>Crystal dialect, PCRE2 syntax"]
     parser -- "backreference, lookaround ..." --> refused{{"UnsupportedConstructError<br/>names the construct and byte"}}
     parser --> limits["Compile limits<br/>size preflight"]
