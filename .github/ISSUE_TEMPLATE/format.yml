@@ -1,0 +1,23 @@
+name: Format or feature request
+description: A format Mica should read, or a feature an existing format needs.
+labels: ["enhancement"]
+body:
+  - type: input
+    id: format
+    attributes:
+      label: Format or feature
+      placeholder: "e.g. YAML 1.2, multipart/form-data, \\X grapheme clusters"
+    validations:
+      required: true
+  - type: input
+    id: standard
+    attributes:
+      label: The standard it follows
+      placeholder: RFC, W3C recommendation or spec link
+  - type: textarea
+    id: use
+    attributes:
+      label: Where you would use it
+      description: The app and the input it would read. Untrusted input is the case Mica is built for.
+    validations:
+      required: true
