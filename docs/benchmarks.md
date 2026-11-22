@@ -250,13 +250,16 @@ between 26 and 152):
 
 The Z1 run of 2026-11-21 measured 0.691 one-shot and 0.548 streaming. The
 bar is met at the geometric mean and not on every case. The one-shot cases
-furthest below it are outputs over 160 KiB (0.83 to 0.92 on the 1 MiB
-bodies, `kennedy.xls` and `ptt5`): zlib's engine is handed the output size
-and Mica's decoder is not, and in a process that only decodes, the
-collector runs more often for Mica (once per decode against once every
-two or three for zlib at the same bytes allocated). With a 256 MiB initial
-heap for both engines the one-shot geometric mean over the Canterbury and
-HTTP cases is 1.094 and the lowest case 0.91.
+furthest below it are 0.79 to 0.92: `ptt5`, the 64 KiB and 1 MiB JSON
+bodies, the 1 MiB HTML body and `kennedy.xls`. For an output over 160 KiB
+zlib's engine is handed the output size and Mica's decoder is not; and in
+a process that only decodes 0.5 to 1 MiB outputs, the collector ran once
+per decode for Mica against once every two or three decodes for zlib at
+the same bytes allocated. With a 256 MiB initial heap for both engines the
+one-shot geometric mean over the Canterbury and HTTP cases is 1.094 and
+the lowest case 0.91. The same cases built with a newer compiler measured
+1.041 one-shot and 1.063 streaming at the geometric mean, with the 64 KiB
+JSON body at 1.29 to 1.49 one-shot and the 1 MiB JSON body at 0.84 to 0.87.
 
 ```sh
 bench/deflate/run.sh            # every corpus; 8 rounds, 16 where an interval reaches 0.5x or 1.0x
