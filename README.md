@@ -1,7 +1,9 @@
-<a href="#install"><picture>
+<a href="#install">
+<picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/brand/hero-dark.svg">
   <img src="docs/brand/hero-light.svg" width="100%" alt="Mica: reads untrusted bytes, never guesses. Mica, the Amber crew's reader, at a lectern in a library, beside her character mark. A loupe sweeps across a request line and lights up the date a regex matches.">
-</picture></a>
+</picture>
+</a>
 
 <p align="center">
   <picture>
