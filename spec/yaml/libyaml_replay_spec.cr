@@ -33,6 +33,10 @@ describe "Mica::YAML libyaml dialect" do
     # libyaml reads anchors up to the first character that is not a word character.
     yaml_events("&a: b\n", libyaml).should contain %(Scalar &a "")
     yaml_events("&a: b\n").should contain %(Scalar &a: "b")
+    # libyaml's tags are C strings: a %00 escape ends a prefix or a suffix.
+    yaml_events("%TAG !e! tag:example.com,%000:app/\n--- !e!x a\n", libyaml).should contain %(Scalar <tag:example.com,x> "a")
+    yaml_events("--- !<tag:a%00b> c\n", libyaml).should contain %(Scalar <tag:a> "c")
+    yaml_events("--- !<tag:a%00b> c\n").should contain "Scalar <#{"tag:a\u0000b"}> #{"c".inspect}"
     # libyaml rejects what YAML 1.2 allows, and allows what it rejects.
     yaml_error { yaml_events("%FOO bar\n--- a\n", libyaml) }.message.to_s.should contain "found unknown directive name"
     yaml_events("[a]#b\n", libyaml).should contain %(Scalar "a")

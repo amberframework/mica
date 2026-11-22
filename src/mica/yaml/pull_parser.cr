@@ -452,7 +452,7 @@ module Mica::YAML
 
       tag = nil
       if tag_handle && tag_suffix
-        tag = resolve_tag(tag_handle, tag_suffix, start_mark, tag_mark)
+        tag = resolve_tag(tag_handle, c_string(tag_suffix), start_mark, tag_mark)
       end
       implicit = tag.nil? || tag.empty?
       @anchor = anchor
@@ -492,6 +492,15 @@ module Mica::YAML
         parser_error(block ? "while parsing a block node" : "while parsing a flow node", start_mark,
           "did not find expected node content", token.start_mark)
       end
+    end
+
+    # A tag prefix or suffix as libyaml's users see it. libyaml keeps both
+    # as C strings, so a `%00` escape ends the text there; YAML 1.2 keeps
+    # the NUL character and what follows it.
+    private def c_string(value : String) : String
+      return value if @strict
+      terminator = value.to_slice.index(0_u8)
+      terminator ? value.byte_slice(0, terminator) : value
     end
 
     private def resolve_tag(handle : String, suffix : String, start_mark : Mark, tag_mark : Mark) : String
@@ -759,7 +768,7 @@ module Mica::YAML
           end
           version = {token.major, token.minor}
         else
-          pair = {token.handle, token.value}
+          pair = {token.handle, c_string(token.value)}
           if @document_tag_directives.any? { |directive| directive[0] == pair[0] }
             parser_error("found duplicate %TAG directive", token.start_mark)
           end
