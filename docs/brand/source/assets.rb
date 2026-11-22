@@ -3,11 +3,12 @@
 # the ReDoS panel. Every number below is quoted from the verified benchmark
 # reports (regex: R3-verify-12 at commit f0bb0f6, the code tagged v0.2.0;
 # Inflate: Z1 run full-20261121T133443Z-6232bc9, merged in #18).
-# Usage: assets.rb <out-dir>
+# Usage: assets.rb <art-dir> <out-dir>
 require_relative 'mica_kit'
 include MicaKit
 
-OUT = ARGV[0] or abort 'usage: assets.rb <out-dir>'
+ART = ARGV[0] or abort 'usage: assets.rb <art-dir> <out-dir>'
+OUT = ARGV[1] or abort 'usage: assets.rb <art-dir> <out-dir>'
 
 def fmt_factor(value)
   value >= 10 ? value.round.to_s : format('%.1f', value)
@@ -16,17 +17,17 @@ end
 # ---------------------------------------------------------------- badges
 def badges(palette)
   plates = [
-    ['PURE CRYSTAL', palette[:blue]],
-    ['NO PCRE2 · NO LIBZ · NO LIBXML2', palette[:brass]],
-    ['LINEAR-TIME SEARCH', palette[:blue]],
-    ['WORK BUDGETS + DEADLINES', palette[:brass]],
-    ['v0.2.0', palette[:amber]],
+    ['PURE CRYSTAL', palette[:accent]],
+    ['NO PCRE2 · NO LIBZ · NO LIBXML2', palette[:text]],
+    ['LINEAR-TIME SEARCH', palette[:accent]],
+    ['WORK BUDGETS + DEADLINES', palette[:text]],
+    ['v0.2.0', palette[:accent]],
     ['MIT', palette[:muted]]
   ]
   gap = 10
   size = 12.5
   pad = 16
-  widths = plates.map { |label, _| text_width('FiraMono-Medium', size, 0.1, label) + pad * 2 }
+  widths = plates.map { |label, _| text_width('Manrope-700', size, 0.1, label) + pad * 2 }
   total = widths.inject(:+) + gap * (plates.size - 1)
   height = 34
   parts = []
@@ -34,7 +35,7 @@ def badges(palette)
   plates.each_with_index do |(label, color), index|
     width = widths[index]
     parts << %(<rect x="#{(cursor + 0.75).round(2)}" y=".75" width="#{(width - 1.5).round(2)}" height="#{height - 1.5}" rx="#{(height - 1.5) / 2}" fill="#{palette[:panel]}" stroke="#{color}" stroke-opacity=".7" stroke-width="1.2"/>)
-    parts << text_at('FiraMono-Medium', size, 0.1, label, left: cursor + width / 2.0, baseline: 21.5, fill: color, anchor: :middle)
+    parts << text_at('Manrope-700', size, 0.1, label, left: cursor + width / 2.0, baseline: 21.5, fill: color, anchor: :middle)
     cursor += width + gap
   end
   svg_open(total.ceil, height, 'Mica at a glance',
@@ -89,18 +90,18 @@ def regex_chart(palette)
   body = chart_frame(palette, width, height, 'Mica::Regex against PCRE2 with JIT',
                      ['How many times as fast as Crystal\'s stdlib Regex (PCRE2 10.49, JIT on). Geometric means over 479 cases',
                       '(412 for static patterns) from rebar, Amber\'s own patterns and ReDoS families. Longer is better.'])
-  body << legend(palette, [['Mica::Regex, compiled at run time', palette[:blue]], ['Mica::Regex.static, compiled while the app builds', palette[:brass]]], 49, 186)
+  body << legend(palette, [['Mica::Regex, compiled at run time', palette[:series]], ['Mica::Regex.static, compiled while the app builds', palette[:series2]]], 49, 186)
   [1, 2, 5, 10, 20].each do |tick|
     tick_x = scale.call(tick.to_f).round(1)
     body << %(<line x1="#{tick_x}" x2="#{tick_x}" y1="#{top - 6}" y2="#{top + REGEX_ROWS.size * row_height - 10}" stroke="#{palette[:grid]}" stroke-width="#{tick == 1 ? 2 : 1}"/>)
-    body << text_at('FiraMono-Regular', 15, 0, "#{tick}×", left: tick_x, baseline: top + REGEX_ROWS.size * row_height + 14, fill: palette[:faint], anchor: :middle)
+    body << text_at('Manrope-600', 15, 0, "#{tick}×", left: tick_x, baseline: top + REGEX_ROWS.size * row_height + 14, fill: palette[:faint], anchor: :middle)
   end
   body << text_at('Manrope-400', 15.5, 0, '1× = PCRE2-JIT (log scale)', left: axis_left, baseline: top + REGEX_ROWS.size * row_height + 42, fill: palette[:faint])
   REGEX_ROWS.each_with_index do |(metric, note, runtime, static), index|
     row_top = top + index * row_height
     body << text_at('Manrope-700', 21, 0, metric, left: 49, baseline: row_top + 32, fill: palette[:text])
     body << text_at('Manrope-400', 16, 0, note, left: 49, baseline: row_top + 56, fill: palette[:muted])
-    [[runtime, palette[:blue], 6], [static, palette[:brass], 50]].each do |(times, color, offset)|
+    [[runtime, palette[:series], palette[:on_series], 6], [static, palette[:series2], palette[:on_series2], 50]].each do |(times, color, on_color, offset)|
       factor = times[1] / times[0]
       bar_top = row_top + offset
       bar_end = scale.call(factor)
@@ -108,12 +109,12 @@ def regex_chart(palette)
       detail = "#{time_label(times[0])} vs #{time_label(times[1])}"
       body << %(<rect x="#{axis_left}" y="#{bar_top}" width="#{(bar_end - axis_left).round(1)}" height="36" rx="6" fill="#{color}"/>)
       label_width = text_width('Manrope-700', 19, 0, label)
-      if bar_end - axis_left > label_width + text_width('FiraMono-Regular', 14.5, 0, detail) + 60
-        body << text_at('Manrope-700', 19, 0, label, left: bar_end - 14, baseline: bar_top + 25, fill: palette[:panel], anchor: :end)
-        body << text_at('FiraMono-Regular', 14.5, 0, detail, left: axis_left + 14, baseline: bar_top + 24, fill: palette[:panel])
+      if bar_end - axis_left > label_width + text_width('Manrope-600', 14.5, 0, detail) + 60
+        body << text_at('Manrope-700', 19, 0, label, left: bar_end - 14, baseline: bar_top + 25, fill: on_color, anchor: :end)
+        body << text_at('Manrope-600', 14.5, 0, detail, left: axis_left + 14, baseline: bar_top + 24, fill: on_color)
       else
         body << text_at('Manrope-700', 19, 0, label, left: bar_end + 12, baseline: bar_top + 25, fill: palette[:text])
-        body << text_at('FiraMono-Regular', 14.5, 0, detail, left: bar_end + 24 + label_width, baseline: bar_top + 24, fill: palette[:muted])
+        body << text_at('Manrope-600', 14.5, 0, detail, left: bar_end + 24 + label_width, baseline: bar_top + 24, fill: palette[:muted])
       end
     end
   end
@@ -148,7 +149,7 @@ def amber_chart(palette)
   [0, 1, 2, 3].each do |tick|
     tick_x = scale.call(tick.to_f).round(1)
     body << %(<line x1="#{tick_x}" x2="#{tick_x}" y1="#{top - 8}" y2="#{top + AMBER_ROWS.size * row_height}" stroke="#{tick == 1 ? palette[:faint] : palette[:grid]}" stroke-width="#{tick == 1 ? 1.5 : 1}"#{tick == 1 ? ' stroke-dasharray="4 4"' : ''}/>)
-    body << text_at('FiraMono-Regular', 15, 0, "#{tick}×", left: tick_x, baseline: top + AMBER_ROWS.size * row_height + 24, fill: palette[:faint], anchor: :middle)
+    body << text_at('Manrope-600', 15, 0, "#{tick}×", left: tick_x, baseline: top + AMBER_ROWS.size * row_height + 24, fill: palette[:faint], anchor: :middle)
   end
   body << text_at('Manrope-400', 15.5, 0, '1× = PCRE2-JIT', left: scale.call(1.0) + 8, baseline: top - 16, fill: palette[:faint])
   AMBER_ROWS.each_with_index do |(group, note, cases, mica, pcre), index|
@@ -157,8 +158,8 @@ def amber_chart(palette)
     body << text_at('Manrope-700', 20, 0, group, left: 49, baseline: row_top + 24, fill: palette[:text])
     body << text_at('Manrope-400', 15.5, 0, "#{note} · #{cases} cases", left: 49, baseline: row_top + 46, fill: palette[:muted])
     bar_end = scale.call(factor)
-    body << %(<rect x="#{axis_left}" y="#{row_top + 8}" width="#{(bar_end - axis_left).round(1)}" height="36" rx="6" fill="#{palette[:blue]}"/>)
-    body << text_at('FiraMono-Regular', 14.5, 0, "#{format('%.2f', mica)} µs vs #{format('%.2f', pcre)} µs", left: axis_left + 14, baseline: row_top + 31, fill: palette[:panel])
+    body << %(<rect x="#{axis_left}" y="#{row_top + 8}" width="#{(bar_end - axis_left).round(1)}" height="36" rx="6" fill="#{palette[:series]}"/>)
+    body << text_at('Manrope-600', 14.5, 0, "#{format('%.2f', mica)} µs vs #{format('%.2f', pcre)} µs", left: axis_left + 14, baseline: row_top + 31, fill: palette[:on_series])
     body << text_at('Manrope-700', 19, 0, "#{format('%.1f', factor)}× as fast", left: bar_end + 12, baseline: row_top + 32, fill: palette[:text])
   end
   total = 552.64 / 210.91
@@ -177,9 +178,9 @@ def redos_panel(palette)
   body = chart_frame(palette, width, height, 'Hostile patterns finish',
                      ['112 ReDoS cases from 13 families: (a+)+$, the OWASP email pattern, Cloudflare 2019, Stack Overflow 2016 and more.'])
   stats = [
-    ['8.8×', 'as fast, warm search', '330.1 ns vs 2.91 µs per search', palette[:blue]],
-    ['0', 'limits hit by Mica::Regex', 'PCRE2-JIT: 28 limit stops, 1 timeout', palette[:brass]],
-    ['13 of 13', 'families inside 1,000 ms', 'growth slopes 0.81 to 1.0: linear in the input', palette[:amber]]
+    ['8.8×', 'as fast, warm search', '330.1 ns vs 2.91 µs per search', palette[:accent]],
+    ['0', 'limits hit by Mica::Regex', 'PCRE2-JIT: 28 limit stops, 1 timeout', palette[:text]],
+    ['13 of 13', 'families inside 1,000 ms', 'growth slopes 0.81 to 1.0: linear in the input', palette[:accent]]
   ]
   column = (width - 96) / 3.0
   stats.each_with_index do |(big, label, detail, color), index|
@@ -226,11 +227,11 @@ def inflate_chart(palette)
     zlib_end = scale.call(1.0)
     bar_end = scale.call(factor)
     body << %(<rect x="#{axis_left}" y="#{row_top + 12}" width="#{(zlib_end - axis_left).round(1)}" height="40" rx="6" fill="#{palette[:bar_track]}" stroke="#{palette[:panel_edge]}"/>)
-    body << %(<rect x="#{zlib_end.round(1)}" y="#{row_top + 12}" width="#{(bar_end - zlib_end).round(1)}" height="40" rx="0" fill="#{palette[:brass]}" fill-opacity=".85"/>)
-    body << %(<rect x="#{axis_left}" y="#{row_top + 12}" width="#{(bar_end - axis_left).round(1)}" height="40" rx="6" fill="none" stroke="#{palette[:brass]}" stroke-width="1.5"/>)
-    body << text_at('FiraMono-Regular', 14.5, 0, 'zlib time', left: axis_left + 14, baseline: row_top + 37, fill: palette[:muted])
+    body << %(<rect x="#{zlib_end.round(1)}" y="#{row_top + 12}" width="#{(bar_end - zlib_end).round(1)}" height="40" rx="0" fill="#{palette[:series]}" fill-opacity=".85"/>)
+    body << %(<rect x="#{axis_left}" y="#{row_top + 12}" width="#{(bar_end - axis_left).round(1)}" height="40" rx="6" fill="none" stroke="#{palette[:series]}" stroke-width="1.5"/>)
+    body << text_at('Manrope-600', 14.5, 0, 'zlib time', left: axis_left + 14, baseline: row_top + 37, fill: palette[:muted])
     body << text_at('Manrope-700', 19, 0, "#{format('%.2f', factor)}× slower", left: [bar_end, scale.call(2.0)].max + 14, baseline: row_top + 31, fill: palette[:text])
-    body << text_at('FiraMono-Regular', 14, 0, "95%: #{format('%.2f', 1 / high)} to #{format('%.2f', 1 / low)}", left: [bar_end, scale.call(2.0)].max + 14, baseline: row_top + 53, fill: palette[:muted])
+    body << text_at('Manrope-600', 14, 0, "95%: #{format('%.2f', 1 / high)} to #{format('%.2f', 1 / low)}", left: [bar_end, scale.call(2.0)].max + 14, baseline: row_top + 53, fill: palette[:muted])
   end
   body << text_at('Manrope-400', 17, 0, 'The Z1 milestone allowed up to 2× slower than zlib one-shot, and every mode is inside it.', left: 49, baseline: height - 32, fill: palette[:muted])
   svg_open(width, height, 'Inflate against system zlib',
@@ -238,7 +239,23 @@ def inflate_chart(palette)
     body.join("\n") + '</svg>'
 end
 
+# ---------------------------------------------------------------- Amber lockup
+# The site navigation lockup: Amber's character mark beside "Amber Framework" in Fraunces.
+def amber_lockup(palette)
+  mark = File.join(ART, 'amber-mark.png')
+  height = 72
+  mark_height = 64
+  mark_width = image_width(mark, mark_height)
+  words_left = mark_width + 14
+  words_width = text_width('Fraunces-730', 30, -0.005, 'Amber Framework')
+  width = (words_left + words_width + 4).ceil
+  svg_open(width, height, 'Amber Framework', 'The Amber framework logo: Amber, the framework lead, as a chibi character mark beside the words Amber Framework.') +
+    image_at(mark, left: 0, top: 4, height: mark_height) +
+    text_at('Fraunces-730', 30, -0.005, 'Amber Framework', left: words_left, baseline: 47, fill: palette[:text]) + '</svg>'
+end
+
 { 'light' => LIGHT, 'dark' => DARK }.each do |name, palette|
+  File.write(File.join(OUT, "amber-lockup-#{name}.svg"), amber_lockup(palette))
   File.write(File.join(OUT, "badges-#{name}.svg"), badges(palette))
   File.write(File.join(OUT, "regex-speed-#{name}.svg"), regex_chart(palette))
   File.write(File.join(OUT, "amber-patterns-#{name}.svg"), amber_chart(palette))

@@ -1,21 +1,30 @@
-# Shared drawing helpers for Mica's README art: brand text as vector outlines
-# (Amber's Fraunces and Manrope from the amberframework.org site, Fira Mono for
-# code and digits) and the two theme palettes taken from Mica's concept art.
+# Shared drawing helpers for Mica's README art, in the Amber framework's brand
+# (amberframework.org, app/assets/css/amber-brand.css): Amber's two typefaces,
+# Fraunces for display and Manrope for everything else, drawn as vector outlines,
+# and the site's own light and dark palettes.
 #
 # Fonts (not committed; put them in ../fonts beside this folder, check each sha256):
 #   Fraunces-Variable.woff2  e169df7559440091b2d3499a0d40f9f34baa6114bf4ce709fe53f329beeecb4a
 #   Manrope-Variable.woff2   52ecbc78831e7ae0431b4a5cbe4aaaae27255c9d370659b0b0bb9bd2f19ec42b
-#     both from amberframework/amberframework.org at 9b43e92a459bb02506a23e05495bc48c36454ffd, app/assets/fonts/
-#   FiraMono-Regular.ttf     2e00b0cf3106a3d792f35711b7722740b76c02ee7300ea8c60f940584b7a8ac9
-#   FiraMono-Medium.ttf      a5bc1a2db2f65946049de615ecc08603d788eb0c02b520f4ed95f05a5cc58532
-#     both match google/fonts ofl/firamono (git blobs 558bb75d and 034b6375)
+#     both from amberframework/amberframework.org, app/assets/fonts/ (SIL OFL)
 #
-# Art: reading-room.jpg and portrait.jpg are Mica's concept art (amberframework.org,
-#   app/assets/characters/mica-reading-room-codex.webp and mica-id-original-studio.webp).
+# Art (not committed; the built SVGs embed it):
+#   reading-room.jpg  Mica's reading-room scene, 1400 px wide, from the Amberverse canon
+#                     (amberverse-roadmap-3d, branch character/mica, research/mica_concepts/codex/selected/
+#                     mica-reading-room-scene.png, sha256 38067b28ef9e2f78f9dfdd8501e5456354d71872ddc6b40248ad70e64293025e)
+#   portrait.jpg      Mica's identity original, 640 px (same folder, mica-id-original-studio.png,
+#                     sha256 56ee023950921310d41784c80eb1a4866b45c6ef161762e67c4d3538c00a11cb)
+#   mica-mark.png     Mica's chibi character mark, trimmed, 240 px tall (mica-chibi-hero-mark.png,
+#                     sha256 0fbd41fa1d27b992384ca64bd3e60400082da92a99fd3be866c0b596b03ae3e6)
+#   amber-mark.png    Amber's primary character mark, trimmed, 200 px tall (amberframework.org
+#                     app/assets/characters/amber-chibi-hero-mark-v2.webp,
+#                     sha256 16048f5601f3c5688e54824f1cf9007a9417145f78f1af6135e43008d4611dd8)
 # Build: swiftc -O textpath.swift -o textpath; then
-#   /usr/bin/ruby hero.rb reading-room.jpg ../hero.svg
-#   /usr/bin/ruby assets.rb ..
-#   /usr/bin/ruby social.rb portrait.jpg social.svg   (render to ../social-preview.png at 1280x640)
+#   /usr/bin/ruby hero.rb <art-dir> ..
+#   /usr/bin/ruby assets.rb <art-dir> ..
+#   /usr/bin/ruby social.rb <art-dir> social.svg   (render to ../social-preview.png at 1280x640)
+require 'base64'
+
 module MicaKit
   FONTS = File.join(__dir__, '..', 'fonts')
   TEXTPATH = File.join(__dir__, 'textpath')
@@ -23,27 +32,33 @@ module MicaKit
   FACES = {
     'Fraunces-600' => ['Fraunces-Variable.woff2', 600],
     'Fraunces-700' => ['Fraunces-Variable.woff2', 700],
+    'Fraunces-730' => ['Fraunces-Variable.woff2', 730],
     'Manrope-400' => ['Manrope-Variable.woff2', 400],
     'Manrope-500' => ['Manrope-Variable.woff2', 500],
+    'Manrope-600' => ['Manrope-Variable.woff2', 600],
     'Manrope-700' => ['Manrope-Variable.woff2', 700],
-    'Manrope-800' => ['Manrope-Variable.woff2', 800],
-    'FiraMono-Regular' => ['FiraMono-Regular.ttf', nil],
-    'FiraMono-Medium' => ['FiraMono-Medium.ttf', nil]
+    'Manrope-800' => ['Manrope-Variable.woff2', 800]
   }.freeze
 
-  # Ink-blue, silver and brass from Mica's hair, capelet and reading glasses;
-  # amber from the Amber framework mark.
-  DARK = {
-    ground: '#121722', panel: '#1A2130', panel_edge: '#2C3650', grid: '#263049',
-    text: '#EDEFF5', muted: '#A2AABD', faint: '#6F7891',
-    brass: '#E2B65B', blue: '#7E9BEA', blue_deep: '#3E5DB8', amber: '#F7913A',
-    bar_track: '#222A3C'
-  }.freeze
+  # Light: the site's canvas, paper, ink and amber scale.
+  # Dark: the site's footer, dark sections and terminal window.
   LIGHT = {
-    ground: '#FBF8F2', panel: '#FFFFFF', panel_edge: '#E3DCCD', grid: '#E9E3D6',
-    text: '#1C2231', muted: '#566074', faint: '#8B92A1',
-    brass: '#8A6A1F', blue: '#2F4FA8', blue_deep: '#22397C', amber: '#A93C08',
-    bar_track: '#F1ECE2'
+    ground: '#FFF9EF', panel: '#FFFDF9', panel_edge: '#D9AD7E', grid: '#E9D3B9',
+    text: '#211914', muted: '#76675D', faint: '#76675D',
+    accent: '#A93D08',                   # amber-700: small text and labels
+    series: '#F47A16', on_series: '#211914',   # amber-500 bars, ink labels
+    series2: '#A93D08', on_series2: '#FFFDF9', # amber-700 bars, paper labels
+    third: '#453930',                    # ink-soft
+    bar_track: '#FFF0D7', loupe: '#D95B0A'
+  }.freeze
+  DARK = {
+    ground: '#241A15', panel: '#241A15', panel_edge: '#4B3B32', grid: '#3D302A',
+    text: '#FFF7ED', muted: '#CDBEB4', faint: '#AA9A90',
+    accent: '#FFBD74',
+    series: '#F47A16', on_series: '#211914',
+    series2: '#FFC777', on_series2: '#211914', # amber-300 bars, ink labels
+    third: '#FFF7ED',
+    bar_track: '#30221C', loupe: '#FFC777'
   }.freeze
 
   module_function
@@ -72,32 +87,36 @@ module MicaKit
   end
 
   def svg_open(width, height, title, description)
-    %(<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 #{width} #{height}" width="#{width}" height="#{height}" role="img" aria-labelledby="t d">) +
+    %(<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 #{width} #{height}" width="#{width}" height="#{height}" role="img" aria-labelledby="t d">) +
       %(<title id="t">#{escape(title)}</title><desc id="d">#{escape(description)}</desc>)
   end
 
-  # The Amber framework crystal (public/assets/brand/amber-crystal.svg), 64 units square.
-  def amber_crystal(left, top, size)
-    scale = size / 64.0
-    <<~SVG
-      <g transform="translate(#{left} #{top}) scale(#{scale.round(4)})">
-        <path fill="#F47716" d="M22 4h25l11 20-7 28-20 9L8 46 5 19z"/>
-        <path fill="#ffcc78" d="M22 4 5 19l22 6z"/><path fill="#f68a20" d="m22 4 5 21 20-21z"/>
-        <path fill="#dc4c0a" d="m27 25 24 27 7-28z"/><path fill="#f57613" d="M8 46 27 25l4 36z"/>
-        <path fill="#ffa53a" d="M5 19 8 46l19-21z"/><path fill="#ffb44c" d="m27 25 31-1L47 4z"/>
-        <path fill="#b93708" d="m31 61 20-9-24-27z"/>
-      </g>
-    SVG
+  def data_uri(path)
+    type = path.end_with?('.png') ? 'image/png' : 'image/jpeg'
+    "data:#{type};base64,#{Base64.strict_encode64(File.binread(path))}"
   end
 
-  # Mica's loupe: the round brass lens with the fine crosshair etched in it.
-  def loupe(radius, brass, extra: '')
+  # A raster from the art folder, placed by its top-left corner and height.
+  def image_at(path, left:, top:, height:, extra: '')
+    pixel_width, pixel_height = File.binread(path, 24)[16, 8].unpack('NN') if path.end_with?('.png')
+    width = pixel_width ? (height * pixel_width.to_f / pixel_height).round(1) : height
+    uri = data_uri(path)
+    %(<image x="#{left}" y="#{top}" width="#{width}" height="#{height}" href="#{uri}"#{extra}/>)
+  end
+
+  def image_width(path, height)
+    pixel_width, pixel_height = File.binread(path, 24)[16, 8].unpack('NN')
+    (height * pixel_width.to_f / pixel_height).round(1)
+  end
+
+  # Mica's loupe: a round lens with the fine crosshair etched in it.
+  def loupe(radius, color, extra: '')
     <<~SVG
       <g#{extra}>
-        <circle r="#{radius}" fill="#FFFFFF" fill-opacity=".10" stroke="#{brass}" stroke-width="3.2"/>
-        <circle r="#{radius - 5}" fill="none" stroke="#{brass}" stroke-opacity=".35" stroke-width="1"/>
-        <path d="M#{-radius * 0.55} 0H#{radius * 0.55}M0 #{-radius * 0.55}V#{radius * 0.55}" stroke="#{brass}" stroke-opacity=".75" stroke-width="1.1"/>
-        <circle r="2.2" fill="none" stroke="#{brass}" stroke-width="1.1"/>
+        <circle r="#{radius}" fill="#FFFFFF" fill-opacity=".10" stroke="#{color}" stroke-width="3.2"/>
+        <circle r="#{radius - 5}" fill="none" stroke="#{color}" stroke-opacity=".35" stroke-width="1"/>
+        <path d="M#{-radius * 0.55} 0H#{radius * 0.55}M0 #{-radius * 0.55}V#{radius * 0.55}" stroke="#{color}" stroke-opacity=".75" stroke-width="1.1"/>
+        <circle r="2.2" fill="none" stroke="#{color}" stroke-width="1.1"/>
       </g>
     SVG
   end
