@@ -36,6 +36,12 @@ module Mica::Deflate
           inflater.take(count)
           return count
         end
+        if slice.size >= Inflater::DIRECT_READ
+          # A large slice is decoded into directly.
+          count = inflater.produce_into(slice)
+          release_inflater if count == 0
+          return count
+        end
         unless inflater.produce
           release_inflater
           return 0

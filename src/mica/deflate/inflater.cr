@@ -89,6 +89,10 @@ module Mica::Deflate
     # remains: up to 3 literals, a 258-byte back reference and the 32
     # bytes its first copies may write past a short one.
     FAST_OUTPUT_MARGIN = 320
+    # A reader's slice of at least this size is decoded into directly
+    # (`produce_into`), and only the last 32 KiB are copied aside as
+    # history; a smaller one is filled from the inflater's own buffer.
+    DIRECT_READ = WINDOW
 
     # Order of the code length code lengths (RFC 1951, section 3.2.7).
     CODE_LENGTH_ORDER = StaticArray[16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15]
@@ -147,6 +151,11 @@ module Mica::Deflate
     @out_checked : Int32 = 0
     @result_start : Int32 = 0
     @lowest_reference : Int32 = 0
+    # While a run writes straight into a reader's slice (`produce_into`):
+    # the end of the history in the inflater's own buffer and how many
+    # bytes before it a back reference may read. Zero bytes otherwise.
+    @history_end : UInt8* = Pointer(UInt8).null
+    @history_bytes : Int32 = 0
     # Where the current run of the decoding loop aims to stop.
     @run_stop : Int32 = 0
     @window_limit : Int32 = WINDOW
@@ -219,6 +228,7 @@ module Mica::Deflate
       @final_block = false
       @stored_left = 0
       @copy_left = 0
+      @history_bytes = 0
       @members = 0
       @metered_input = 0_i64
       @metered_output = 0_i64
@@ -324,6 +334,113 @@ module Mica::Deflate
           return @produced > before
         end
       end
+    end
+
+    # Decodes straight into *slice* (at least `DIRECT_READ` bytes, and
+    # nothing may be pending) until bytes are there or the stream ends.
+    # Returns the bytes written; 0 once the stream has ended (and its
+    # trailers have been checked).
+    def produce_into(slice : Bytes) : Int32
+      loop do
+        case @phase
+        in .stream_header?
+          read_stream_header
+        in .block_header?
+          read_block_header
+        in .stored?, .huffman?
+          count = run_into(slice)
+          return count if count > 0
+        in .trailer?
+          read_trailer
+        in .done?
+          return 0
+        end
+      end
+    end
+
+    # One run of the decoding loop with *slice* as the output buffer. The
+    # history stays in the inflater's own buffer, where back references
+    # that reach before the slice read it; afterwards the last 32 KiB of
+    # the run join it.
+    private def run_into(slice : Bytes) : Int32
+      own_pos = @out_pos
+      own_lowest = @lowest_reference
+      @history_end = @buffer + own_pos
+      @history_bytes = Math.min(own_pos - own_lowest, WINDOW)
+      @out = slice.to_unsafe
+      @out_capacity = slice.size
+      @out_pos = 0
+      @out_start = 0
+      @out_checked = 0
+      @lowest_reference = 0
+      count = 0
+      begin
+        @run_stop = RUN_BYTES
+        allowed = @limits.max_output_bytes - @produced
+        capped = allowed <= slice.size
+        limit = capped ? allowed.to_i32 : slice.size
+        if @phase.stored?
+          if @run_stop < limit
+            copy_stored(@run_stop, false)
+          else
+            copy_stored(limit, capped)
+          end
+        else
+          decode_huffman(limit, capped)
+        end
+        settle
+        count = @out_pos
+      ensure
+        @history_bytes = 0
+        @out = @buffer
+        @out_capacity = @buffer_capacity
+        @out_pos = own_pos
+        @out_start = own_pos
+        @out_checked = own_pos
+        @lowest_reference = own_lowest
+      end
+      keep_history(slice.to_unsafe + count, count) if count > 0
+      count
+    end
+
+    # Appends the last bytes of a run that wrote *count* bytes ending at
+    # *run_end* to the history in the inflater's own buffer (at most 32 KiB
+    # of history matter).
+    private def keep_history(run_end : UInt8*, count : Int32) : Nil
+      if count >= WINDOW
+        reserve_own_buffer(WINDOW)
+        @buffer.copy_from(run_end - WINDOW, WINDOW)
+        @out_pos = WINDOW
+        @lowest_reference = 0
+      else
+        if @out_pos + count > @buffer_capacity
+          # Keep only the history still in reach, at the front.
+          kept = Math.min(@out_pos - @lowest_reference, WINDOW - count)
+          @buffer.move_from(@buffer + (@out_pos - kept), kept)
+          @out_pos = kept
+          @lowest_reference = 0
+          reserve_own_buffer(kept + count)
+        end
+        (@buffer + @out_pos).copy_from(run_end - count, count)
+        @out_pos += count
+      end
+      @out_start = @out_pos
+      @out_checked = @out_pos
+    end
+
+    # Makes the inflater's own buffer at least *bytes* large (at most
+    # `STREAM_BUFFER`), keeping what it holds.
+    private def reserve_own_buffer(bytes : Int32) : Nil
+      return if bytes <= @buffer_capacity
+      wanted = @buffer_capacity
+      while wanted < bytes
+        wanted *= 2
+      end
+      wanted = STREAM_BUFFER if wanted > STREAM_BUFFER
+      @buffer = GC.realloc(@buffer.as(Void*), (wanted + SLACK).to_u64).as(UInt8*)
+      @buffer_capacity = wanted
+      @out = @buffer
+      @out_capacity = wanted
     end
 
     # The byte of the source the decoder has reached.
@@ -999,7 +1116,8 @@ module Mica::Deflate
           output_limit_reached if capped
           return false
         end
-        @out[@out_pos] = @out[@out_pos - @copy_distance]
+        # A reference that reaches before a reader's slice reads the history.
+        @out[@out_pos] = @copy_distance > @out_pos ? @history_end[@out_pos - @copy_distance] : @out[@out_pos - @copy_distance]
         @out_pos += 1
         @copy_left -= 1
       end
@@ -1063,7 +1181,7 @@ module Mica::Deflate
         total = entry & 0xFF
         distance = ((entry >> 16) &+ (bits & (1_u64.unsafe_shl(total) &- 1)).unsafe_shr((entry >> 8) & 0xF)).to_i32!
         used &+= total
-        return false if distance > @out_pos - @lowest_reference || distance > @window_limit
+        return false if distance > @out_pos - @lowest_reference + @history_bytes || distance > @window_limit
         @bit_buffer = @bit_buffer.unsafe_shr(used)
         @bit_count -= used.to_i32!
         @copy_left = length
@@ -1110,7 +1228,7 @@ module Mica::Deflate
     end
 
     private def check_distance(distance : Int32) : Nil
-      if distance > @out_pos - @lowest_reference
+      if distance > @out_pos - @lowest_reference + @history_bytes
         malformed("Invalid distance too far back (#{distance})")
       end
       if distance > @window_limit
@@ -1164,6 +1282,8 @@ module Mica::Deflate
       out_stop = out_base + stop
       lowest = out_base + @lowest_reference
       window = @window_limit.to_u32!
+      history_end = @history_end
+      history_bytes = @history_bytes.to_i64
       bit_buffer = @bit_buffer
       bits_left = @bit_count.to_u32!
       literal_lengths = @literal_length_table
@@ -1267,9 +1387,32 @@ module Mica::Deflate
         consume_fast_entry
         distance = ((entry >> 16) &+ (saved & (1_u64.unsafe_shl(entry & 63) &- 1)).unsafe_shr((entry >> 8) & 0xF)).to_u32!
         if distance.to_u64 > (out_next - lowest).to_u64! || distance > window
-          problem = 3
-          far_distance = distance.to_i32!
-          break
+          behind = out_next - lowest
+          if distance > window || distance.to_i64! > behind &+ history_bytes
+            problem = 3
+            far_distance = distance.to_i32!
+            break
+          end
+          # The reference starts in the history before a reader's slice:
+          # copy from there, then (when it runs on into the slice) from
+          # the start of the slice.
+          from_history = (distance.to_i64! &- behind).to_i32!
+          source = history_end + (0_i64 &- from_history)
+          first = length < from_history ? length : from_history
+          out_next.copy_from(source, first)
+          out_next += first
+          rest = length &- first
+          source = lowest
+          while rest > 0
+            out_next.value = source.value
+            out_next += 1
+            source += 1
+            rest &-= 1
+          end
+          entry = literal_lengths[(bit_buffer & literal_length_mask).to_u32!]
+          refill_fast_bits
+          break unless in_next <= in_stop && out_next <= out_stop
+          next
         end
 
         destination = out_next
