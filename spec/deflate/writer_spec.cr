@@ -34,12 +34,15 @@ private class DestinationThatHoldsItsWriter < DiscardingIO
   property writer : IO?
 end
 
-# Counts the guards the collector has finalized.
+# Counts the guards the collector has finalized, and records whether the
+# guard's own finalizer returned nil.
 class Mica::Deflate::Deflater::ReleaseGuard
   class_getter finalized_count = Atomic(Int32).new(0)
+  class_property? finalizer_returned_nil : Bool = true
 
-  def finalize
-    previous_def
+  def finalize : Nil
+    returned = previous_def
+    @@finalizer_returned_nil = false unless returned.nil?
     @@finalized_count.add(1)
   end
 end
@@ -413,6 +416,14 @@ describe "Mica::Deflate encoders, streaming" do
       # The collector is conservative: a stale word on the stack can keep
       # a few of the 200 alive.
       (Mica::Deflate::Deflater::ReleaseGuard.finalized_count.get - before).should be > 150
+    end
+
+    # The collector calls a finalizer as a C function that returns nothing.
+    # One that returns a large struct is compiled, on x86_64, to take a
+    # hidden result pointer where the collector passes the object.
+    it "has a guard whose finalizer returns nil" do
+      Mica::Deflate::Deflater::ReleaseGuard.new.finalize
+      Mica::Deflate::Deflater::ReleaseGuard.finalizer_returned_nil?.should be_true
     end
 
     it "records the blocks a deflater holds and none once it is released" do
