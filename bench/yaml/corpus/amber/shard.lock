@@ -1,0 +1,22 @@
+version: 2.0
+shards:
+  amber:
+    git: https://github.com/amberframework/amber.git
+    version: 2.0.0-beta.11+git.commit.f987f1bb19b789f8f14b000b6ee00ed496fe6cbb
+    checksum: sha256-v2:732bd8a19fed53e2e8ef0ee768dab03466abf502324d55de5f81961ac75456fa
+
+  asset_pipeline:
+    git: https://github.com/amberframework/asset_pipeline.git
+    version: 0.38.0+git.commit.73c89c3417a5282d9ac4179b283bcc660b7f898a
+    checksum: sha256-v2:80ea8ac95943a3c5be438e68c2ef2f00d9b9783f0787fcd67ef346f135d9510c
+
+  db:
+    git: https://github.com/crystal-lang/crystal-db.git
+    version: 0.14.0
+    checksum: sha256-v2:1eb6f1bf214c7b5a8135b5fb626ef4d55fae66ac85ed1e01c45c3b079a72df4e
+
+  grant:
+    git: https://github.com/crimson-knight/grant.git
+    version: 0.24.0+git.commit.7bb4b9d45e74c490e6f3ad80cef8cc1cebd5b889
+    checksum: sha256-v2:0c295bd9da92146c5482c63326adb402b24e33c152af86025a27f9da1a086f51
+

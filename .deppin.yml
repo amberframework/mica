@@ -5,3 +5,6 @@ maintenance_exemptions:
   - target: pcre2
     reason: "Differential baseline only: the standalone programs in spec/regex/differential/ (never compiled by crystal-alpha spec) record PCRE2 10.49's syntax verdicts on its test corpus and its search results on the RE2 and Rust corpora, and compare Mica's matches with PCRE2's; and the spec runner (stdlib) links libpcre2-8. The library itself (src/) never uses stdlib Regex, and scripts/check_linkage.sh proves a Mica::Regex program links no PCRE2."
     expires: 2027-05-18
+  - target: libyaml
+    reason: "Differential oracle and benchmark baseline only: fuzz/yaml_oracle.cr (the YAML campaigns, fuzz/yaml_record_fixture.cr and conformance/run_yaml_libyaml.cr) and bench/yaml/runner.cr use stdlib YAML on libyaml 0.2.5; scripts/libyaml_oracle_identity.sh prints its version and sha256 and fails on any other version. The library itself (src/) never requires yaml, spec binaries do not link libyaml (the specs replay spec/yaml/fixtures/libyaml_events.tsv), and scripts/check_linkage.sh proves a Mica::YAML program links no libyaml."
+    expires: 2027-05-22

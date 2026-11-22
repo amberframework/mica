@@ -53,7 +53,7 @@ body = Mica::Gzip.decode(gzipped, limits: Mica::Deflate::DecodeLimits::REQUEST_B
 document = Mica::XML.parse(File.read("feed.xml"))
 ```
 
-`Mica::Regex::Expression` follows stdlib `Regex` method for method, plus the limits. Guides: [Regex](docs/regex.md) · [Inflate](docs/compression.md) · [XML](docs/xml.md).
+`Mica::Regex::Expression` follows stdlib `Regex` method for method, plus the limits. Guides: [Regex](docs/regex.md) · [Inflate](docs/compression.md) · [YAML](docs/yaml.md) · [XML](docs/xml.md).
 
 ### 2. Crystal's own `Regex` on Mica, with crystal-alpha
 
@@ -150,10 +150,11 @@ Every engine is linear in the input; the plan only picks the fastest one that fi
 |---|---|---|
 | `Mica::Regex` | Regular expressions in Crystal's PCRE2 syntax, linear-time | [docs/regex.md](docs/regex.md) |
 | `Mica::Gzip`, `Mica::Zlib`, `Mica::Deflate` | gzip (RFC 1952, multi-member), zlib (RFC 1950), raw DEFLATE (RFC 1951); one-shot and streaming | [docs/compression.md](docs/compression.md) |
+| `Mica::YAML` | YAML 1.2 (402 of 402 yaml-test-suite cases) and a libyaml 0.2.5 dialect: pull parser, node API with aliases and merge keys, emitter. On `main`, ships in the next release | [docs/yaml.md](docs/yaml.md) |
 | `Mica::XML` | XML 1.0 and 1.1 with Namespaces: streaming reader, DOM, builder, XPath 1.0 | [docs/xml.md](docs/xml.md) |
 | `Mica::Core` | Strict UTF-8, UTF-16/UTF-32/ISO-8859-1 transcoding, positions, limits, work budgets | [docs/ADDING_A_FORMAT.md](docs/ADDING_A_FORMAT.md) |
 
-More formats (JSON, YAML, CBOR, HTTP/1.1, URIs, multipart, CSV, TOML, Markdown) plug into the same core.
+More formats (JSON, CBOR, HTTP/1.1, URIs, multipart, CSV, TOML, Markdown) plug into the same core.
 
 ## Safe by default
 
@@ -210,12 +211,13 @@ Not yet. One-shot decoding is 1.45× slower than system zlib today, inside the Z
 shards-alpha install --frozen
 crystal-alpha build $(find spec -name '*_spec.cr' | sort) -o bin/specs && bin/specs
 crystal-alpha tool format --check
-scripts/check_linkage.sh     # no PCRE2, libz or libxml2 in a Mica program
+scripts/check_linkage.sh     # no PCRE2, libz, libyaml or libxml2 in a Mica program
 bench/regex/run.sh --quick   # Mica::Regex against PCRE2
 bench/deflate/run.sh --quick # Inflate against zlib
+bench/yaml/run.sh            # Mica::YAML against libyaml
 ```
 
-Fuzzing, conformance suites and the XML benchmarks: [docs/xml.md](docs/xml.md), [docs/regex.md](docs/regex.md), [docs/compression.md](docs/compression.md) and [docs/benchmarks.md](docs/benchmarks.md). Requirement ids in `spec/requirements/*.tsv` map each standard's sections to the specs that cover them.
+Fuzzing, conformance suites and the XML benchmarks: [docs/xml.md](docs/xml.md), [docs/regex.md](docs/regex.md), [docs/compression.md](docs/compression.md), [docs/yaml.md](docs/yaml.md) and [docs/benchmarks.md](docs/benchmarks.md). Requirement ids in `spec/requirements/*.tsv` map each standard's sections to the specs that cover them.
 
 Something off? [Open an issue](../../issues/new/choose). Questions go to [SUPPORT.md](SUPPORT.md).
 
