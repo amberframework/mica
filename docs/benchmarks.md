@@ -306,6 +306,129 @@ corpus and format, every case where Mica is slower than zlib with its
 margin, every case's absolute numbers for both engines with the ratio and
 interval, peak memory, the load averages, and the method and machine.
 
+## Deflate encoders (`bench/deflate_encode/`)
+
+Mica's encoders against the system zlib's `deflate` at levels 1, 6 and 9.
+The bars for Z2, per level: the corpus total of Mica's compressed bytes is
+at most 1.0% above zlib's, and Mica is at least as fast as zlib (MB of
+input per second). The report states both per file, with every case that
+is slower or larger.
+
+```sh
+bench/deflate_encode/run.sh            # every corpus, levels 1, 6 and 9, 5 rounds
+bench/deflate_encode/run.sh --quick    # Canterbury and the HTTP bodies, 3 rounds, for iteration
+bench/deflate_encode/run.sh --out DIR --corpora silesia --levels 9 --rounds 2   # one piece of a long run
+```
+
+One command fetches and verifies the corpus, builds the two runners with `--release`,
+runs the rounds and prints the path of the report
+(`bench/data/deflate/encode-runs/<UTC time>/REPORT.md`, with
+`results.json`, `run.json`, `samples.jsonl`, `memory.jsonl`,
+`checks.jsonl` and `run.log` beside it). A run directory is resumable:
+samples it already holds are kept, so a long run is done in pieces with
+`--out DIR` and `--corpora`, `--levels` or a growing `--rounds`. Anything
+after `--` goes to the driver (`--only silesia/mozilla` filters case ids,
+`--max-rounds`, `--samples`, `--budget`, `--skip-memory`, `--skip-checks`,
+`--timeout`).
+
+**Cases.** The corpus is the Inflate benchmark's (11 Canterbury files, 12
+Silesia files, the 7 committed HTTP bodies), plus the 1 MiB JSON body
+`bench/deflate/corpus/http/json_1m.json` when that local file is present
+(it is not committed; the driver pins its size and sha256). Each file is a
+case at levels 1, 6 and 9: 93 cases with the local file, 90 without. Both
+engines write one gzip member, the container Amber sends as
+`Content-Encoding: gzip`.
+
+**Engines**, each measured in its own release-built process, one process
+at a time:
+
+| Engine | Program | What it is |
+|---|---|---|
+| `zlib-oneshot` | `bench/deflate_encode/zlib_runner.cr` | System zlib through the harness's own `lib` binding: `deflateInit2` (windowBits 31, memory level 8, default strategy), one `deflate(Z_FINISH)` into a buffer of `deflateBound` bytes allocated untouched from the collector for that encode, and `deflateEnd`. |
+| `mica-oneshot` | `bench/deflate_encode/mica_runner.cr` | `Mica::Gzip.encode`. The program links no libz. |
+| `zlib-stream` | `bench/deflate_encode/zlib_runner.cr` | A new stream per encode: `deflate(Z_NO_FLUSH)` on 64 KiB pieces of input with a 64 KiB output buffer, then `deflate(Z_FINISH)`. |
+| `mica-stream` | `bench/deflate_encode/mica_runner.cr` | A new `Mica::Gzip::Writer` per encode, written to in 64 KiB pieces. |
+
+Both streaming engines copy their output into one buffer allocated when
+the process starts, so the stream can be checked after the clock stops.
+
+**Method.** A process does one warm-up encode and up to 11 timed samples,
+and reports the median and the minimum as seconds and as MB (1,000,000
+bytes) of input per second. An encode under 10 ms is timed in batches. An
+encode of 0.5 s or more is not repeated for a warm-up (its first run is
+its first sample), and sampling stops once the timed encodes add up to
+1.5 s, so the largest files at level 9 are sampled once per process and
+their statistics come from the rounds. The first stream of a process is
+decoded by the engine's own library and compared with the input; every
+later stream must equal the first byte for byte. Before the rounds, the
+driver has the Mica runner write its one-shot and streaming streams to a
+file and the zlib runner inflate each to the original (`checks.jsonl`), so
+every Mica stream of the benchmark is also decoded by system zlib. Rounds
+interleave the engines (Mica before its zlib pair in even rounds, the
+reverse order in odd ones) and record the load average. A case's speed
+ratio is the geometric mean of its per-round ratios with a 95%
+paired-bootstrap interval over the rounds (10,000 resamples, fixed seed);
+a level's headline is the geometric mean over its files. Sizes are the
+whole gzip member from both engines.
+
+**Memory.** `mica_runner memory LEVEL FILE` reports what a streaming
+encoder holds: its tables (the window, the hash and chain tables and the
+symbol buffer), its output buffer and its code builders' arrays, all from
+libc, and the collector's allocation count across the whole encode into a
+sink that discards. The driver also records the peak
+resident set size of a separate process per engine doing one encode
+(`/usr/bin/time -l`).
+
+**The report** gives, per level, the corpus totals of both sizes with
+their ratio and the size gate, the geometric-mean speed one-shot and
+streaming written as "N× as fast as zlib" with its interval, and the count
+of files at or above zlib; then every case where Mica is slower, every
+case where Mica's output is larger, each file's sizes and speeds per
+level, memory, the load averages, and the method and machine.
+
+**Measured** (2026-11-22, Apple M1 Max, zlib 1.2.12, 5 rounds, 93 cases;
+the machine was shared, with a 1-minute load average between 17 and 205,
+which is why the engines are interleaved and compared inside each round):
+
+| Level | zlib bytes, corpus total | Mica bytes | Mica / zlib size | One-shot speed, geometric mean | One-shot files at or above zlib | Streaming speed, geometric mean | Streaming files at or above zlib |
+|---|---|---|---|---|---|---|---|
+| 1 | 78,575,628 | 78,563,668 | 0.9998 | 1.46× as fast as zlib [1.43, 1.49] | 28 of 31 | 1.27× as fast as zlib [1.21, 1.31] | 24 of 31 |
+| 6 | 69,330,546 | 69,300,087 | 0.9996 | 1.30× as fast as zlib [1.26, 1.35] | 29 of 31 | 1.21× as fast as zlib [1.17, 1.26] | 26 of 31 |
+| 9 | 68,746,715 | 68,711,369 | 0.9995 | 1.21× as fast as zlib [1.20, 1.23] | 27 of 31 | 1.13× as fast as zlib [1.10, 1.16] | 26 of 31 |
+
+The size bar holds at every level, and no file is more than 0.20% larger
+than zlib's (`canterbury/kennedy.xls` at levels 1 and 9; 10 of the 93
+cases are larger at all, 6 of them by 24 bytes or fewer). System zlib
+inflated all 186 Mica streams to the original files.
+
+The speed bar holds for each level's geometric mean and, one-shot, for
+every file larger than 4 KiB except two whose intervals reach 1.0
+(`canterbury/sum` and `canterbury/kennedy.xls` at level 9, 0.96× and
+0.98×). It does not hold for the smallest inputs:
+
+- The two 1 KiB HTTP bodies are slower than zlib at every level: 0.66× to
+  0.81× as fast one-shot and 0.58× to 0.84× streaming. An encode of that
+  size takes about 10 microseconds, most of it setup. The part of the gap
+  that has been traced is the collector: a larger initial collector heap
+  takes 10 to 25 percent off the one-shot time, which does not close the
+  gap.
+- Streaming at level 1 is also behind, with the whole interval below 1.0,
+  on three files of 4 to 15 KiB (`canterbury/xargs.1` 0.64×,
+  `canterbury/fields.c` 0.71×, `http/json_16k.json` 0.75×).
+  `canterbury/grammar.lsp` (3.7 KiB) is at 0.93× one-shot at level 1.
+- Eight more streaming cases are below 1.0 with intervals that reach it:
+  `canterbury/xargs.1` at levels 6 and 9 (0.90×, 0.85×),
+  `canterbury/grammar.lsp` at levels 1 and 9 (0.85×, 0.97×),
+  `http/html_16k.html` at levels 1 and 6 (0.93×, 0.99×),
+  `canterbury/kennedy.xls` at level 9 (0.94×) and `canterbury/lcet10.txt`
+  at level 6 (0.97×).
+- In all, 9 of 93 cases are slower one-shot (6 with the whole interval
+  below 1.0) and 17 of 93 streaming (9 with the whole interval below 1.0).
+
+A streaming encoder holds 294,992 bytes at each level. The first
+measurement of the branch, before tuning, had the same sizes and
+geometric means of 0.79× to 1.00× one-shot and 0.74× to 0.83× streaming.
+
 ## YAML (`bench/yaml/`)
 
 Mica's YAML parser against libyaml 0.2.5 (through the standard library's
