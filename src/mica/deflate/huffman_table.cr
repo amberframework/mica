@@ -113,20 +113,27 @@ module Mica::Deflate
     # decodes as invalid.
     #
     # The root table is filled the way libdeflate fills it: codewords are
-    # visited in canonical order with their bits reversed, each writes one
-    # entry, and whenever the code length grows the filled part of the
+    # visited in canonical order, each writes one entry at its bits
+    # reversed, and whenever the code length grows the filled part of the
     # table is doubled by copying it, so a build costs one pass over the
     # symbols plus one copy of the table.
     def self.build(table : UInt32*, capacity : Int32, lengths : UInt8*, count : Int32, root : Int32,
                    alphabet : Alphabet) : Built
-      counts_storage = uninitialized StaticArray(Int32, 16)
+      # Two sets of counters, for even and odd symbols: consecutive
+      # symbols often share a length, and two increments of one counter in
+      # a row would wait on each other.
+      counts_storage = uninitialized StaticArray(Int32, 32)
       counts = counts_storage.to_unsafe
-      16.times { |length| counts[length] = 0 }
+      32.times { |length| counts[length] = 0 }
+      odd_counts = counts + 16
       symbol = 0
-      while symbol < count
+      while symbol &+ 1 < count
         counts[lengths[symbol]] &+= 1
-        symbol &+= 1
+        odd_counts[lengths[symbol &+ 1]] &+= 1
+        symbol &+= 2
       end
+      counts[lengths[symbol]] &+= 1 if symbol < count
+      16.times { |length| counts[length] &+= odd_counts[length] }
       max_length = 15
       while max_length > 0 && counts[max_length] == 0
         max_length -= 1
@@ -181,45 +188,26 @@ module Mica::Deflate
         symbol &+= 1
       end
 
+      # Codewords no longer than the root table: one entry each, at the
+      # codeword's bits reversed (DEFLATE sends a code's first bit first);
+      # the filled part doubles as the length grows.
       table_bits = max_length < root ? max_length : root
-      codeword = 0_u32
+      code = 0_u32
       length = 1
-      while counts[length] == 0
+      while length <= table_bits
+        added = (length.to_u32! << 8) &+ length.to_u32!
+        shift = 32 &- length
+        stop = sorted + counts[length]
+        while sorted < stop
+          table[code.bit_reverse.unsafe_shr(shift)] = results[sorted.value] &+ added
+          sorted += 1
+          code &+= 1
+        end
+        code <<= 1
+        (table + (1 << length)).copy_from(table, 1 << length) if length < table_bits
         length &+= 1
       end
-      remaining = counts[length]
-      filled = 1_u32 << length
-      # Codewords no longer than the root table: one entry each; the
-      # filled part doubles as the length grows.
-      while length <= table_bits
-        loop do
-          table[codeword] = results[sorted.value] &+ (length.to_u32! << 8) &+ length.to_u32!
-          sorted += 1
-          if codeword == filled &- 1
-            # The last codeword (all ones): double up to the full table.
-            while length < table_bits
-              (table + filled).copy_from(table, filled)
-              filled <<= 1
-              length &+= 1
-            end
-            return Built.new(Problem::None, root_size, table_bits)
-          end
-          # The next codeword in bit-reversed order.
-          bit = 1_u32 << (31 &- (codeword ^ (filled &- 1)).leading_zeros_count)
-          codeword = (codeword & (bit &- 1)) | bit
-          remaining &-= 1
-          break if remaining == 0
-        end
-        loop do
-          length &+= 1
-          if length <= table_bits
-            (table + filled).copy_from(table, filled)
-            filled <<= 1
-          end
-          remaining = counts[length]
-          break if remaining != 0
-        end
-      end
+      return Built.new(Problem::None, root_size, table_bits) if max_length <= root
 
       # Longer codewords: a subtable per root prefix, sized to hold every
       # codeword that starts with it.
@@ -228,41 +216,44 @@ module Mica::Deflate
       work = root_size
       prefix = UInt32::MAX
       subtable_start = 0
-      loop do
-        if codeword & root_mask != prefix
-          prefix = codeword & root_mask
-          subtable_start = table_end
-          subtable_bits = length &- table_bits
-          space = remaining
-          while space < (1 << subtable_bits)
-            subtable_bits &+= 1
-            space = (space << 1) &+ counts[table_bits &+ subtable_bits]
-          end
-          table_end = subtable_start &+ (1 << subtable_bits)
-          raise Mica::Error.new("internal error: Huffman table overflow") if table_end > capacity
-          table[prefix] = EXCEPTIONAL | SUBTABLE | (subtable_start.to_u32! << 16) | (subtable_bits.to_u32! << 8) |
-                          table_bits.to_u32!
-          work = work &- 1 &+ (1 << subtable_bits)
-        end
+      while length <= max_length
+        remaining = counts[length]
         code_bits = (length &- table_bits).to_u32!
-        entry = results[sorted.value] &+ (code_bits << 8) &+ code_bits
-        sorted += 1
-        index = subtable_start &+ (codeword >> table_bits).to_i32!
+        added = (code_bits << 8) &+ code_bits
+        shift = 32 &- length
         stride = 1 << code_bits
-        loop do
-          table[index] = entry
-          index &+= stride
-          break unless index < table_end
+        while remaining > 0
+          reversed = code.bit_reverse.unsafe_shr(shift)
+          if reversed & root_mask != prefix
+            prefix = reversed & root_mask
+            subtable_start = table_end
+            subtable_bits = code_bits.to_i32!
+            space = remaining
+            while space < (1 << subtable_bits)
+              subtable_bits &+= 1
+              space = (space << 1) &+ counts[table_bits &+ subtable_bits]
+            end
+            table_end = subtable_start &+ (1 << subtable_bits)
+            raise Mica::Error.new("internal error: Huffman table overflow") if table_end > capacity
+            table[prefix] = EXCEPTIONAL | SUBTABLE | (subtable_start.to_u32! << 16) | (subtable_bits.to_u32! << 8) |
+                            table_bits.to_u32!
+            work = work &- 1 &+ (1 << subtable_bits)
+          end
+          entry = results[sorted.value] &+ added
+          sorted += 1
+          index = subtable_start &+ (reversed >> table_bits).to_i32!
+          loop do
+            table[index] = entry
+            index &+= stride
+            break unless index < table_end
+          end
+          code &+= 1
+          remaining &-= 1
         end
-        return Built.new(Problem::None, work, table_bits) if codeword == (1_u32 << length) &- 1
-        bit = 1_u32 << (31 &- (codeword ^ ((1_u32 << length) &- 1)).leading_zeros_count)
-        codeword = (codeword & (bit &- 1)) | bit
-        remaining &-= 1
-        while remaining == 0
-          length &+= 1
-          remaining = counts[length]
-        end
+        code <<= 1
+        length &+= 1
       end
+      Built.new(Problem::None, work, table_bits)
     end
 
     # Returns the entry for *symbol* without its code length (see `build`).

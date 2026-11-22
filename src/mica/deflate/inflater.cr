@@ -144,6 +144,8 @@ module Mica::Deflate
     @out_checked : Int32 = 0
     @result_start : Int32 = 0
     @lowest_reference : Int32 = 0
+    # Where the current run of the decoding loop aims to stop.
+    @run_stop : Int32 = 0
     @window_limit : Int32 = WINDOW
 
     # Decoding state.
@@ -223,17 +225,11 @@ module Mica::Deflate
         @input = source.to_unsafe
         @in_end = source.size
         @io_done = true
-        # A first guess from the input size. A small body is decoded in
-        # the inflater's own buffer and copied out at its exact size; a
-        # larger one gets its result buffer now.
-        guess = source.size.to_i64 * 4
-        if guess <= STREAM_BUFFER
-          use_own_buffer
-        else
-          guess = @limits.max_output_bytes + WINDOW if guess > @limits.max_output_bytes + WINDOW
-          @out = GC.malloc_atomic((guess + SLACK).to_u64).as(UInt8*)
-          @out_capacity = guess.to_i32
-        end
+        # A one-shot decode starts in the inflater's own buffer. A small
+        # body ends there and is copied out at its exact size; a larger
+        # one moves to a result buffer sized from the ratio it has shown
+        # by then (`grow_result`).
+        use_own_buffer
       else
         @one_shot = false
         @io = source
@@ -309,7 +305,11 @@ module Mica::Deflate
         in .stored?, .huffman?
           limit, capped = prepare_output
           if @phase.stored?
-            copy_stored(limit, capped)
+            if @run_stop < limit
+              copy_stored(@run_stop, false)
+            else
+              copy_stored(limit, capped)
+            end
           else
             decode_huffman(limit, capped)
           end
@@ -464,8 +464,11 @@ module Mica::Deflate
           slide_window
         end
       end
+      # The run aims to stop RUN_BYTES from here (the fast loop may pass
+      # that by one symbol); the room in the buffer and `max_output_bytes`
+      # are hard limits.
+      @run_stop = @out_pos + RUN_BYTES
       space = @out_capacity - @out_pos
-      space = RUN_BYTES if space > RUN_BYTES
       allowed = @limits.max_output_bytes - @produced
       if allowed <= space
         {@out_pos + allowed.to_i32, true}
@@ -492,7 +495,10 @@ module Mica::Deflate
       consumed = input_offset
       consumed = 1_i64 if consumed < 1
       predicted = (@out_pos - @result_start).to_i64 * @in_end // consumed
-      wanted = predicted + predicted // 16 + LOW_ROOM + @result_start
+      wanted = predicted + predicted // 8 + LOW_ROOM + @result_start
+      # At least four times the input (most text needs no second move) and
+      # at least double the buffer it leaves.
+      wanted = @in_end.to_i64 * 4 if wanted < @in_end.to_i64 * 4
       wanted = @out_capacity.to_i64 * 2 if wanted < @out_capacity.to_i64 * 2
       # Past half the ceiling, go straight to it: a buffer just under the
       # ceiling would need one more nearly ceiling-sized copy, and the
@@ -853,7 +859,7 @@ module Mica::Deflate
           in_pos &+= (63 &- bit_count) >> 3
           bit_count |= 56
         end
-        entry = table[bit_buffer & mask]
+        entry = table[(bit_buffer & mask).to_u32!]
         break if entry & HuffmanTable::EXCEPTIONAL != 0
         symbol = (entry >> 16).to_i32!
         code_bits = (entry & 0xFF).to_i32!
@@ -960,18 +966,21 @@ module Mica::Deflate
       limit_exceeded("max_output_bytes", "Output would pass max_output_bytes (#{@limits.max_output_bytes})")
     end
 
-    # Decodes Huffman-coded symbols until the end of the block or *limit*.
+    # Decodes Huffman-coded symbols until the end of the block, the run's
+    # stop or *limit*.
     private def decode_huffman(limit : Int32, capped : Bool) : Nil
       loop do
         if @copy_left > 0
           return unless finish_copy(limit, capped)
         end
+        return if @out_pos >= @run_stop
         if input_running_low?
           refill_input
         end
         if @in_end - @in_pos >= FAST_INPUT_MARGIN && limit - @out_pos >= FAST_OUTPUT_MARGIN
           decode_fast(limit)
           return unless @phase.huffman?
+          next
         end
         return unless decode_one_careful(limit, capped)
         return unless @phase.huffman?
@@ -993,12 +1002,81 @@ module Mica::Deflate
       true
     end
 
-    # Decodes one symbol with full checks at every step. Returns false when
-    # the run must stop (no room before *limit*).
+    # Decodes one symbol at the edges of the input or the output. Returns
+    # false when the run must stop (no room before *limit*).
     private def decode_one_careful(limit : Int32, capped : Bool) : Bool
       if @out_pos == limit && !capped
         return false
       end
+      # With 48 bits in the bit buffer a whole symbol is there (15 code
+      # and 5 extra bits of a length, 15 and 13 of a distance), so it is
+      # decoded without a check per step.
+      while @bit_count <= 56 && @in_pos < @in_end
+        @bit_buffer |= @input[@in_pos].to_u64.unsafe_shl(@bit_count)
+        @in_pos += 1
+        @bit_count += 8
+      end
+      if @bit_count >= 48 && @out_pos < limit
+        return true if decode_whole_symbol(limit, capped)
+      end
+      decode_one_step_by_step(limit, capped)
+    end
+
+    # Decodes one symbol from a bit buffer that holds all of it. Returns
+    # false, taking nothing, at anything that raises (an invalid code, a
+    # distance too far back), which the step-by-step decode then reports.
+    private def decode_whole_symbol(limit : Int32, capped : Bool) : Bool
+      bits = @bit_buffer
+      table = @literal_length_table
+      entry = table[(bits & (1_u64.unsafe_shl(@literal_length_bits) &- 1)).to_u32!]
+      used = 0_u32
+      if entry & HuffmanTable::SUBTABLE != 0
+        used = entry & 0xFF
+        bits = bits.unsafe_shr(used)
+        entry = table[(entry >> 16) &+ (bits.to_u32! & (1_u32.unsafe_shl((entry >> 8) & 0xF) &- 1))]
+      end
+      if entry & HuffmanTable::LITERAL != 0
+        used &+= entry & 0xFF
+        @out[@out_pos] = (entry >> 16).to_u8!
+        @out_pos += 1
+      elsif entry & HuffmanTable::EXCEPTIONAL != 0
+        return false if entry & HuffmanTable::END_OF_BLOCK == 0
+        used &+= entry & 0xFF
+        @phase = Phase::BlockHeader
+      else
+        total = entry & 0xFF
+        length = ((entry >> 16) &+ (bits & (1_u64.unsafe_shl(total) &- 1)).unsafe_shr((entry >> 8) & 0xF)).to_i32!
+        used &+= total
+        bits = bits.unsafe_shr(total)
+        table = @distance_table
+        entry = table[(bits & (1_u64.unsafe_shl(@distance_bits) &- 1)).to_u32!]
+        if entry & HuffmanTable::SUBTABLE != 0
+          used &+= entry & 0xFF
+          bits = bits.unsafe_shr(entry & 0xFF)
+          entry = table[(entry >> 16) &+ (bits.to_u32! & (1_u32.unsafe_shl((entry >> 8) & 0xF) &- 1))]
+        end
+        return false if entry & HuffmanTable::EXCEPTIONAL != 0
+        total = entry & 0xFF
+        distance = ((entry >> 16) &+ (bits & (1_u64.unsafe_shl(total) &- 1)).unsafe_shr((entry >> 8) & 0xF)).to_i32!
+        used &+= total
+        return false if distance > @out_pos - @lowest_reference || distance > @window_limit
+        @bit_buffer = @bit_buffer.unsafe_shr(used)
+        @bit_count -= used.to_i32!
+        @copy_left = length
+        @copy_distance = distance
+        # The copy stops at *limit* and the run with it (or the decode
+        # raises, when *limit* is the output limit).
+        finish_copy(limit, capped)
+        return true
+      end
+      @bit_buffer = @bit_buffer.unsafe_shr(used)
+      @bit_count -= used.to_i32!
+      true
+    end
+
+    # Decodes one symbol with full checks at every step. Returns false when
+    # the run must stop (no room before *limit*).
+    private def decode_one_step_by_step(limit : Int32, capped : Bool) : Bool
       entry = decode_careful(@literal_length_table, (1_u64 << @literal_length_bits) - 1, @literal_length_bits,
         "a Huffman block", "literal/length", with_extra: true)
       if entry & HuffmanTable::LITERAL != 0
@@ -1077,41 +1155,43 @@ module Mica::Deflate
       in_stop = @input + (@in_end - FAST_INPUT_MARGIN)
       out_base = @out
       out_next = out_base + @out_pos
-      out_stop = out_base + (limit - FAST_OUTPUT_MARGIN)
+      stop = limit - FAST_OUTPUT_MARGIN
+      stop = @run_stop if @run_stop < stop
+      out_stop = out_base + stop
       lowest = out_base + @lowest_reference
       window = @window_limit.to_u32!
       bit_buffer = @bit_buffer
       bits_left = @bit_count.to_u32!
       literal_lengths = @literal_length_table
-      literal_length_mask = (1_u64 << @literal_length_bits) &- 1
+      literal_length_mask = 1_u64.unsafe_shl(@literal_length_bits) &- 1
       distances = @distance_table
-      distance_mask = (1_u64 << @distance_bits) &- 1
+      distance_mask = 1_u64.unsafe_shl(@distance_bits) &- 1
       saved = 0_u64
       problem = 0
       far_distance = 0
 
       refill_fast_bits
-      entry = literal_lengths[bit_buffer & literal_length_mask]
+      entry = literal_lengths[(bit_buffer & literal_length_mask).to_u32!]
       loop do
         consume_fast_entry
         if entry & HuffmanTable::LITERAL != 0
           # Up to two more literals before the next refill: a literal
           # found in the root table takes at most 10 bits, and 56 are in.
           literal = (entry >> 16).to_u8!
-          entry = literal_lengths[bit_buffer & literal_length_mask]
+          entry = literal_lengths[(bit_buffer & literal_length_mask).to_u32!]
           consume_fast_entry
           out_next.value = literal
           out_next += 1
           if entry & HuffmanTable::LITERAL != 0
             literal = (entry >> 16).to_u8!
-            entry = literal_lengths[bit_buffer & literal_length_mask]
+            entry = literal_lengths[(bit_buffer & literal_length_mask).to_u32!]
             consume_fast_entry
             out_next.value = literal
             out_next += 1
             if entry & HuffmanTable::LITERAL != 0
               out_next.value = (entry >> 16).to_u8!
               out_next += 1
-              entry = literal_lengths[bit_buffer & literal_length_mask]
+              entry = literal_lengths[(bit_buffer & literal_length_mask).to_u32!]
               refill_fast_bits
               break unless in_next <= in_stop && out_next <= out_stop
               next
@@ -1131,12 +1211,12 @@ module Mica::Deflate
             problem = 1
             break
           end
-          entry = literal_lengths[(entry >> 16) &+ (bit_buffer & (1_u64.unsafe_shl((entry >> 8) & 0xF) &- 1))]
+          entry = literal_lengths[(entry >> 16) &+ (bit_buffer.to_u32! & (1_u32.unsafe_shl((entry >> 8) & 0xF) &- 1))]
           consume_fast_entry
           if entry & HuffmanTable::LITERAL != 0
             out_next.value = (entry >> 16).to_u8!
             out_next += 1
-            entry = literal_lengths[bit_buffer & literal_length_mask]
+            entry = literal_lengths[(bit_buffer & literal_length_mask).to_u32!]
             refill_fast_bits
             break unless in_next <= in_stop && out_next <= out_stop
             next
@@ -1155,7 +1235,7 @@ module Mica::Deflate
 
         # A length: its extra bits sit above the code bits in *saved*.
         length = ((entry >> 16) &+ (saved & (1_u64.unsafe_shl(entry & 63) &- 1)).unsafe_shr((entry >> 8) & 0xF)).to_i32!
-        entry = distances[bit_buffer & distance_mask]
+        entry = distances[(bit_buffer & distance_mask).to_u32!]
         # A distance takes up to 28 bits; two literals and a length may
         # have left as few as 16.
         if bits_left & 0xFF < 28
@@ -1168,7 +1248,7 @@ module Mica::Deflate
           end
           bit_buffer = bit_buffer.unsafe_shr(entry & 63)
           bits_left &-= entry
-          entry = distances[(entry >> 16) &+ (bit_buffer & (1_u64.unsafe_shl((entry >> 8) & 0xF) &- 1))]
+          entry = distances[(entry >> 16) &+ (bit_buffer.to_u32! & (1_u32.unsafe_shl((entry >> 8) & 0xF) &- 1))]
           if entry & HuffmanTable::EXCEPTIONAL != 0
             problem = 2
             break
@@ -1183,16 +1263,17 @@ module Mica::Deflate
         end
 
         destination = out_next
-        source = out_next - distance
+        source = out_next + (0_i64 &- distance.to_i64!)
         out_next += length
         # Look the next symbol up before copying, so the two overlap.
         refill_fast_bits
-        entry = literal_lengths[bit_buffer & literal_length_mask]
+        entry = literal_lengths[(bit_buffer & literal_length_mask).to_u32!]
         if distance >= 16
           destination.copy_from(source, 16)
           (destination + 16).copy_from(source + 16, 16)
           if length > 32
-            copied = 32
+            copied = 32_i64
+            length = length.to_i64!
             while copied < length
               (destination + copied).copy_from(source + copied, 16)
               copied &+= 16
@@ -1204,7 +1285,8 @@ module Mica::Deflate
           (destination + 16).copy_from(source + 16, 8)
           (destination + 24).copy_from(source + 24, 8)
           if length > 32
-            copied = 32
+            copied = 32_i64
+            length = length.to_i64!
             while copied < length
               (destination + copied).copy_from(source + copied, 8)
               copied &+= 8
@@ -1218,7 +1300,8 @@ module Mica::Deflate
           store_u64(destination + 16, run)
           store_u64(destination + 24, run)
           if length > 32
-            copied = 32
+            copied = 32_i64
+            length = length.to_i64!
             while copied < length
               store_u64(destination + copied, run)
               copied &+= 8

@@ -52,24 +52,93 @@ module Mica::Deflate
     end
 
     {% if flag?(:aarch64) && flag?(:darwin) %}
+      # Bytes per stream when three streams are folded side by side.
+      LONG_STREAM  = 4_096
+      SHORT_STREAM =   256
+
+      # For a stream of *bytes* bytes: four 256-entry tables that move a
+      # CRC register past that many bytes (multiply it by x^(8 * bytes)
+      # modulo the polynomial), one table per byte of the register.
+      private def self.shift_tables(bytes : Int32) : StaticArray(UInt32, 1024)
+        tables = StaticArray(UInt32, 1024).new(0_u32)
+        32.times do |bit|
+          value = 1_u32 << bit
+          (bytes // 8).times { value = LibCRC32Instructions.crc32x(value, 0_u64) }
+          base = (bit >> 3) * 256
+          mask = 1 << (bit & 7)
+          256.times { |index| tables[base + index] ^= value if index & mask != 0 }
+        end
+        tables
+      end
+
+      LONG_SHIFT        = shift_tables(LONG_STREAM)
+      LONG_SHIFT_TWICE  = shift_tables(LONG_STREAM * 2)
+      SHORT_SHIFT       = shift_tables(SHORT_STREAM)
+      SHORT_SHIFT_TWICE = shift_tables(SHORT_STREAM * 2)
+
+      @[AlwaysInline]
+      private def self.shifted(crc : UInt32, tables : UInt32*) : UInt32
+        tables[crc & 0xFF] ^ tables[256_u32 &+ ((crc >> 8) & 0xFF)] ^ tables[512_u32 &+ ((crc >> 16) & 0xFF)] ^
+          tables[768_u32 &+ (crc >> 24)]
+      end
+
+      @[AlwaysInline]
+      private def self.word_at(pointer : UInt8*) : UInt64
+        word = uninitialized UInt64
+        pointerof(word).as(UInt8*).copy_from(pointer, 8)
+        word
+      end
+
+      # Folds three streams of *stream* bytes each, starting at *pointer*,
+      # into *crc*. The CRC32X instruction takes three cycles and a core
+      # starts one per cycle, so three independent streams run at three
+      # times the speed of one; the tables then move the first two
+      # registers past the bytes that follow them.
+      @[AlwaysInline]
+      private def self.fold_three_streams(crc : UInt32, pointer : UInt8*, stream : Int32, shift_twice : UInt32*,
+                                          shift_once : UInt32*) : UInt32
+        first = crc
+        second = 0_u32
+        third = 0_u32
+        second_pointer = pointer + stream
+        third_pointer = second_pointer + stream
+        offset = 0
+        while offset < stream
+          first = LibCRC32Instructions.crc32x(first, word_at(pointer + offset))
+          second = LibCRC32Instructions.crc32x(second, word_at(second_pointer + offset))
+          third = LibCRC32Instructions.crc32x(third, word_at(third_pointer + offset))
+          offset &+= 8
+        end
+        shifted(first, shift_twice) ^ shifted(second, shift_once) ^ third
+      end
+
       # Every Apple silicon CPU has the ARMv8 CRC32 instructions (CRC32X
       # folds eight bytes into the CRC-32 in one instruction); LLVM emits
       # them for these intrinsics, so no library is involved.
       private def self.update_with_instructions(crc : UInt32, pointer : UInt8*, count : Int32) : UInt32
         crc = ~crc
         index = 0
-        while index + 32 <= count
-          words = uninitialized StaticArray(UInt64, 4)
-          words.to_unsafe.as(UInt8*).copy_from(pointer + index, 32)
-          crc = LibCRC32Instructions.crc32x(crc, words[0])
-          crc = LibCRC32Instructions.crc32x(crc, words[1])
-          crc = LibCRC32Instructions.crc32x(crc, words[2])
-          crc = LibCRC32Instructions.crc32x(crc, words[3])
-          index += 32
+        if count >= 3 * SHORT_STREAM
+          long_twice = LONG_SHIFT_TWICE.to_unsafe
+          long_once = LONG_SHIFT.to_unsafe
+          while count &- index >= 3 * LONG_STREAM
+            crc = fold_three_streams(crc, pointer + index, LONG_STREAM, long_twice, long_once)
+            index &+= 3 * LONG_STREAM
+          end
+          short_twice = SHORT_SHIFT_TWICE.to_unsafe
+          short_once = SHORT_SHIFT.to_unsafe
+          while count &- index >= 3 * SHORT_STREAM
+            crc = fold_three_streams(crc, pointer + index, SHORT_STREAM, short_twice, short_once)
+            index &+= 3 * SHORT_STREAM
+          end
+        end
+        while index &+ 8 <= count
+          crc = LibCRC32Instructions.crc32x(crc, word_at(pointer + index))
+          index &+= 8
         end
         while index < count
           crc = LibCRC32Instructions.crc32b(crc, pointer[index].to_u32)
-          index += 1
+          index &+= 1
         end
         ~crc
       end
