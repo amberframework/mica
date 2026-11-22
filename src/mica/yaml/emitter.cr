@@ -65,6 +65,11 @@ class Mica::YAML::Emitter
   # The size of the output buffer in bytes.
   BUFFER_SIZE = 16_384
 
+  # The buffer starts this small and doubles up to `BUFFER_SIZE`, so a
+  # short document costs a short buffer. What reaches the `IO`, and in
+  # which pieces, does not depend on it.
+  private INITIAL_BUFFER_SIZE = 512
+
   # The number of columns each nesting level is indented by.
   BEST_INDENT = 2
 
@@ -130,7 +135,7 @@ class Mica::YAML::Emitter
 
   # Creates an emitter that writes to *io*.
   def initialize(@io : IO)
-    @buffer = Bytes.new(BUFFER_SIZE)
+    @buffer = Bytes.new(INITIAL_BUFFER_SIZE)
     @states = [] of State
     @events = Deque(Event).new
     @indents = [] of Int32

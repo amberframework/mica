@@ -32,7 +32,15 @@ class Mica::YAML::Emitter
   # Makes room for one character, as libyaml's FLUSH does: the buffer is
   # written out once fewer than six bytes are free.
   private def reserve : Nil
-    flush_buffer unless @buffered + 5 < BUFFER_SIZE
+    return if @buffered + 5 < @buffer.size
+    if @buffer.size < BUFFER_SIZE
+      grown = Bytes.new(Math.min(@buffer.size * 2, BUFFER_SIZE))
+      @buffer[0, @buffered].copy_to(grown)
+      @buffer = grown
+      reserve
+    else
+      flush_buffer
+    end
   end
 
   # Writes one byte and advances the column.
@@ -99,7 +107,7 @@ class Mica::YAML::Emitter
     end
     while index < finish
       reserve
-      length = Math.min(BUFFER_SIZE - 5 - @buffered, finish - index)
+      length = Math.min(@buffer.size - 5 - @buffered, finish - index)
       bytes[index, length].copy_to(@buffer[@buffered, length])
       @buffered += length
       @column += length
