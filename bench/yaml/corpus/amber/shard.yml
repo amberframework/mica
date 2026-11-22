@@ -1,0 +1,24 @@
+name: yamlproof
+version: 0.1.0
+
+authors:
+  - Your Name <your.email@example.com>
+
+crystal: ">= 1.20.0, < 2.0"
+
+license: UNLICENSED
+
+targets:
+  yamlproof:
+    main: src/yamlproof.cr
+
+dependencies:
+  amber:
+    github: amberframework/amber
+    commit: f987f1bb19b789f8f14b000b6ee00ed496fe6cbb # v2.0.0-beta.11
+  grant:
+    github: crimson-knight/grant
+    commit: 7bb4b9d45e74c490e6f3ad80cef8cc1cebd5b889 # v0.24.0
+  asset_pipeline:
+    github: amberframework/asset_pipeline
+    commit: 73c89c3417a5282d9ac4179b283bcc660b7f898a # v0.38.0

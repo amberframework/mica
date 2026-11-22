@@ -42,6 +42,7 @@ module Mica::YAML
     private def compose_node : Node
       loop do
         finished = nil
+        position = @parser.start_position
         case @parser.kind
         when .scalar?
           node = Scalar.new(@parser.value, @parser.scalar_style, @parser.tag, @parser.anchor, @parser.start_position)
@@ -70,20 +71,21 @@ module Mica::YAML
         @parser.read_next
         next unless finished
         return finished if @stack.empty?
-        attach(finished)
+        attach(finished, position)
       end
     end
 
     # Adds a finished node to the collection on top of the stack and
-    # charges its expanded size to it.
-    private def attach(node : Node) : Nil
+    # charges its expanded size to it. *position* is where the node, or the
+    # alias that stands for it, was written.
+    private def attach(node : Node, position : Core::Position) : Nil
       frame = @stack.pop
       expanded = frame.expanded
       expanded = node.expanded_size > Int64::MAX - expanded ? Int64::MAX : expanded + node.expanded_size
       if expanded > @limits.max_alias_expansion
         raise ParseLimitError.new(
           "Aliases expand the document past max_alias_expansion (#{@limits.max_alias_expansion} nodes)",
-          node.position, "max_alias_expansion")
+          position, "max_alias_expansion")
       end
       parent = frame.node
       pending_key = nil

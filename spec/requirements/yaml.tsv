@@ -1,0 +1,30 @@
+# Requirements for Mica::YAML (milestone M4): the YAML 1.2.2 specification
+# (https://yaml.org/spec/1.2.2/), the libyaml-compatible dialect, the node
+# API and the parse limits.
+YAML-5.1-character-set	YAML 1.2.2 5.1	Input is UTF-8, UTF-16 or UTF-32; control characters other than tab and line breaks are rejected
+YAML-5.2-encodings	YAML 1.2.2 5.2	The encoding is detected from the byte order mark or the first bytes
+YAML-6.1-indentation	YAML 1.2.2 6.1	Indentation is spaces only; a tab is separation, never indentation
+YAML-6.6-comments	YAML 1.2.2 6.6	A comment starts at a line start or after white space
+YAML-6.8-directives	YAML 1.2.2 6.8	%YAML and %TAG directives are read; reserved directives are ignored
+YAML-6.9-node-properties	YAML 1.2.2 6.9	Anchors and tags are attached to nodes, with tag handles resolved
+YAML-7.1-aliases	YAML 1.2.2 7.1	An alias refers to the most recent node with its anchor; an undefined alias is an error
+YAML-7.3-flow-scalars	YAML 1.2.2 7.3	Double-quoted escapes, single-quoted quotes and plain scalars with line folding
+YAML-7.4-flow-collections	YAML 1.2.2 7.4	Flow sequences and mappings, single-pair mappings and empty keys and values
+YAML-8.1-block-scalars	YAML 1.2.2 8.1	Literal and folded scalars with indentation and chomping indicators
+YAML-8.2-block-collections	YAML 1.2.2 8.2	Block sequences and mappings, compact nesting and explicit keys
+YAML-9-documents	YAML 1.2.2 9	Document markers, bare documents and streams of several documents
+YAML-10-schemas	YAML 1.2.2 10	The failsafe, JSON and core schemas resolve plain scalars
+YAML-TEST-SUITE	yaml-test-suite data-2022-01-17	Every case of the official test suite passes in the YAML 1.2 dialect
+YAML-LIBYAML-DIALECT	libyaml 0.2.5	The libyaml dialect gives libyaml's events, marks and error messages
+YAML-MERGE-KEYS	yaml.org/type/merge	The << merge key merges mappings; the mapping's own keys win
+YAML-API-PULL	Mica API	PullParser reads events one at a time from a String, Bytes or IO with identical results
+YAML-API-NODES	Mica API	compose returns the node graph; parse returns values; aliases share one node
+YAML-LIMIT-INPUT	Mica limits	max_input_bytes stops input before it is scanned
+YAML-LIMIT-DEPTH	Mica limits	max_depth stops block and flow nesting
+YAML-LIMIT-NODES	Mica limits	max_nodes stops a document with too many nodes
+YAML-LIMIT-ALIAS-EXPANSION	Mica limits	max_alias_expansion stops billion-laughs and quadratic alias documents (GHSA-gmv7-hhm8-cxj5) before they expand
+YAML-LIMIT-WORK	Mica limits	The work budget and the deadline stop a parse with a typed, positioned error
+MICA-LINEAR-YAML-FLOW-NESTING	Mica hardening	Deep flow nesting scans in linear work
+MICA-LINEAR-YAML-SIMPLE-KEYS	Mica hardening	Many and long simple keys scan in linear work
+MICA-LINEAR-YAML-SCALARS	Mica hardening	Long scalars, comments and indentation runs scan in linear work
+MICA-LINEAR-YAML-ALIASES	Mica hardening	Alias fan-out composes in linear work

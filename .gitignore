@@ -8,3 +8,4 @@ conformance/xmlconf/
 lib/
 tmp/
 .minecart/audit/
+conformance/yaml-test-suite/
