@@ -86,6 +86,38 @@ module Mica::Deflate
     # compressed block is written through it in pieces, so it never grows.
     STREAM_OUTPUT_BYTES = 16_384
 
+    # Frees a streaming deflater's libc blocks when the collector drops a
+    # writer that was never closed. It holds four addresses and no
+    # reference, so the collector can finalize it whatever the writer's
+    # destination refers to. A finalizer on the writer itself would never
+    # run when its destination leads back to it (a response whose output is
+    # the writer): the collector does not finalize an object it reaches
+    # from itself, and the blocks would stay allocated.
+    #
+    # :nodoc:
+    class ReleaseGuard
+      @list_of_blocks = StaticArray(Void*, 4).new(Pointer(Void).null)
+
+      # Records the four blocks the deflater holds now; a null stands for a
+      # block it does not hold.
+      def hold(tables : Void*, symbols : Void*, previous : Void*, window : Void*) : Nil
+        @list_of_blocks[0] = tables
+        @list_of_blocks[1] = symbols
+        @list_of_blocks[2] = previous
+        @list_of_blocks[3] = window
+      end
+
+      # Returns true while a recorded block is still to be freed.
+      def holds_blocks? : Bool
+        @list_of_blocks.any? { |block| !block.null? }
+      end
+
+      def finalize
+        @list_of_blocks.each { |block| LibC.free(block) unless block.null? }
+        @list_of_blocks.fill(Pointer(Void).null)
+      end
+    end
+
     # zlib's parameters of one level (its `configuration_table`): stop
     # searching hard once a match is *good_length* long; do not look for a
     # better match past *max_lazy* (levels 1 to 3: the longest match whose
@@ -180,9 +212,11 @@ module Mica::Deflate
 
     # *sink* receives the stream as it is produced; without one the output
     # collects for `result`. *expected_input_bytes* sizes the first output
-    # buffer and, for a short one-shot input, the tables.
+    # buffer and, for a short one-shot input, the tables. *release_guard*
+    # frees the blocks of a deflater that is dropped without `release`.
     def initialize(@format : Format, @level : Int32, sink : IO?, @dictionary : Bytes? = nil,
-                   @header : Gzip::Header? = nil, expected_input_bytes : Int32 = -1)
+                   @header : Gzip::Header? = nil, expected_input_bytes : Int32 = -1,
+                   @release_guard : ReleaseGuard? = nil)
       Deflater.check_level(@level)
       @parameters = LEVELS[@level]
       check_header
@@ -223,14 +257,15 @@ module Mica::Deflate
                  BlockWriter.buffer_for(Math.max(expected_input_bytes // 2, 0) + 1_024)
                end
       @blocks = BlockWriter.new(sink, buffer, @tables)
+      record_blocks_in_release_guard
       load_dictionary
     end
 
     # Frees the tables and the window. The deflater encodes nothing after
     # this; `result` stays readable. `finish` calls it; whoever builds a
     # deflater and may drop it unfinished calls it too (`Deflater.encode`
-    # in an `ensure`, `StreamWriter` in its finalizer), which keeps the
-    # one-shot path free of a finalizer per call.
+    # in an `ensure`) or hands it a `ReleaseGuard` (`StreamWriter`), which
+    # keeps the one-shot path free of a finalizer per call.
     def release : Nil
       LibC.free(@tables.as(Void*)) unless @tables.null?
       LibC.free(@symbols.as(Void*)) unless @symbols.null?
@@ -240,6 +275,7 @@ module Mica::Deflate
       @symbols = Pointer(UInt32).null
       @previous = Pointer(UInt16).null
       @window = Pointer(UInt8).null
+      record_blocks_in_release_guard
     end
 
     # Bytes the engine holds for the window, the hash and chain tables and
@@ -449,7 +485,14 @@ module Mica::Deflate
       return @window unless @window.null?
       @window = allocate(WINDOW_CAPACITY)
       @source = @window
+      record_blocks_in_release_guard
       @window
+    end
+
+    private def record_blocks_in_release_guard : Nil
+      release_guard = @release_guard
+      return unless release_guard
+      release_guard.hold(@tables.as(Void*), @symbols.as(Void*), @previous.as(Void*), @window.as(Void*))
     end
 
     # Puts the last 32 KiB of the preset dictionary in front of the input
