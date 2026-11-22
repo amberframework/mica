@@ -157,10 +157,11 @@ are byte-identical.
 | An explicit key closed by the end of a flow sequence: `[? ]`, `[?]`, `[a, ? ]` | swallows the `]`, then fails with "did not find expected ',' or ']'" | a single-pair mapping with an empty key and value | as 0.2.5 | as 0.2.6 |
 | More than 1,000 nested collections (block levels plus flow levels) | read; no cap of its own | scanner error "exceeded maximum nesting depth" (CVE-2026-44842; the cap is settable with `yaml_set_max_nest_level`) | `max_depth` of the limits in use; unbounded only under `ParseLimits::LIBYAML` | `max_depth` (128 for `CONFIG_FILE`) |
 
-A 100,000-case campaign run against a libyaml 0.2.6 build (release
+A 500,000-case campaign run against a libyaml 0.2.6 build (release
 tarball sha256
 `43b393a117bd4fe39812fddc94e3d654359a3ae05653dcf0110a1122d1747e61`) found
-no disagreement, since the generators rarely produce either input;
+no document the two read differently and five that 0.2.6 accepts and the
+dialect rejects, all of them the first row of the table;
 `spec/yaml/libyaml_replay_spec.cr` pins both rows of the table. The
 standard-library compatibility layer reports libyaml version 0.2.5 and
 keeps the standard library's own nesting and alias guards, so the nesting
