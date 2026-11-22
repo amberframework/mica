@@ -20,6 +20,17 @@ module Mica::Deflate
   def self.decode(input : Bytes, *, limits : DecodeLimits, timeout : Time::Span?) : Bytes
     Inflater.new(input, Format::Raw, limits, timeout).decode_all
   end
+
+  # Encodes *input* as a raw DEFLATE stream in one call. *level* runs from
+  # 0 (stored, no compression) through 1 (fastest) to 9 (smallest); the
+  # same input and level always give the same bytes.
+  #
+  # ```
+  # Mica::Deflate.encode(body, level: 6)
+  # ```
+  def self.encode(input : Bytes, *, level : Int32 = 6) : Bytes
+    Deflater.encode(input, Format::Raw, level)
+  end
 end
 
 require "./deflate/errors"
@@ -28,5 +39,9 @@ require "./deflate/checksum"
 require "./deflate/huffman_table"
 require "./deflate/inflater"
 require "./deflate/stream_reader"
+require "./deflate/huffman_code_builder"
+require "./deflate/block_writer"
+require "./deflate/deflater"
+require "./deflate/stream_writer"
 require "./zlib"
 require "./gzip"
