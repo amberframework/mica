@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+Builds the CRC-32 for Apple silicon with the stock Crystal compiler. The
+CRC32X and CRC32B instructions are now inline assembly that enables the
+CRC extension itself; the LLVM intrinsics they replace stopped the build
+("Cannot select: intrinsic %llvm.aarch64.crc32x") wherever the target CPU
+did not declare that extension, which a default macOS build does not. CI
+now runs the Deflate specs on macOS with the stock compiler too.
+
 Fixes a leak in the streaming encoders: a `Deflate::Writer`, `Zlib::Writer`
 or `Gzip::Writer` that was dropped without `close` kept its 270 KB of
 tables when its destination referred back to the writer (a response whose
