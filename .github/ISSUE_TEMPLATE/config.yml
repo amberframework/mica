@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security problem privately
+    url: https://github.com/amberframework/mica/security/advisories/new
+    about: An input that gets past a limit, a work budget or a deadline. Please do not open a public issue.
+  - name: Ask a question without a GitHub account
+    url: https://amberframework.org
+    about: The Amber framework site, docs and community links.
+  - name: Need parsing or Amber work done for your business?
+    url: https://agentc.consulting
+    about: AgentC Consulting builds and maintains Mica and Amber. Email agent_c@agentc.consulting.
