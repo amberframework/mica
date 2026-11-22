@@ -1,9 +1,8 @@
-# Compression: Inflate (milestone Z1)
+# Compression: Inflate and Deflate (milestones Z1 and Z2)
 
-`Mica::Deflate`, `Mica::Zlib` and `Mica::Gzip` decode raw DEFLATE
-(RFC 1951), zlib (RFC 1950) and gzip (RFC 1952) in pure Crystal. A program
-that uses them links no libz (`scripts/check_linkage.sh`). Encoders follow
-in milestone Z2.
+`Mica::Deflate`, `Mica::Zlib` and `Mica::Gzip` decode and encode raw
+DEFLATE (RFC 1951), zlib (RFC 1950) and gzip (RFC 1952) in pure Crystal. A
+program that uses them links no libz (`scripts/check_linkage.sh`).
 
 ## Decoding
 
@@ -33,6 +32,121 @@ its Adler-32, gzip with a member's CRC-32 and ISIZE, and no byte may follow
 (gzip allows further members). The streaming readers read ahead from their
 source, so give each one an IO that holds only the compressed stream (an
 HTTP body, a file).
+
+## Encoding
+
+Every encoder takes a `level:` from 0 to 9 (default 6): 0 stores the input
+without compressing it, 1 is the fastest, 9 the smallest. Any other level
+raises `ArgumentError`. The same input, level and options always give the
+same bytes.
+
+```crystal
+# One-shot: the whole input in memory, the whole stream returned.
+body = Mica::Gzip.encode(bytes, level: 6)
+data = Mica::Zlib.encode(bytes, level: 9)
+raw = Mica::Deflate.encode(bytes, level: 1)
+
+# A zlib stream that starts from a preset dictionary (FDICT). The decoder
+# needs the same dictionary.
+Mica::Zlib.encode(bytes, level: 6, dictionary: dictionary)
+
+# A gzip member with header fields.
+header = Mica::Gzip::Header.new(modification_time: 1_795_000_000_u32, extra_flags: 0_u8, operating_system: 3_u8,
+  is_text: true, extra_field: nil, file_name: "notes.txt".to_slice, comment: nil)
+Mica::Gzip.encode(bytes, header: header)
+
+# Streaming: an IO that encodes what is written to it.
+writer = Mica::Gzip::Writer.new(response.output, level: 6)
+writer << "event: ready\n\n"
+writer.flush      # everything written so far can be decoded by the peer
+IO.copy(source, writer)
+writer.close      # finishes the stream; closes the destination with sync_close: true
+```
+
+| Call | What it does |
+|---|---|
+| `write` | Encodes the bytes. The destination receives output as blocks fill. |
+| `flush` | A sync flush: ends the current block and appends an empty stored block, so the output ends on a byte boundary and a decoder can decode everything written before the call. Flushes the destination. A second `flush` with nothing written in between adds no bytes. |
+| `full_flush` | A `flush` that also drops the history: the bytes written after it refer to nothing before it, so a decoder can start there. |
+| `close` | Writes the final block and the trailer, flushes the destination and, with `sync_close: true`, closes it. Calling it again does nothing. |
+
+Writing to a closed writer raises `IO::Error`, and so does reading from a
+writer. If libc cannot supply an encoder's memory,
+`Mica::Deflate::OutOfMemoryError` is raised.
+
+**zlib** streams start with the header zlib writes: compression method 8, a
+32 KiB window (CINFO 7), the level hint zlib gives the level (FLEVEL 0 for
+levels 0 and 1, 1 for 2 to 5, 2 for 6, 3 for 7 to 9) and the check bits.
+With `dictionary:` the header sets FDICT and carries the Adler-32 of the
+whole dictionary, and the dictionary's last 32 KiB are the history the
+first bytes can refer to. The stream ends with the Adler-32 of the input.
+
+**gzip** output is one member. Without `header:` it has no optional
+fields, modification time 0 and operating system 255 (unknown), so the
+output does not depend on when or where it is made; XFL is 2 at level 9 and
+4 at levels 0 and 1, as zlib writes it. With a `Mica::Gzip::Header`, its
+modification time, XFL, operating system and FTEXT are written as given,
+and FEXTRA, FNAME and FCOMMENT when the header has them. A file name or
+comment that contains a zero byte, or an extra field longer than 65,535
+bytes, raises `ArgumentError`. The member ends with the CRC-32 of the input
+and its size modulo 2^32.
+
+### Sizes and levels
+
+The encoder follows zlib's algorithm, so its output is about the size of
+zlib's at the same level (see [benchmarks.md](benchmarks.md), "Deflate
+encoders", for the measured sizes and speeds): a 32 KiB history, hash chains
+over 3-byte sequences, and zlib's parameters per level.
+
+| Level | Matching | Good length | Lazy limit | Nice length | Chain limit |
+|---|---|---|---|---|---|
+| 0 | none: stored blocks of up to 65,535 bytes | | | | |
+| 1 | greedy | 4 | 4 | 8 | 4 |
+| 2 | greedy | 4 | 5 | 16 | 8 |
+| 3 | greedy | 4 | 6 | 32 | 32 |
+| 4 | lazy | 4 | 4 | 16 | 16 |
+| 5 | lazy | 8 | 16 | 32 | 32 |
+| 6 | lazy | 8 | 16 | 128 | 128 |
+| 7 | lazy | 8 | 32 | 128 | 256 |
+| 8 | lazy | 32 | 128 | 258 | 1,024 |
+| 9 | lazy | 32 | 258 | 258 | 4,096 |
+
+Greedy matching takes the longest match at each position; lazy matching
+first checks whether the next position has a longer one. The chain limit is
+the number of earlier positions examined, quartered once a match of the
+good length is in hand; a search stops at a match of the nice length.
+
+Symbols collect in a buffer of 16,383, and each full buffer becomes one
+block: stored, fixed Huffman or dynamic Huffman, whichever is smallest. Data
+that does not compress is therefore stored, and a one-shot stream is never
+more than 5 bytes per block larger than its input plus the container.
+
+Where Mica differs from zlib: a match may reach the full 32,768 bytes back
+(zlib stops at 32,506), so on inputs with repeats at that distance Mica's
+output is a little smaller.
+
+### Memory
+
+A streaming encoder at any level from 1 to 9 holds 294,992 bytes (288 KiB),
+however long the stream is:
+
+| Part | Bytes | From |
+|---|---|---|
+| Window (the last 32 KiB of input and the bytes being encoded) | 65,536 | libc |
+| Hash table | 65,536 | libc |
+| Chain table | 65,536 | libc |
+| Symbol buffer | 65,536 | libc |
+| Output buffer | 16,400 | libc |
+| Huffman code builders' arrays | 13,472 | libc |
+| The encoder's objects | 2,976 | the collector |
+
+The libc blocks are freed by `close`, and with the writer if it is dropped
+unclosed. Each block is under 128 KiB, a size libc's allocator hands back
+from the blocks just freed, so a server that opens a writer per response
+reuses the same memory. A one-shot encode searches the caller's bytes in
+place, so it needs no window, and sizes its chain table and symbol buffer
+to a short input. Level 0 holds the window, the output buffer and the code
+builders' arrays.
 
 ## Limits
 
@@ -106,7 +220,7 @@ room Mica decides as zlib does:
   `max_window_bytes`), and back references may reach the full 32 KiB
   window, as zlib does without `INFLATE_STRICT`.
 
-## How it is built
+## How the decoder is built
 
 The decoder keeps a 64-bit bit buffer refilled eight bytes at a time and
 decodes through two-level Huffman tables (a 10-bit root for literals and
@@ -121,13 +235,50 @@ CRC-32 uses the ARMv8 CRC32 instructions on Apple silicon (through LLVM
 intrinsics, so nothing is linked) and slicing-by-8 tables elsewhere.
 Adler-32 is written as two block reductions that LLVM vectorizes.
 
+## How the encoder is built
+
+One engine, `Mica::Deflate::Deflater`, serves the three containers and both
+APIs. One-shot, it reads the caller's bytes where they lie; streaming, it
+copies them into the window and moves the last 32 KiB to the front when the
+window fills.
+
+The hash table and the chain table hold positions modulo 65,536 in 16 bits,
+so following a chain is one masked load per candidate, as in zlib. Every
+32,000 positions the hash table's entries that are out of reach are
+overwritten (the work zlib's `slide_hash` does), and a chain ends where the
+next position is not farther back than the last. The hash table starts
+zeroed: entry 0 names stream position 0, which nothing matches. A candidate is compared in
+full only when its two bytes at the current best length match, and the
+comparison runs eight bytes at a time (XOR of two 64-bit loads, then a count
+of trailing zero bits).
+
+`HuffmanCodeBuilder` builds each block's codes the way zlib's `build_tree`
+does (a heap ordered by frequency and then by depth, held as one 64-bit
+key per node so that a comparison is one load, and the same
+redistribution when a code would pass 15 bits, or 7 for the code-length
+code), which is why block sizes match zlib's. `BlockWriter` knows a block's
+exact size before it writes it, reserves that much once, and writes each
+symbol through a 64-bit bit buffer with one 8-byte store. With a
+destination IO the output buffer stays at 16 KiB: compressed blocks pass
+through it 2,048 symbols at a time and stored blocks go to the destination
+directly.
+
 ## Testing and measurement
 
 - Specs: `crystal-alpha spec spec/deflate` (conformance vectors, a port of
   zlib's `test/infcover.c`, limits and bombs, streaming over 1-byte reads,
   and a small differential against system zlib). Requirement catalog:
   `spec/requirements/deflate.tsv`.
-- Differential fuzzing against system zlib: `fuzz/deflate_campaign.cr`.
-- Benchmarks against zlib: `bench/deflate/run.sh` (see
+- Encoder specs: `spec/deflate/encoder_spec.cr`, `writer_spec.cr` and
+  `encode_fuzz_spec.cr` (every level and container round-trips through
+  Mica's decoder and system zlib; the streams are read block by block to
+  check what was written). Requirement catalog:
+  `spec/requirements/deflate_encoder.tsv`.
+- Differential fuzzing of the decoder against system zlib:
+  `fuzz/deflate_campaign.cr`.
+- Round-trip fuzzing of the encoder (system zlib and Mica must both decode
+  every stream to the input): `fuzz/deflate_encode_campaign.cr`.
+- Benchmarks against zlib: `bench/deflate/run.sh` for the decoder and
+  `bench/deflate_encode/run.sh` for the encoder (see
   [benchmarks.md](benchmarks.md)).
 - Linkage: `scripts/check_linkage.sh`.

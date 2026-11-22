@@ -17,11 +17,36 @@ module Mica::Zlib
     Deflate::Inflater.decode(input, Deflate::Format::Zlib, limits, timeout, dictionary)
   end
 
+  # Encodes *input* as a zlib stream in one call, at *level* 0 to 9. With
+  # *dictionary* the stream starts from that preset dictionary (its last
+  # 32 KiB) and its header carries FDICT and the dictionary's Adler-32; the
+  # decoder needs the same dictionary.
+  #
+  # ```
+  # Mica::Zlib.encode(body, level: 6)
+  # ```
+  def self.encode(input : Bytes, *, level : Int32 = 6, dictionary : Bytes? = nil) : Bytes
+    Deflate::Deflater.encode(input, Deflate::Format::Zlib, level, dictionary)
+  end
+
   # Decodes a zlib stream as it is read.
   class Reader < Deflate::StreamReader
     def initialize(io : IO, *, limits : Deflate::DecodeLimits, timeout : Time::Span?, dictionary : Bytes? = nil,
                    sync_close : Bool = false)
       super(io, Deflate::Format::Zlib, limits, timeout, dictionary, sync_close)
+    end
+  end
+
+  # Encodes a zlib stream as it is written.
+  #
+  # ```
+  # writer = Mica::Zlib::Writer.new(io, level: 6)
+  # writer.write(body)
+  # writer.close
+  # ```
+  class Writer < Deflate::StreamWriter
+    def initialize(io : IO, *, level : Int32 = 6, dictionary : Bytes? = nil, sync_close : Bool = false)
+      super(io, Deflate::Format::Zlib, level, dictionary, nil, sync_close)
     end
   end
 end

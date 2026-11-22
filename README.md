@@ -149,7 +149,7 @@ Every engine is linear in the input; the plan only picks the fastest one that fi
 | Module | Reads | Guide |
 |---|---|---|
 | `Mica::Regex` | Regular expressions in Crystal's PCRE2 syntax, linear-time | [docs/regex.md](docs/regex.md) |
-| `Mica::Gzip`, `Mica::Zlib`, `Mica::Deflate` | gzip (RFC 1952, multi-member), zlib (RFC 1950), raw DEFLATE (RFC 1951); one-shot and streaming | [docs/compression.md](docs/compression.md) |
+| `Mica::Gzip`, `Mica::Zlib`, `Mica::Deflate` | gzip (RFC 1952, multi-member), zlib (RFC 1950), raw DEFLATE (RFC 1951); one-shot and streaming, decoding under limits and encoding at levels 0 to 9 | [docs/compression.md](docs/compression.md) |
 | `Mica::YAML` | YAML 1.2 (402 of 402 yaml-test-suite cases) and a libyaml 0.2.5 dialect: pull parser, node API with aliases and merge keys, emitter. On `main`, ships in the next release | [docs/yaml.md](docs/yaml.md) |
 | `Mica::XML` | XML 1.0 and 1.1 with Namespaces: streaming reader, DOM, builder, XPath 1.0 | [docs/xml.md](docs/xml.md) |
 | `Mica::Core` | Strict UTF-8, UTF-16/UTF-32/ISO-8859-1 transcoding, positions, limits, work budgets | [docs/ADDING_A_FORMAT.md](docs/ADDING_A_FORMAT.md) |

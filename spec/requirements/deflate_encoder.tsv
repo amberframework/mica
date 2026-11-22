@@ -1,0 +1,31 @@
+# Requirements for the Mica::Deflate, Mica::Zlib and Mica::Gzip encoders
+# (milestone Z2, the pure-Crystal Deflate encoder): what RFC 1951 (DEFLATE),
+# RFC 1950 (zlib) and RFC 1952 (gzip) require of a compliant compressor, the
+# public API, and the size, memory and round-trip properties the encoder
+# keeps. zlib 1.2.12 is the reference: every stream Mica writes decodes in it.
+# Format: id<TAB>section<TAB>summary.
+DEFLATE-ENC-ROUNDTRIP-mica	round trip	Every stream the encoder writes (raw DEFLATE, zlib, gzip; levels 0 to 9; one-shot and streaming) decodes in Mica to the original input
+DEFLATE-ENC-ROUNDTRIP-zlib	round trip	Every stream the encoder writes decodes in system zlib to the original input
+DEFLATE-ENC-ROUNDTRIP-edge-inputs	round trip	An empty input, one byte, a short text, long runs, incompressible bytes, an input longer than the window and a repeat exactly 32,768 bytes back round-trip at every level
+DEFLATE-ENC-1951-3.2.3-final-block	RFC 1951 3.2.3	A finished stream ends with exactly one block that sets BFINAL, also for an empty input
+DEFLATE-ENC-1951-3.2.4-stored	RFC 1951 3.2.4	Level 0 writes only stored blocks of at most 65,535 bytes, and data that does not compress is stored at every level, so the output never grows by more than a few bytes per block
+DEFLATE-ENC-1951-3.2.5-match-limits	RFC 1951 3.2.5	Matches have lengths 3 to 258 and distances 1 to 32,768, and the encoder reaches both maxima
+DEFLATE-ENC-1951-3.2.3-smallest-block	RFC 1951 3.2.3	Each block is written as the smallest of stored, fixed Huffman and dynamic Huffman
+DEFLATE-ENC-1951-3.2.7-code-limits	RFC 1951 3.2.7	Dynamic blocks use literal/length and distance codes of at most 15 bits and a code-length code of at most 7 bits, also for heavily skewed frequencies
+DEFLATE-ENC-1950-2.2-header	RFC 1950 2.2	A zlib stream starts with CM 8, CINFO 7, the FLEVEL zlib writes for the level and a valid FCHECK
+DEFLATE-ENC-1950-2.2-dictionary	RFC 1950 2.2	With a preset dictionary the header sets FDICT and carries the dictionary's Adler-32, the data refers to the dictionary's last 32 KiB, and the stream decodes only with that dictionary
+DEFLATE-ENC-1950-2.2-adler32	RFC 1950 2.2	A zlib stream ends with the Adler-32 of the input, most significant byte first
+DEFLATE-ENC-1952-2.3-default-header	RFC 1952 2.3	Without a header a gzip member has no optional fields, MTIME 0, OS 255 and the XFL zlib writes for the level
+DEFLATE-ENC-1952-2.3-header-fields	RFC 1952 2.3	FTEXT, MTIME, XFL, OS, FEXTRA, FNAME and FCOMMENT of a given header are written and read back unchanged
+DEFLATE-ENC-1952-2.3-header-arguments	RFC 1952 2.3	A file name or comment with a zero byte, or an extra field longer than 65,535 bytes, raises ArgumentError
+DEFLATE-ENC-1952-2.3-trailer	RFC 1952 2.3	A gzip member ends with the CRC-32 of the input and its size modulo 2^32, least significant byte first
+DEFLATE-ENC-API-levels	API	Levels 0 to 9 are accepted by every encode and writer; any other level raises ArgumentError
+DEFLATE-ENC-API-deterministic	API	The same input, level and options give the same bytes on every call
+DEFLATE-ENC-API-chunking	API	One write, one-byte writes and writes of random sizes produce streams that decode to the same bytes
+DEFLATE-ENC-API-flush	API	After flush the output so far ends on a byte boundary with an empty stored block and decodes to everything written before it; a second flush with nothing written adds no bytes
+DEFLATE-ENC-API-full-flush	API	After full_flush the rest of the stream decodes on its own: no match reaches back past the flush
+DEFLATE-ENC-API-close	API	close finishes the stream once, flushes the destination and closes it only with sync_close
+DEFLATE-ENC-API-closed-writer	API	Writing to a closed writer raises IO::Error, and reading from a writer raises IO::Error
+DEFLATE-ENC-SIZE-tracks-zlib	size	At levels 1 to 9 the output is within 1% of system zlib's at the same level on text, binary-like and repetitive samples
+DEFLATE-ENC-MEMORY-bounded	memory	A streaming encoder at level 9 holds at most 384 KiB for its window, hash chains and symbol buffer, whatever the input size
+DEFLATE-ENC-FUZZ-roundtrip	fuzz	Across generated inputs, containers, levels, chunkings and flush points, system zlib and Mica decode every encoded stream to the original

@@ -52,6 +52,34 @@ Adds Inflate (compression milestone Z1): `Mica::Deflate`, `Mica::Zlib` and
   has shown. Every limit is enforced where it was. Numbers against zlib:
   `docs/benchmarks.md`, "Inflate".
 
+Adds the Deflate encoders (compression milestone Z2): `Mica::Deflate`,
+`Mica::Zlib` and `Mica::Gzip` encode raw DEFLATE, zlib and gzip in pure
+Crystal, so a program that compresses with Mica links no libz.
+
+- One-shot (`encode(input, level: 6)`) and streaming (`Writer`, an `IO`
+  with `write`, `flush` for a sync flush, `full_flush` and `close`) APIs at
+  levels 0 to 9. `Zlib.encode` and `Zlib::Writer` take a preset
+  `dictionary:`; `Gzip.encode` and `Gzip::Writer` take a `header:`
+  (default: modification time 0 and operating system 255, so the output is
+  reproducible).
+- zlib's algorithm and level table: a 32 KiB history, hash chains, greedy
+  matching at levels 1 to 3 and lazy matching at 4 to 9, blocks of 16,383
+  symbols written as the smallest of stored, fixed and dynamic Huffman.
+  Against system zlib 1.2.12 over 31 files (Canterbury, Silesia and HTTP
+  bodies), the corpus total is 0.9998, 0.9996 and 0.9995 times zlib's size
+  at levels 1, 6 and 9, and the geometric-mean speed is 1.46, 1.30 and
+  1.21 times zlib's one-shot and 1.27, 1.21 and 1.13 times streaming.
+  Bodies of about 1 KiB are slower than zlib (0.58 to 0.84 times its
+  speed); `docs/benchmarks.md` lists every slower case.
+- A streaming encoder holds 294,992 bytes (288 KiB) at any level from 1 to
+  9, however long the stream is.
+- Round-trip fuzzing through system zlib and Mica's decoder
+  (`fuzz/deflate_encode_campaign.cr`), a block-level reader in the specs
+  that checks what was written, and benchmarks against system zlib at
+  levels 1, 6 and 9 (`bench/deflate_encode/`; results in
+  `docs/benchmarks.md`).
+- `scripts/check_linkage.sh` also checks a minimal encoder program.
+
 ## 0.2.0 (2026-11-21)
 
 Adds `Mica::Regex`, a regular expression engine in pure Crystal. XML parsing
