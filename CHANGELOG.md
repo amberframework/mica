@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+Adds YAML (milestone M4): `Mica::YAML` reads and writes YAML in pure
+Crystal.
+
+- `PullParser` (events), `compose` (the node graph), `parse` and
+  `parse_all` (values under the core, JSON or failsafe schema, with `<<`
+  merge keys) and `Emitter`. Sources are a `String`, `Bytes` or `IO` in
+  UTF-8, UTF-16 or UTF-32.
+- Two dialects: YAML 1.2.2, which passes all 402 cases of the official
+  yaml-test-suite (`data-2022-01-17`), and libyaml 0.2.5, which gives
+  libyaml's events, marks and error messages (0 disagreements with
+  libyaml over the differential campaigns; see `docs/yaml.md`).
+- Every parse takes required `limits:` (`ParseLimits`: `max_input_bytes`,
+  `max_depth`, `max_nodes`, `max_alias_expansion` and the work budget;
+  presets `CONFIG_FILE`, `UNTRUSTED`, `TRUSTED_FILE`, `LIBYAML`) and a
+  required `timeout:`. Aliases are shared nodes, and alias and merge
+  expansion is counted and capped, which covers the billion-laughs case
+  of GHSA-gmv7-hhm8-cxj5.
+- The emitter writes the bytes libyaml 0.2.5 writes for the same events.
+- Benchmarks against libyaml on Kubernetes, GitHub Actions, shard and
+  Amber configuration files (`bench/yaml/`), and a linkage check: a
+  Mica YAML program links no libyaml (`scripts/check_linkage.sh`).
+
 Adds Inflate (compression milestone Z1): `Mica::Deflate`, `Mica::Zlib` and
 `Mica::Gzip` decode raw DEFLATE (RFC 1951), zlib (RFC 1950) and gzip
 (RFC 1952) in pure Crystal.

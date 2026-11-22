@@ -1,0 +1,23 @@
+# The YAML benchmark corpus: kind, corpus, name, bytes, sha256, source.
+# `url` rows are files at pinned commits of public repositories, fetched by
+# bench/yaml/scripts/fetch_corpus.rb; `file` rows are snapshots committed
+# under bench/yaml/corpus/ (the source column says where they came from).
+url	kubernetes	ingress-nginx-deploy.yaml	16384	502fddca66b09c20dd48b6d0a792a9671cd663a3a0d2a8bda5ae990d13b6c5b2	https://raw.githubusercontent.com/kubernetes/ingress-nginx/dbb11b92ddb77bee9c35e462479129354c84f939/deploy/static/provider/cloud/deploy.yaml
+url	kubernetes	argo-cd-install.yaml	2138541	8705e827c5b023885b63affdab4397ad5190f82c1a43443d56daba7de6a56005	https://raw.githubusercontent.com/argoproj/argo-cd/a74a3f8a2752243c85100118e2aa9f2535d12b8a/manifests/install.yaml
+url	kubernetes	kube-prometheus-control-plane-rules.yaml	84422	a5545dabab60c1d8f63c49e9da59f3bd9e77368d98abcce7a78f415fb9ce1b43	https://raw.githubusercontent.com/prometheus-operator/kube-prometheus/5eed8ddb772b4367a73fb7acaa9b4ef3839121a3/manifests/kubernetesControlPlane-prometheusRule.yaml
+url	kubernetes	kube-prometheus-node-exporter-daemonset.yaml	3775	ec8a9a143f62e9fe3301202dad07e6cc95df27b460839be36e1f68b69450b495	https://raw.githubusercontent.com/prometheus-operator/kube-prometheus/5eed8ddb772b4367a73fb7acaa9b4ef3839121a3/manifests/nodeExporter-daemonset.yaml
+url	github-actions	crystal-linux.yml	2496	37ccc81785181d586917c7e926068bec55d987230aecb35d05d1cb10c3a2123e	https://raw.githubusercontent.com/crystal-lang/crystal/dc07f2ef2e9c75f801961a682653cbee8c038d61/.github/workflows/linux.yml
+url	github-actions	crystal-win.yml	824	b25b1b176b094a568d6511ca514ec2e6031eac759ee6098506fbb1857d8baf31	https://raw.githubusercontent.com/crystal-lang/crystal/dc07f2ef2e9c75f801961a682653cbee8c038d61/.github/workflows/win.yml
+url	github-actions	crystal-macos.yml	2244	fa67ced688d039ec8365a163bff4ddb1beac686a1d95bd8ebfd759a4521cbab7	https://raw.githubusercontent.com/crystal-lang/crystal/dc07f2ef2e9c75f801961a682653cbee8c038d61/.github/workflows/macos.yml
+url	github-actions	starter-docker-publish.yml	3698	4ac58b5650c920632a267ab274a940ec3b147bddd4060961a7fbb931d5aa169a	https://raw.githubusercontent.com/actions/starter-workflows/e3c451d60f119b71caebf13c98ac45da6e15b4b7/ci/docker-publish.yml
+url	github-actions	starter-crystal.yml	356	e61ba9bf9c8ad54158d384dad5becbf47a1bf144b66b7f22b905d6c2ddb14c48	https://raw.githubusercontent.com/actions/starter-workflows/e3c451d60f119b71caebf13c98ac45da6e15b4b7/ci/crystal.yml
+url	shards	crystal-shard.yml	585	68d3a231d96fac46704ea174b9163143e9d4e175f5e9791a9deb0bb739f26cda	https://raw.githubusercontent.com/crystal-lang/crystal/dc07f2ef2e9c75f801961a682653cbee8c038d61/shard.yml
+url	shards	crystal-shard.lock	363	7bb906270af620808b970c68cc42250c486014469ca31b35c8cbd5551a5db19e	https://raw.githubusercontent.com/crystal-lang/crystal/dc07f2ef2e9c75f801961a682653cbee8c038d61/shard.lock
+url	shards	shards-shard.yml	475	c3d015256731fcd1e2b2e72fb4a85d21cdec5125369789f54ba3e1a8c488a522	https://raw.githubusercontent.com/crystal-lang/shards/7db0af7a0b098f3da62c3b180ebf03a9be293d12/shard.yml
+url	shards	shards-shard.lock	117	ae2809aa712f88fb49aa6c0cfcf5217fddbdda2fb0ed0637aafc95df9f70548b	https://raw.githubusercontent.com/crystal-lang/shards/7db0af7a0b098f3da62c3b180ebf03a9be293d12/shard.lock
+url	shards	amber-v2-shard.yml	676	54cca0915ade23f49726559ce6a62709a8c07dcbcbce75649025062bb29e62ad	https://raw.githubusercontent.com/amberframework/amber/834ef5d2790a1486b4c879e1b87ecd0c32e7809a/shard.yml
+file	amber	development.yml	1285	c42bfac8b561db78e083bb3c48bc2666a093126d00273b2ebc007b4d5cb50332	amber new -d sqlite (Amber CLI 2.0.11), secret_key_base replaced by zeros
+file	amber	production.yml	1281	5927f5621fdf65f09f26fb47dfd2dffdef40ba5f4805721f67665fc879527bc8	amber new -d sqlite (Amber CLI 2.0.11), secret_key_base replaced by zeros
+file	amber	test.yml	1277	eceefd9ebed9c74047005d42630f969824e0a974c50c4cab0336ef9978e7c57d	amber new -d sqlite (Amber CLI 2.0.11), secret_key_base replaced by zeros
+file	amber	shard.yml	535	23fec42d44b00658ada028266dbd49d0fde7dfe610d2c45bf1fa2831653fc86e	amber new -d sqlite (Amber CLI 2.0.11), secret_key_base replaced by zeros
+file	amber	shard.lock	890	fd1998b31162d521a41621d31baf1b64645bdf78122a7dc13409198364b8549c	amber new -d sqlite (Amber CLI 2.0.11), secret_key_base replaced by zeros

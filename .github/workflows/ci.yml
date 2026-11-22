@@ -20,5 +20,7 @@ jobs:
         run: shards install --frozen --skip-postinstall --skip-executables
       - name: Check formatting
         run: crystal tool format --check src spec
+      - name: Fetch the YAML test suite (pinned commit, sha256 verified)
+        run: ruby conformance/yaml/fetch_suite.rb
       - name: Run specs
         run: crystal spec
