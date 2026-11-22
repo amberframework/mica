@@ -2,7 +2,7 @@
 # fuzz/yaml_fuzz.cr).
 #
 #   crystal-alpha build --release fuzz/yaml_campaign.cr -o bin/yaml_campaign
-#   MICA_YAML_SUITE=conformance/yaml-test-suite bin/yaml_campaign SEED ITERATIONS [FIRST]
+#   MICA_YAML_SUITE=conformance/yaml-test-suite/data bin/yaml_campaign SEED ITERATIONS [FIRST]
 #
 # Prints one summary line (cases; agreements, both-reject, disagreements
 # and rejection differences; crashes; per generator family; the highest
@@ -18,7 +18,8 @@ require "./yaml_fuzz"
 
 usage = "usage: yaml_campaign SEED ITERATIONS [FIRST] | yaml_campaign SEED replay ITERATION"
 seed = (ARGV[0]? || abort(usage)).to_i64
-mutator = YAMLFuzz.mutator(YAMLFuzz.list_of_seeds)
+list_of_seeds = YAMLFuzz.list_of_seeds
+mutator = YAMLFuzz.mutator(list_of_seeds)
 
 if ARGV[1]? == "replay"
   kase = YAMLFuzz.case_for(mutator, seed, (ARGV[2]? || abort(usage)).to_i)
@@ -92,7 +93,7 @@ puts "seed=#{seed} first=#{first} cases=#{iterations} agree=#{counts[YAMLFuzz::V
      "disagreements=#{counts[YAMLFuzz::Verdict::Disagree]} only_mica_rejects=#{counts[YAMLFuzz::Verdict::OnlyMicaRejects]} " \
      "only_libyaml_rejects=#{counts[YAMLFuzz::Verdict::OnlyOracleRejects]} crashes=#{list_of_crashes.size} " \
      "yaml12_accepts=#{strict_accepts} max_ops_per_byte=#{max_ratio.round(2)} seconds=#{elapsed.total_seconds.round(1)} " \
-     "libyaml=#{YAMLOracle.version}"
+     "libyaml=#{YAMLOracle.version} seed_documents=#{list_of_seeds.size}"
 puts "  families: " + families.map { |family, count| "#{family}=#{count} (agree #{family_agreements[family]})" }.join(" ")
 classifications.to_a.sort_by! { |pair| -pair[1] }.each do |name, count|
   puts "  rejection difference: #{name}: #{count} (e.g. #{classification_examples[name]})"

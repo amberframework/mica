@@ -33,7 +33,7 @@ echo "yaml_get_version_string: $version"
 
 case "$(uname -s)" in
 Darwin)
-  library=$(otool -L "$out/libyaml_version" | awk '/yaml/ {print $1}')
+  library=$(otool -L "$out/libyaml_version" | awk 'NR > 1 && /yaml/ {print $1}')
   resolved=$(/usr/bin/ruby -e 'puts File.realpath(ARGV[0])' "$library")
   echo "linked: $library"
   echo "resolved: $resolved"

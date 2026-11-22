@@ -74,13 +74,15 @@ module YAMLFuzz
   ].map(&.to_slice)
 
   # Returns the seed documents: the built-in samples, and every `in.yaml`
-  # under *suite_directory* when given.
+  # under *suite_directory* (the directory conformance/yaml/fetch_suite.rb
+  # fills, or its data/ directory) when given.
   def self.list_of_seeds(suite_directory : String? = ENV["MICA_YAML_SUITE"]?) : Array(Bytes)
     list_of_seeds = SAMPLES.dup
     if suite_directory
       Dir.glob(File.join(suite_directory, "**/in.yaml")).sort!.each do |path|
         # The suite's name/ and tags/ directories are links to the same files.
-        next unless path.lchop(suite_directory).lchop('/')[0, 4].matches?(/\A[A-Z0-9]{4}\z/)
+        relative = path.lchop(suite_directory).lchop('/').lchop("data/")
+        next unless relative[0, 4].matches?(/\A[A-Z0-9]{4}\z/) && relative[4]? == '/'
         list_of_seeds << File.read(path).to_slice
       end
     end
