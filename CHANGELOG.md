@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+Adds `scripts/check_regex_literals.cr`, which checks every regex in a tree
+of Crystal source against the Crystal dialect and exits 1 when a pattern
+uses a construct Mica leaves out (lookaround, backreferences, atomic
+groups, possessive quantifiers, `\K` and the others in docs/regex.md,
+"Excluded constructs"). It reads literals, interpolated literals,
+`Regex.new` with a string literal, literals in macro expressions and the
+text of macro bodies, including code no spec reaches. Libraries run it in
+CI so a pattern that stops a build on a Mica-default compiler is caught
+before release.
+
 Adds YAML (milestone M4): `Mica::YAML` reads and writes YAML in pure
 Crystal.
 
