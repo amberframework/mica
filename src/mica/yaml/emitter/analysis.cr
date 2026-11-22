@@ -59,6 +59,20 @@ class Mica::YAML::Emitter
     end
   end
 
+  # Returns true for a printable ASCII character that is neither a space
+  # nor an indicator `analyze_scalar` looks for after the first character
+  # (`,`, `?`, `[`, `]`, `{`, `}`, `:` and `#`).
+  @[AlwaysInline]
+  private def inert?(octet : UInt8) : Bool
+    return false unless 0x21_u8 <= octet <= 0x7E_u8
+    case octet
+    when 0x2C_u8, 0x3F_u8, 0x5B_u8, 0x5D_u8, 0x7B_u8, 0x7D_u8, 0x3A_u8, 0x23_u8
+      false
+    else
+      true
+    end
+  end
+
   # Returns true for an ASCII letter, a digit, `_` or `-`.
   private def alphanumerical?(bytes : Bytes, index : Int32) : Bool
     octet = byte_at(bytes, index)
@@ -214,6 +228,22 @@ class Mica::YAML::Emitter
     index = 0
     while index < value.size
       octet = value[index]
+      if index > 0 && inert?(octet)
+        # A run of characters that change nothing but the "previous
+        # character" flags: skip to its end, then look ahead once for the
+        # character that follows, as the general path does at every step.
+        previous_space = false
+        previous_break = false
+        preceded_by_whitespace = false
+        index += 1
+        while index < value.size && inert?(value.unsafe_fetch(index))
+          index += 1
+        end
+        if index < value.size
+          followed_by_whitespace = blank_or_break_or_end?(value, index + char_width(value, index))
+        end
+        next
+      end
       if index == 0
         case octet
         when '#'.ord, ','.ord, '['.ord, ']'.ord, '{'.ord, '}'.ord, '&'.ord, '*'.ord, '!'.ord, '|'.ord, '>'.ord, '\''.ord, '"'.ord, '%'.ord, '@'.ord, '`'.ord

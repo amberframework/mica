@@ -4,11 +4,13 @@
 # Runs the YAML benchmark's interleaved A/B rounds and writes the report.
 #
 #   /usr/bin/ruby bench/yaml/scripts/run_ab.rb --bin bench/bin/yaml --out DIR [--rounds 7] [--seconds 0.25]
+#       [--engines flag-emit,stdlib-emit]
 #
 # Every round measures every engine on every corpus file once, one process
 # at a time, with the engine order reversed on alternate rounds, so slow
 # drift of the machine lands on all engines alike. A speed is megabytes
-# (10^6 bytes) of YAML parsed per second inside the runner's timed loop.
+# (10^6 bytes) of the YAML file handled per second inside the runner's
+# timed loop.
 #
 # Each Mica engine is compared with the libyaml engine doing the same
 # work, round by round (the paired ratio): the report gives the median of
@@ -40,7 +42,8 @@ LIST_OF_PAIRS = [
   ['mica-events-libyaml-dialect', 'stdlib-events', 'Events: Mica::YAML::PullParser (libyaml dialect) vs YAML::PullParser on libyaml'],
   ['mica-parse', 'stdlib-parse', 'Values: Mica::YAML.parse_all vs YAML.parse_all on libyaml'],
   ['flag-events', 'stdlib-events', 'Compatibility layer, events: YAML::PullParser built with -Duse_mica vs on libyaml'],
-  ['flag-parse', 'stdlib-parse', 'Compatibility layer, values: YAML.parse_all built with -Duse_mica vs on libyaml']
+  ['flag-parse', 'stdlib-parse', 'Compatibility layer, values: YAML.parse_all built with -Duse_mica vs on libyaml'],
+  ['flag-emit', 'stdlib-emit', 'Compatibility layer, writing: to_yaml (YAML::Builder) built with -Duse_mica vs on libyaml']
 ].freeze
 
 options = { rounds: 7, seconds: 0.25 }
@@ -49,6 +52,7 @@ OptionParser.new do |parser|
   parser.on('--out DIR') { |value| options[:out] = value }
   parser.on('--rounds N', Integer) { |value| options[:rounds] = value }
   parser.on('--seconds S', Float) { |value| options[:seconds] = value }
+  parser.on('--engines LIST', Array) { |value| options[:engines] = value }
 end.parse!
 abort 'usage: run_ab.rb --bin DIR --out DIR [--rounds N] [--seconds S]' unless options[:bin] && options[:out]
 
@@ -63,13 +67,16 @@ engines = {
   'mica-events-libyaml-dialect' => ['runner', 'mica-events-libyaml-dialect'],
   'mica-parse' => ['runner', 'mica-parse'],
   'stdlib-events' => ['runner', 'stdlib-events'],
-  'stdlib-parse' => ['runner', 'stdlib-parse']
+  'stdlib-parse' => ['runner', 'stdlib-parse'],
+  'stdlib-emit' => ['runner', 'stdlib-emit']
 }
 if has_flag_runner
   engines['flag-events'] = ['runner_flag', 'stdlib-events']
   engines['flag-parse'] = ['runner_flag', 'stdlib-parse']
+  engines['flag-emit'] = ['runner_flag', 'stdlib-emit']
 end
-list_of_pairs = LIST_OF_PAIRS.select { |mica, _, _| engines.key?(mica) }
+engines.select! { |name, _| options[:engines].include?(name) } if options[:engines]
+list_of_pairs = LIST_OF_PAIRS.select { |mica, libyaml, _| engines.key?(mica) && engines.key?(libyaml) }
 
 CorpusFile = Struct.new(:corpus, :name, :path, :bytes)
 list_of_files = File.readlines(MANIFEST_PATH, chomp: true).reject { |line| line.empty? || line.start_with?('#') }.map do |line|
@@ -118,7 +125,7 @@ end
 # Engines that read events must agree on what they read in the libyaml
 # dialect; a mismatch means the comparison is not like for like.
 list_of_files.each do |file|
-  expected = checksums[[file.name, 'stdlib-events']]
+  expected = checksums[[file.name, 'stdlib-events']] or next
   %w[mica-events-libyaml-dialect flag-events].each do |name|
     actual = checksums[[file.name, name]]
     abort "#{file.name}: #{name} read #{actual}, libyaml read #{expected}" if actual && actual != expected

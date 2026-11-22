@@ -135,6 +135,15 @@ and the documents libyaml rejects although YAML 1.2 allows them stay
 rejected (72 of the suite's 402 cases, the same 72 that libyaml itself
 fails).
 
+One class of input gives a different error text, never a different
+verdict: when a document holds both a syntax error and, later, a byte
+that is invalid UTF-8 or a forbidden control character. libyaml decodes
+its input a block ahead of the scanner, so it reports the invalid byte it
+has already met ("control characters are not allowed", "invalid leading
+UTF-8 octet"); Mica reports whichever error comes first in the document.
+The campaigns count these (about 7% of the documents both reject) and
+list every pair of messages.
+
 libyaml 0.2.6 (released 2026-11-20) changed two readings. Its other
 source changes are spelling in comments; the reader, emitter and API files
 are byte-identical.
@@ -152,6 +161,21 @@ no disagreement, since the generators rarely produce either input;
 standard-library compatibility layer reports libyaml version 0.2.5 and
 keeps the standard library's own nesting and alias guards, so the nesting
 cap an application sees does not depend on the engine.
+
+## Differences from stdlib `YAML`
+
+Mica's own API (the standard library on `-Duse_mica` keeps its own node
+API and so has none of these):
+
+- The default dialect is YAML 1.2, not libyaml's YAML 1.1 subset; pass
+  `dialect: Dialect::LibYAML` for libyaml's reading.
+- Values resolve under the YAML 1.2 core schema: `yes`, `no`, `on` and
+  `off` are strings, `0o17` is octal and `017` is the integer 17.
+- With merge keys, a mapping's own keys win wherever they appear, and the
+  first merged mapping wins over later ones (the YAML merge type's rule).
+  The standard library applies entries in document order, so a key that
+  comes before `<<` is replaced by the merged value.
+- Limits and a timeout are required arguments.
 
 ## How it is built
 

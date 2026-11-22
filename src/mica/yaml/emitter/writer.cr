@@ -86,6 +86,28 @@ class Mica::YAML::Emitter
     end
   end
 
+  # Copies the run of printable ASCII characters other than a space and
+  # *stop* that starts at *index* (possibly empty), one column each, and
+  # returns the index after it. Equal to `write_character` once per
+  # character.
+  private def write_plain_run(bytes : Bytes, index : Int32, stop : UInt8 = 0_u8) : Int32
+    finish = index
+    while finish < bytes.size
+      octet = bytes.unsafe_fetch(finish)
+      break unless 0x21_u8 <= octet <= 0x7E_u8 && octet != stop
+      finish += 1
+    end
+    while index < finish
+      reserve
+      length = Math.min(BUFFER_SIZE - 5 - @buffered, finish - index)
+      bytes[index, length].copy_to(@buffer[@buffered, length])
+      @buffered += length
+      @column += length
+      index += length
+    end
+    finish
+  end
+
   private def write_all(bytes : Bytes) : Nil
     index = 0
     while index < bytes.size
@@ -187,6 +209,7 @@ class Mica::YAML::Emitter
       else
         write_indent if breaks
         index = write_character(value, index)
+        index = write_plain_run(value, index)
         @indention = false
         spaces = false
         breaks = false
@@ -223,6 +246,7 @@ class Mica::YAML::Emitter
         write_indent if breaks
         put(0x27_u8) if value[index] == 0x27_u8
         index = write_character(value, index)
+        index = write_plain_run(value, index, 0x27_u8)
         @indention = false
         spaces = false
         breaks = false

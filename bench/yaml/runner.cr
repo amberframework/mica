@@ -16,7 +16,10 @@
 # - mica-parse: `Mica::YAML.parse_all` (values under the core schema);
 # - stdlib-events: the standard library's `YAML::PullParser`, every event
 #   read and every scalar's value taken;
-# - stdlib-parse: the standard library's `YAML.parse_all`.
+# - stdlib-parse: the standard library's `YAML.parse_all`;
+# - stdlib-emit: the standard library's `to_yaml` of every document of the
+#   file (parsed once, before the clock starts), which writes through
+#   `YAML::Builder`.
 #
 # The stdlib engines run on libyaml in a default build. Built with
 # `-Dyaml_stdlib_only -Duse_mica` against the crystal-alpha fork's
@@ -64,8 +67,17 @@ module YAMLBench
     YAML.parse_all(data).size.to_i64
   end
 
+  class_getter list_of_documents = [] of YAML::Any
+
+  def self.stdlib_emit : Int64
+    bytes = 0_i64
+    list_of_documents.each { |document| bytes += document.to_yaml.bytesize }
+    bytes
+  end
+
   def self.run(engine : String, data : String) : Int64
     case engine
+    when "stdlib-emit"   then stdlib_emit
     when "stdlib-events" then stdlib_events(data)
     when "stdlib-parse"  then stdlib_parse(data)
     else                      run_mica(engine, data)
@@ -93,6 +105,7 @@ engine = ARGV[0]? || abort(usage)
 data = File.read(ARGV[1]? || abort(usage))
 min_seconds = (ARGV[2]? || abort(usage)).to_f
 
+YAMLBench.list_of_documents.concat(YAML.parse_all(data)) if engine == "stdlib-emit"
 checksum = YAMLBench.run(engine, data)
 # Warm up, then double the batch until one batch fills the window.
 iterations = 1
