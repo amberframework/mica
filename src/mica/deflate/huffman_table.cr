@@ -73,162 +73,221 @@ module Mica::Deflate
       Incomplete
     end
 
+    # What `build` returns: the problem, if any; the work the build is
+    # charged (the entries a full *root*-bit table holds, so the charge
+    # does not depend on how small a table the code needed); and the bits
+    # that index the root table, at most *root* (a code whose longest
+    # codeword is shorter gets a smaller table).
+    record Built, problem : Problem, work : Int32, table_bits : Int32
+
+    # Every symbol's entry without its code length: `entry_for` computed
+    # once, so a build adds the length to a table lookup.
+    LITERAL_LENGTH_RESULTS = begin
+      results = Slice(UInt32).new(288, 0_u32)
+      288.times { |symbol| results[symbol] = result_for(Alphabet::LiteralLength, symbol) }
+      results
+    end
+
+    # :ditto:
+    DISTANCE_RESULTS = begin
+      results = Slice(UInt32).new(32, 0_u32)
+      32.times { |symbol| results[symbol] = result_for(Alphabet::Distance, symbol) }
+      results
+    end
+
+    # :ditto:
+    CODE_LENGTH_RESULTS = begin
+      results = Slice(UInt32).new(19, 0_u32)
+      19.times { |symbol| results[symbol] = result_for(Alphabet::CodeLength, symbol) }
+      results
+    end
+
     # Fills *table* (with room for *capacity* entries) for the code whose
-    # lengths are `lengths[0, count]`, with a *root*-bit root table.
-    # Returns the problem, if any, and the entries written (the work the
-    # build did).
+    # lengths are `lengths[0, count]` (each at most 15), with a root table
+    # of at most *root* bits.
     #
     # Follows zlib's acceptance rules: an oversubscribed code is always
     # rejected; an incomplete code is accepted only for the literal/length
     # and distance alphabets and only when it is a single code of length 1;
     # a code with no symbols at all is accepted and every bit pattern of it
     # decodes as invalid.
+    #
+    # The root table is filled the way libdeflate fills it: codewords are
+    # visited in canonical order with their bits reversed, each writes one
+    # entry, and whenever the code length grows the filled part of the
+    # table is doubled by copying it, so a build costs one pass over the
+    # symbols plus one copy of the table.
     def self.build(table : UInt32*, capacity : Int32, lengths : UInt8*, count : Int32, root : Int32,
-                   alphabet : Alphabet) : {Problem, Int32}
-      counts = StaticArray(Int32, 16).new(0)
-      count.times { |symbol| counts[lengths[symbol]] += 1 }
+                   alphabet : Alphabet) : Built
+      counts_storage = uninitialized StaticArray(Int32, 16)
+      counts = counts_storage.to_unsafe
+      16.times { |length| counts[length] = 0 }
+      symbol = 0
+      while symbol < count
+        counts[lengths[symbol]] &+= 1
+        symbol &+= 1
+      end
       max_length = 15
       while max_length > 0 && counts[max_length] == 0
         max_length -= 1
       end
       root_size = 1 << root
       if max_length == 0
-        root_size.times { |index| table[index] = INVALID }
-        return {Problem::None, root_size}
-      end
-      left = 1
-      (1..15).each do |length|
-        left <<= 1
-        left -= counts[length]
-        return {Problem::Oversubscribed, 0} if left < 0
-      end
-      if left > 0 && (alphabet.code_length? || max_length != 1)
-        return {Problem::Incomplete, 0}
+        table[0] = INVALID
+        return Built.new(Problem::None, root_size, 0)
       end
 
-      offsets = StaticArray(Int32, 16).new(0)
-      (1...15).each { |length| offsets[length + 1] = offsets[length] + counts[length] }
-      sorted = uninitialized StaticArray(UInt16, 320)
-      count.times do |symbol|
-        length = lengths[symbol]
-        next if length == 0
-        sorted[offsets[length]] = symbol.to_u16
-        offsets[length] += 1
-      end
-
-      # A complete code writes every entry itself; only an incomplete one
-      # (a single 1-bit code) leaves patterns that must read as invalid.
-      complete = left == 0
-      written = 0
-      unless complete
-        root_size.times { |index| table[index] = INVALID }
-        written = root_size
-      end
-      root_mask = root_size - 1
-      next_free = root_size
-      current_prefix = -1
-      subtable_start = 0
-      subtable_bits = 0
-      code = 0
+      # Where each length's symbols start in the sorted list, and the code
+      # space the code uses in units of the longest codeword.
+      offsets_storage = uninitialized StaticArray(Int32, 16)
+      offsets = offsets_storage.to_unsafe
+      used = 0
       position = 0
-      (1..max_length).each do |length|
-        counts[length].times do
-          symbol = sorted[position].to_i32
-          position += 1
-          reversed = reverse(code, length)
-          if length <= root
-            filled = entry_for(alphabet, symbol, length)
-            index = reversed
-            step = 1 << length
-            while index < root_size
-              table[index] = filled
-              index += step
-              written += 1
-            end
-          else
-            prefix = reversed & root_mask
-            if prefix != current_prefix
-              bits = length - root
-              room = 1 << bits
-              while bits + root < max_length
-                room -= counts[bits + root]
-                break if room <= 0
-                bits += 1
-                room <<= 1
-              end
-              subtable_bits = bits
-              subtable_start = next_free
-              next_free += 1 << bits
-              raise Mica::Error.new("internal error: Huffman table overflow") if next_free > capacity
-              unless complete
-                (1 << bits).times { |index| table[subtable_start + index] = INVALID }
-                written += 1 << bits
-              end
-              table[prefix] = EXCEPTIONAL | SUBTABLE | (subtable_start.to_u32 << 16) |
-                              (subtable_bits.to_u32 << 8) | root.to_u32
-              current_prefix = prefix
-            end
-            filled = entry_for(alphabet, symbol, length - root)
-            index = reversed >> root
-            step = 1 << (length - root)
-            size = 1 << subtable_bits
-            while index < size
-              table[subtable_start + index] = filled
-              index += step
-              written += 1
-            end
-          end
-          counts[length] -= 1
-          code += 1
-        end
-        code <<= 1
+      length = 1
+      while length <= max_length
+        offsets[length] = position
+        position &+= counts[length]
+        used = (used << 1) &+ counts[length]
+        length &+= 1
       end
-      {Problem::None, written}
+      full = 1 << max_length
+      return Built.new(Problem::Oversubscribed, 0, 0) if used > full
+      results = case alphabet
+                in .code_length?    then CODE_LENGTH_RESULTS.to_unsafe
+                in .literal_length? then LITERAL_LENGTH_RESULTS.to_unsafe
+                in .distance?       then DISTANCE_RESULTS.to_unsafe
+                end
+      if used < full
+        return Built.new(Problem::Incomplete, 0, 0) if alphabet.code_length? || max_length != 1
+        # A single code of length 1: bit 0 decodes it and bit 1 is invalid.
+        symbol = 0
+        while lengths[symbol] != 1
+          symbol &+= 1
+        end
+        table[0] = results[symbol] &+ 0x101_u32
+        table[1] = INVALID
+        return Built.new(Problem::None, root_size &+ (root_size >> 1), 1)
+      end
+
+      sorted_storage = uninitialized StaticArray(UInt16, 320)
+      sorted = sorted_storage.to_unsafe
+      symbol = 0
+      while symbol < count
+        length = lengths[symbol].to_i32
+        if length != 0
+          sorted[offsets[length]] = symbol.to_u16!
+          offsets[length] &+= 1
+        end
+        symbol &+= 1
+      end
+
+      table_bits = max_length < root ? max_length : root
+      codeword = 0_u32
+      length = 1
+      while counts[length] == 0
+        length &+= 1
+      end
+      remaining = counts[length]
+      filled = 1_u32 << length
+      # Codewords no longer than the root table: one entry each; the
+      # filled part doubles as the length grows.
+      while length <= table_bits
+        loop do
+          table[codeword] = results[sorted.value] &+ (length.to_u32! << 8) &+ length.to_u32!
+          sorted += 1
+          if codeword == filled &- 1
+            # The last codeword (all ones): double up to the full table.
+            while length < table_bits
+              (table + filled).copy_from(table, filled)
+              filled <<= 1
+              length &+= 1
+            end
+            return Built.new(Problem::None, root_size, table_bits)
+          end
+          # The next codeword in bit-reversed order.
+          bit = 1_u32 << (31 &- (codeword ^ (filled &- 1)).leading_zeros_count)
+          codeword = (codeword & (bit &- 1)) | bit
+          remaining &-= 1
+          break if remaining == 0
+        end
+        loop do
+          length &+= 1
+          if length <= table_bits
+            (table + filled).copy_from(table, filled)
+            filled <<= 1
+          end
+          remaining = counts[length]
+          break if remaining != 0
+        end
+      end
+
+      # Longer codewords: a subtable per root prefix, sized to hold every
+      # codeword that starts with it.
+      table_end = 1 << table_bits
+      root_mask = (table_end &- 1).to_u32!
+      work = root_size
+      prefix = UInt32::MAX
+      subtable_start = 0
+      loop do
+        if codeword & root_mask != prefix
+          prefix = codeword & root_mask
+          subtable_start = table_end
+          subtable_bits = length &- table_bits
+          space = remaining
+          while space < (1 << subtable_bits)
+            subtable_bits &+= 1
+            space = (space << 1) &+ counts[table_bits &+ subtable_bits]
+          end
+          table_end = subtable_start &+ (1 << subtable_bits)
+          raise Mica::Error.new("internal error: Huffman table overflow") if table_end > capacity
+          table[prefix] = EXCEPTIONAL | SUBTABLE | (subtable_start.to_u32! << 16) | (subtable_bits.to_u32! << 8) |
+                          table_bits.to_u32!
+          work = work &- 1 &+ (1 << subtable_bits)
+        end
+        code_bits = (length &- table_bits).to_u32!
+        entry = results[sorted.value] &+ (code_bits << 8) &+ code_bits
+        sorted += 1
+        index = subtable_start &+ (codeword >> table_bits).to_i32!
+        stride = 1 << code_bits
+        loop do
+          table[index] = entry
+          index &+= stride
+          break unless index < table_end
+        end
+        return Built.new(Problem::None, work, table_bits) if codeword == (1_u32 << length) &- 1
+        bit = 1_u32 << (31 &- (codeword ^ ((1_u32 << length) &- 1)).leading_zeros_count)
+        codeword = (codeword & (bit &- 1)) | bit
+        remaining &-= 1
+        while remaining == 0
+          length &+= 1
+          remaining = counts[length]
+        end
+      end
     end
 
-    # Returns the entry for *symbol* whose code takes *code_bits* bits at
-    # this level of the table.
-    private def self.entry_for(alphabet : Alphabet, symbol : Int32, code_bits : Int32) : UInt32
-      bits = code_bits.to_u32
+    # Returns the entry for *symbol* without its code length (see `build`).
+    private def self.result_for(alphabet : Alphabet, symbol : Int32) : UInt32
       case alphabet
       in .code_length?
-        (symbol.to_u32 << 16) | bits
+        symbol.to_u32 << 16
       in .literal_length?
         if symbol < 256
-          LITERAL | (symbol.to_u32 << 16) | bits
+          LITERAL | (symbol.to_u32 << 16)
         elsif symbol == 256
-          EXCEPTIONAL | END_OF_BLOCK | bits
+          EXCEPTIONAL | END_OF_BLOCK
         elsif symbol <= 285
           index = symbol - 257
-          with_extra(LENGTH_BASES[index], LENGTH_EXTRA[index], bits)
+          (LENGTH_BASES[index].to_u32 << 16) | LENGTH_EXTRA[index].to_u32
         else
-          EXCEPTIONAL | bits
+          EXCEPTIONAL
         end
       in .distance?
         if symbol < 30
-          with_extra(DISTANCE_BASES[symbol], DISTANCE_EXTRA[symbol], bits)
+          (DISTANCE_BASES[symbol].to_u32 << 16) | DISTANCE_EXTRA[symbol].to_u32
         else
-          EXCEPTIONAL | bits
+          EXCEPTIONAL
         end
       end
-    end
-
-    # A length or distance entry: bits 0-7 hold the code bits plus the
-    # extra bits, bits 8-11 the code bits, so a decoder takes both with one
-    # shift and reads the extra value as `(bits & mask(total)) >> code`.
-    private def self.with_extra(base : UInt16, extra : UInt8, code_bits : UInt32) : UInt32
-      (base.to_u32 << 16) | (code_bits << 8) | (code_bits + extra.to_u32)
-    end
-
-    # Returns the low *length* bits of *code* in reverse order.
-    private def self.reverse(code : Int32, length : Int32) : Int32
-      value = code.to_u32
-      value = ((value >> 1) & 0x5555_5555_u32) | ((value & 0x5555_5555_u32) << 1)
-      value = ((value >> 2) & 0x3333_3333_u32) | ((value & 0x3333_3333_u32) << 2)
-      value = ((value >> 4) & 0x0F0F_0F0F_u32) | ((value & 0x0F0F_0F0F_u32) << 4)
-      value = ((value >> 8) & 0x00FF_00FF_u32) | ((value & 0x00FF_00FF_u32) << 8)
-      value = (value >> 16) | (value << 16)
-      (value >> (32 - length)).to_i32
     end
 
     # The fixed literal/length table (RFC 1951, section 3.2.6): symbols 0
@@ -243,6 +302,8 @@ module Mica::Deflate
       build(table.to_unsafe, table.size, lengths.to_unsafe, 288, LITERAL_LENGTH_ROOT, Alphabet::LiteralLength)
       table
     end
+    # The bits that index `FIXED_LITERAL_LENGTH` (its longest codeword).
+    FIXED_LITERAL_LENGTH_BITS = 9
 
     # The fixed distance table: 32 codes of 5 bits; 30 and 31 decode as
     # invalid.
@@ -252,5 +313,7 @@ module Mica::Deflate
       build(table.to_unsafe, table.size, lengths.to_unsafe, 32, DISTANCE_ROOT, Alphabet::Distance)
       table
     end
+    # The bits that index `FIXED_DISTANCE`.
+    FIXED_DISTANCE_BITS = 5
   end
 end

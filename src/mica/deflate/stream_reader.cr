@@ -11,11 +11,14 @@ module Mica::Deflate
     getter? closed : Bool = false
 
     @source : IO
-    @inflater : Inflater
+    # The decoder, until the stream ends or the reader is closed; it then
+    # goes back to `Inflater` for the next decode.
+    @inflater : Inflater?
+    @produced : Int64 = 0_i64
 
     def initialize(@source : IO, format : Format, limits : DecodeLimits, timeout : Time::Span?, dictionary : Bytes?,
-                   @sync_close : Bool)
-      @inflater = Inflater.new(@source, format, limits, timeout, dictionary)
+                   @sync_close : Bool, list_of_headers : Array(Gzip::Header)? = nil)
+      @inflater = Inflater.acquire(@source, format, limits, timeout, dictionary, list_of_headers)
     end
 
     # Reads decoded bytes into *slice*; returns 0 at the end of the stream,
@@ -23,15 +26,20 @@ module Mica::Deflate
     def read(slice : Bytes) : Int32
       check_open
       return 0 if slice.empty?
+      inflater = @inflater
+      return 0 unless inflater
       loop do
-        pending = @inflater.pending
+        pending = inflater.pending
         unless pending.empty?
           count = Math.min(pending.size, slice.size)
           slice.copy_from(pending.to_unsafe, count)
-          @inflater.take(count)
+          inflater.take(count)
           return count
         end
-        return 0 unless @inflater.produce
+        unless inflater.produce
+          release_inflater
+          return 0
+        end
       end
     end
 
@@ -42,13 +50,23 @@ module Mica::Deflate
 
     # Decoded bytes so far.
     def produced : Int64
-      @inflater.produced
+      inflater = @inflater
+      inflater ? inflater.produced : @produced
     end
 
     def close : Nil
       return if @closed
       @closed = true
+      release_inflater
       @source.close if @sync_close
+    end
+
+    private def release_inflater : Nil
+      inflater = @inflater
+      return unless inflater
+      @produced = inflater.produced
+      @inflater = nil
+      inflater.release
     end
   end
 
