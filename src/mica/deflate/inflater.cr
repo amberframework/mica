@@ -288,11 +288,11 @@ module Mica::Deflate
       return Bytes.empty if size == 0
       working = @out
       # A result buffer that the ratio sized well is the result. One that
-      # is more than a quarter too large (a stream whose first part
-      # compressed far better than the rest) is copied out at its exact
-      # size and freed, like the inflater's own buffer, so the collector
-      # sees no more garbage than the output itself.
-      if working != @buffer && @out_capacity - @result_start <= size.to_i64 + size // 4 + LOW_ROOM
+      # is more than half too large (a stream whose first part compressed
+      # far better than the rest) is copied out at its exact size and
+      # freed, like the inflater's own buffer, so a result never holds more
+      # than one and a half times its size.
+      if working != @buffer && @out_capacity - @result_start <= size.to_i64 + size // 2 + LOW_ROOM
         return Bytes.new(working + @result_start, size)
       end
       result = GC.malloc_atomic(size.to_u64).as(UInt8*)

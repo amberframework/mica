@@ -56,8 +56,9 @@ result buffer sized from the compression ratio it has shown so far, never
 past `max_output_bytes`. When that buffer fills, the decoder moves to a
 larger one (by at least a quarter, at most eightfold) and frees the one it
 leaves, so at most two result buffers exist at a time. A result buffer
-that ends more than a quarter larger than the output is copied out at the
-exact size and freed. The streaming decoder
+that ends more than half larger than the output is copied out at the exact
+size and freed, so the `Bytes` a decode returns holds at most one and a
+half times its size. The streaming decoder
 holds 160 KiB of output and 64 KiB of input. A declared size (gzip ISIZE)
 is checked, never used to size a buffer.
 
