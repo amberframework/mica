@@ -94,6 +94,16 @@ Crystal, so a program that compresses with Mica links no libz.
   `docs/benchmarks.md`).
 - `scripts/check_linkage.sh` also checks a minimal encoder program.
 
+Adds `scripts/check_regex_literals.cr`, which checks every regex in a tree
+of Crystal source against the Crystal dialect and exits 1 when a pattern
+uses a construct Mica leaves out (lookaround, backreferences, atomic
+groups, possessive quantifiers, `\K` and the others in docs/regex.md,
+"Excluded constructs"). It reads literals, interpolated literals,
+`Regex.new` with a string literal, literals in macro expressions and the
+text of macro bodies, including code no spec reaches. Libraries run it in
+CI so a pattern that stops a build on a Mica-default compiler is caught
+before release.
+
 ## 0.2.0 (2026-11-21)
 
 Adds `Mica::Regex`, a regular expression engine in pure Crystal. XML parsing
