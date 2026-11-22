@@ -19,18 +19,21 @@ module Mica::Deflate
   # symbols or inside a back reference or stored block. Output goes into
   # one buffer that also holds the history back references read:
   #
-  # - streaming: the buffer holds the 32 KiB window plus up to 128 KiB of
-  #   new output; once the reader has taken the new output, the last 32 KiB
-  #   slide to the front;
-  # - one-shot, small input: the same buffer; the result is an exact-size
-  #   copy of what it holds when the stream ends;
-  # - one-shot otherwise (or once the output outgrows that buffer): a
-  #   buffer of its own that becomes the result. It grows to the size the
-  #   compression ratio so far predicts (at least double), never past
+  # - streaming, small reads: the inflater's own buffer holds the 32 KiB
+  #   window plus up to 128 KiB of new output; once the reader has taken
+  #   the new output, the last 32 KiB slide to the front;
+  # - streaming, reads of at least `DIRECT_READ` bytes: the reader's slice
+  #   is the output buffer of the run, the history stays in the inflater's
+  #   own buffer, and the last 32 KiB of the run are appended to it;
+  # - one-shot: the first `STREAM_BUFFER` bytes are decoded in the
+  #   inflater's own buffer. A stream that ends there is returned as an
+  #   exact-size copy; a longer one moves to a result buffer sized from the
+  #   compression ratio it has shown so far (`grow_result`), never past
   #   `max_output_bytes`.
   #
-  # Every run of the decoding loop produces at most `RUN_BYTES` before the
-  # decoder settles the work meter, the ratio check and the deadline, and
+  # Every run of the decoding loop stops at `RUN_BYTES` (the fast loop may
+  # pass it by one symbol) and the decoder then settles the work meter, the
+  # ratio check and the deadline;
   # the output limit is checked byte-exactly: when the next byte would pass
   # `max_output_bytes` the decode raises `DecodeLimitError` and the byte is
   # never written.
@@ -53,8 +56,8 @@ module Mica::Deflate
     WINDOW = 32_768
     # The longest back reference.
     MAX_MATCH = 258
-    # The most output one run of the decoding loop produces before the
-    # work meter, the ratio check and the deadline are settled.
+    # Where a run of the decoding loop aims to stop, so that the work
+    # meter, the ratio check and the deadline are settled.
     RUN_BYTES = 65_536
     # Bytes allocated past an output buffer's logical end.
     SLACK = 16
@@ -67,12 +70,10 @@ module Mica::Deflate
     # Output buffers start this small and double as output arrives, so a
     # small body costs a small allocation.
     INITIAL_OUTPUT = 4_096
-    # A one-shot decode stays in the inflater's own buffer for this much
-    # output, then moves to a result buffer sized from the ratio so far.
-    ONE_SHOT_PREFIX = STREAM_BUFFER
     # A buffer grows (or, streaming at full size, slides) when less room
     # than this remains.
     LOW_ROOM = 1_024
+
     # Bytes kept before the read position when the input buffer is
     # compacted, so the decoder can hand back up to 7 bytes it loaded into
     # its bit buffer but did not use.
@@ -241,7 +242,8 @@ module Mica::Deflate
         # A one-shot decode starts in the inflater's own buffer. A small
         # body ends there and is copied out at its exact size; a larger
         # one moves to a result buffer sized from the ratio it has shown
-        # by then (`grow_result`).
+        # by then (`grow_result`). A size the stream declares (gzip
+        # ISIZE) is only ever checked, never used to size a buffer.
         use_own_buffer
       else
         @one_shot = false
@@ -261,7 +263,7 @@ module Mica::Deflate
         @buffer_capacity = INITIAL_OUTPUT
       end
       @out = @buffer
-      @out_capacity = @one_shot && @buffer_capacity > ONE_SHOT_PREFIX ? ONE_SHOT_PREFIX : @buffer_capacity
+      @out_capacity = @buffer_capacity
     end
 
     # Ends this inflater's decode and makes it the spare one. The caller
@@ -284,9 +286,22 @@ module Mica::Deflate
       end
       size = @out_pos - @result_start
       return Bytes.empty if size == 0
-      return Bytes.new(@out + @result_start, size) unless @out == @buffer
+      working = @out
+      # A result buffer that the ratio sized well is the result. One that
+      # is more than a quarter too large (a stream whose first part
+      # compressed far better than the rest) is copied out at its exact
+      # size and freed, like the inflater's own buffer, so the collector
+      # sees no more garbage than the output itself.
+      if working != @buffer && @out_capacity - @result_start <= size.to_i64 + size // 4 + LOW_ROOM
+        return Bytes.new(working + @result_start, size)
+      end
       result = GC.malloc_atomic(size.to_u64).as(UInt8*)
-      result.copy_from(@out + @result_start, size)
+      result.copy_from(working + @result_start, size)
+      unless working == @buffer
+        @out = @buffer
+        @out_capacity = @buffer_capacity
+        GC.free(working.as(Void*))
+      end
       Bytes.new(result, size)
     end
 
@@ -577,7 +592,7 @@ module Mica::Deflate
     private def prepare_output : {Int32, Bool}
       if @out_capacity - @out_pos < LOW_ROOM
         if @one_shot
-          if @out == @buffer && @out_capacity < ONE_SHOT_PREFIX
+          if @out == @buffer && @out_capacity < STREAM_BUFFER
             grow_own_buffer
           else
             grow_result
@@ -608,23 +623,26 @@ module Mica::Deflate
       @buffer = GC.realloc(@buffer.as(Void*), (wanted + SLACK).to_u64).as(UInt8*)
       @buffer_capacity = wanted
       @out = @buffer
-      @out_capacity = @one_shot && wanted > ONE_SHOT_PREFIX ? ONE_SHOT_PREFIX : wanted
+      @out_capacity = wanted
     end
 
     # Moves a one-shot decode to a larger result buffer: the size the
-    # ratio so far predicts for the whole input, at least double the
-    # buffer it leaves, never past `max_output_bytes`.
+    # ratio so far predicts for the whole input plus an eighth, between
+    # one and a quarter and eight times the buffer it leaves, never past
+    # `max_output_bytes`. Eight times at most, because the ratio of a
+    # stream's first bytes says little about a long stream: each move
+    # predicts from more of it, and the buffer it leaves is freed at once,
+    # so only the last one weighs on the collector.
     private def grow_result : Nil
       ceiling = @limits.max_output_bytes + @result_start
       consumed = input_offset
       consumed = 1_i64 if consumed < 1
       predicted = (@out_pos - @result_start).to_i64 * @in_end // consumed
       wanted = predicted + predicted // 8 + LOW_ROOM + @result_start
-      wanted = @out_capacity.to_i64 * 2 if wanted < @out_capacity.to_i64 * 2
-      # Past half the ceiling, go straight to it: a buffer just under the
-      # ceiling would need one more nearly ceiling-sized copy, and the
-      # allocations would sum to about three times the ceiling, not two.
-      wanted = ceiling if wanted > ceiling // 2
+      capacity = @out_capacity.to_i64
+      wanted = capacity + capacity // 4 if wanted < capacity + capacity // 4
+      wanted = capacity * 8 if wanted > capacity * 8
+      wanted = ceiling if wanted > ceiling
       wanted = Int32::MAX.to_i64 - SLACK if wanted > Int32::MAX - SLACK
       return if wanted <= @out_capacity
       grown = GC.malloc_atomic((wanted + SLACK).to_u64).as(UInt8*)
@@ -1272,6 +1290,10 @@ module Mica::Deflate
     # current symbol's bytes are written, so the lookup and the copy
     # overlap. Leaves through the end of the block or its bounds; the
     # careful loop takes over at the edges.
+    #
+    # Never inlined: compiled on its own, the loop keeps its state in
+    # registers whatever calls it.
+    @[NoInline]
     private def decode_fast(limit : Int32) : Nil
       in_next = @input + @in_pos
       in_stop = @input + (@in_end - FAST_INPUT_MARGIN)

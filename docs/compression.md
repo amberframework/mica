@@ -49,17 +49,34 @@ Exceeding a limit raises `Mica::Deflate::DecodeLimitError`, whose `limit`
 names it. The work budget raises `Mica::WorkBudgetExceededError` and the
 timeout `Mica::DeadlineExceededError`. Every limit is checked before the
 bytes it guards are written, so a decompression bomb costs at most
-`max_output_bytes` of output plus fixed buffers (the one-shot decoder's
-output buffer doubles as it fills and never grows past `max_output_bytes`,
-so it allocates at most about twice that in all;
-the streaming decoder holds 160 KiB of output and 64 KiB of input). A
-declared size (gzip ISIZE) is checked, never used to size a buffer.
+`max_output_bytes` of output plus fixed buffers. The one-shot decoder
+decodes the first 160 KiB in the decoder's own buffer; an output that
+fits is returned as an exact-size copy, and a larger one moves to a
+result buffer sized from the compression ratio it has shown so far, never
+past `max_output_bytes`. When that buffer fills, the decoder moves to a
+larger one (by at least a quarter, at most eightfold) and frees the one it
+leaves, so at most two result buffers exist at a time. A result buffer
+that ends more than a quarter larger than the output is copied out at the
+exact size and freed. The streaming decoder
+holds 160 KiB of output and 64 KiB of input. A declared size (gzip ISIZE)
+is checked, never used to size a buffer.
+
+A decoder keeps its Huffman tables and buffers when a decode ends, and the
+next decode (one-shot or a new reader) takes it over, so a small body
+allocates only its result. One spare decoder is kept: at most 160 KiB of
+output buffer, 64 KiB of input buffer and 13 KiB of tables. A reader gives
+its decoder back when the stream ends or at `close`.
+
+A read into a slice of at least 32 KiB is decoded straight into the slice
+(the decoder copies only the last 32 KiB aside as history); smaller reads
+are served from the decoder's own buffer.
 
 Decoding charges one work operation per unit plus the Huffman table
 entries each block header builds, so only a stream that spends its input
 rebuilding tables (thousands of tiny dynamic blocks) approaches the budget.
-The meter, the ratio check and the deadline are settled at least every
-64 KiB of output and at every block header.
+The meter, the ratio check and the deadline are settled every 64 KiB of
+output (a run of the decoding loop may pass 64 KiB by one symbol, at most
+261 bytes) and at every block header.
 
 ## Errors
 
