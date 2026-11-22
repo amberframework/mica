@@ -18,7 +18,7 @@ module Mica::Deflate
   # Decodes the raw DEFLATE stream *input* in one call. The stream must
   # end with its final block and nothing may follow it.
   def self.decode(input : Bytes, *, limits : DecodeLimits, timeout : Time::Span?) : Bytes
-    Inflater.new(input, Format::Raw, limits, timeout).decode_all
+    Inflater.decode(input, Format::Raw, limits, timeout)
   end
 
   # Encodes *input* as a raw DEFLATE stream in one call. *level* runs from
