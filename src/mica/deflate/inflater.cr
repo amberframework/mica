@@ -1138,10 +1138,21 @@ module Mica::Deflate
           output_limit_reached if capped
           return false
         end
-        # A reference that reaches before a reader's slice reads the history.
-        @out[@out_pos] = @copy_distance > @out_pos ? @history_end[@out_pos - @copy_distance] : @out[@out_pos - @copy_distance]
-        @out_pos += 1
-        @copy_left -= 1
+        distance = @copy_distance
+        if distance >= 16 && distance <= @out_pos
+          # Whole pieces of at most *distance* bytes: each piece's source
+          # is already written and does not overlap it.
+          count = Math.min(Math.min(@copy_left, limit - @out_pos), distance)
+          (@out + @out_pos).copy_from(@out + (@out_pos - distance), count)
+          @out_pos += count
+          @copy_left -= count
+        else
+          # A reference that reaches before a reader's slice reads the
+          # history.
+          @out[@out_pos] = distance > @out_pos ? @history_end[@out_pos - distance] : @out[@out_pos - distance]
+          @out_pos += 1
+          @copy_left -= 1
+        end
       end
       true
     end
