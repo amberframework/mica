@@ -78,6 +78,15 @@ module Mica::YAML
     # Every key below this index in `@simple_keys` is known not possible.
     @first_possible_key : Int32 = 0
 
+    # Strict dialect: one entry per flow level, true for a flow mapping.
+    @flow_mappings : Array(Bool)
+    # Strict dialect: the previous token was a quoted scalar or closed a
+    # flow collection, so a ':' right after it is a value indicator.
+    @after_json_like : Bool = false
+    # Strict dialect: a tab was skipped as white space on this line in
+    # the block context, so no block collection may start on it.
+    @tab_on_line : Bool = false
+
     @text : ByteBuffer
     @breaks : ByteBuffer
     @segment_start : Int32 = 0
@@ -89,6 +98,7 @@ module Mica::YAML
       @tokens = Array(Token).new(16)
       @indents = Array(Int32).new(16)
       @simple_keys = Array(SimpleKey).new(8)
+      @flow_mappings = Array(Bool).new(8)
       @text = ByteBuffer.new
       @breaks = ByteBuffer.new(16)
       @limit = @buffer.size
@@ -309,6 +319,7 @@ module Mica::YAML
       @pos += width
       @line += 1
       @line_start = @pos
+      @tab_on_line = false
       kind
     end
 
@@ -418,10 +429,14 @@ module Mica::YAML
       if byte == 0 && @pos >= @limit
         raise_invalid_character
         fetch_stream_end
-      elsif @pos == @line_start && byte == 0x25 # '%'
+      elsif @pos == @line_start && byte == 0x25 && !(@strict && @flow_level > 0) # '%'
         fetch_directive
       elsif @pos == @line_start && (byte == 0x2D || byte == 0x2E) && document_indicator_at?(@pos)
         fetch_document_indicator(byte == 0x2D ? Token::Kind::DocumentStart : Token::Kind::DocumentEnd)
+      elsif @strict
+        json_like = @after_json_like
+        @after_json_like = false
+        fetch_strict_content_token(byte, json_like)
       else
         fetch_content_token(byte)
       end
@@ -481,6 +496,48 @@ module Mica::YAML
       end
     end
 
+    private def flow_indicator_at?(pos : Int32) : Bool
+      class_at(pos) & FLOW != 0
+    end
+
+    # The YAML 1.2 dispatch: '-', '?' and ':' are indicators only before
+    # white space (':' also before a flow indicator, or right after a
+    # quoted scalar or flow collection, inside a flow collection).
+    private def fetch_strict_content_token(byte : UInt8, json_like : Bool) : Nil
+      case byte
+      when 0x2D # '-'
+        if blankz_at?(@pos + 1)
+          fetch_block_entry
+        elsif @flow_level > 0 && flow_indicator_at?(@pos + 1)
+          cannot_start_token
+        else
+          fetch_plain_scalar
+        end
+      when 0x3F # '?'
+        if blankz_at?(@pos + 1)
+          fetch_key
+        elsif @flow_level > 0 && flow_indicator_at?(@pos + 1)
+          cannot_start_token
+        else
+          fetch_plain_scalar
+        end
+      when 0x3A # ':'
+        if blankz_at?(@pos + 1) || (@flow_level > 0 && (json_like || flow_indicator_at?(@pos + 1)))
+          fetch_value
+        else
+          fetch_plain_scalar
+        end
+      when 0x5D, 0x7D # ']', '}'
+        fetch_content_token(byte)
+        @after_json_like = true
+      when 0x27, 0x22 # quotes
+        fetch_content_token(byte)
+        @after_json_like = true
+      else
+        fetch_content_token(byte)
+      end
+    end
+
     private def cannot_start_token : NoReturn
       scanner_error("while scanning for the next token", mark, "found character that cannot start any token")
     end
@@ -502,6 +559,10 @@ module Mica::YAML
       while index < @simple_keys.size
         key = @simple_keys.unsafe_fetch(index) # index < @simple_keys.size
         if key.possible?
+          # In YAML 1.2 a key in a flow mapping may span lines and has no
+          # length limit; the keys above it in the stack are younger, so
+          # the scan stops here.
+          break if @strict && index > 0 && @flow_mappings[index - 1]
           break unless stale?(key)
           if key.required?
             scanner_error("while scanning a simple key", key.mark, "could not find expected ':'")
@@ -533,7 +594,8 @@ module Mica::YAML
       end
     end
 
-    private def increase_flow_level : Nil
+    private def increase_flow_level(mapping : Bool) : Nil
+      @flow_mappings << mapping
       if @flow_level >= @limits.max_depth
         limit_error("max_depth", "Flow collections nest deeper than max_depth (#{@limits.max_depth})")
       end
@@ -545,12 +607,16 @@ module Mica::YAML
       return if @flow_level == 0
       @flow_level -= 1
       @simple_keys.pop
+      @flow_mappings.pop
       @first_possible_key = @simple_keys.size if @first_possible_key > @simple_keys.size
     end
 
     private def roll_indent(column : Int32, number : Int64, kind : Token::Kind, mark : Mark) : Nil
       return if @flow_level > 0
       return unless @indent < column
+      if @tab_on_line
+        scanner_error(nil, mark, "found a tab character where an indentation space is expected")
+      end
       if @indents.size >= @limits.max_depth
         limit_error("max_depth", "Block collections nest deeper than max_depth (#{@limits.max_depth})")
       end
@@ -603,7 +669,9 @@ module Mica::YAML
       unroll_indent(-1)
       remove_simple_key
       @simple_key_allowed = false
-      enqueue(scan_directive)
+      if token = scan_directive
+        enqueue(token)
+      end
     end
 
     private def fetch_document_indicator(kind : Token::Kind) : Nil
@@ -612,12 +680,23 @@ module Mica::YAML
       @simple_key_allowed = false
       start_mark = mark
       @pos += 3
-      enqueue(Token.new(kind, start_mark, mark))
+      end_mark = mark
+      if @strict && kind.document_end?
+        pos = @pos
+        while blank_at?(pos)
+          pos += 1
+        end
+        unless breakz_at?(pos) || (byte_at(pos) == 0x23 && pos > @pos)
+          @pos = pos
+          scanner_error(nil, mark, "did not find expected comment or line break")
+        end
+      end
+      enqueue(Token.new(kind, start_mark, end_mark))
     end
 
     private def fetch_flow_collection_start(kind : Token::Kind) : Nil
       save_simple_key
-      increase_flow_level
+      increase_flow_level(kind.flow_mapping_start?)
       @simple_key_allowed = true
       enqueue_indicator(kind)
     end
@@ -718,6 +797,7 @@ module Mica::YAML
     # --- Scanners -----------------------------------------------------------
 
     private def scan_to_next_token : Nil
+      return scan_to_next_token_strictly if @strict
       loop do
         pos = @pos
         # A byte order mark may start a line.
@@ -743,6 +823,68 @@ module Mica::YAML
       end
     end
 
+    # The YAML 1.2 rules: tabs separate tokens anywhere but are never
+    # indentation, a comment needs white space before it, and a line inside
+    # a flow collection is indented past the enclosing block.
+    private def scan_to_next_token_strictly : Nil
+      crossed_line = false
+      loop do
+        pos = @pos
+        pos += 3 if pos == @line_start && byte_at(pos) == 0xEF && byte_at(pos + 1) == 0xBB && byte_at(pos + 2) == 0xBF
+        while byte_at(pos) == 0x20
+          pos += 1
+        end
+        if byte_at(pos) == 0x09
+          tab_column = column_at(pos)
+          leading = pos - @line_start == tab_column && only_spaces_between?(@line_start, pos)
+          while blank_at?(pos)
+            pos += 1
+          end
+          if @flow_level == 0
+            if leading && tab_column < @indent && !breakz_at?(pos) && byte_at(pos) != 0x23
+              @pos = pos
+              scanner_error(nil, mark, "found a tab character where an indentation space is expected")
+            end
+            @tab_on_line = true
+          end
+        end
+        if byte_at(pos) == 0x23 && (pos == @line_start || blank_at?(pos - 1)) # '#'
+          pos = skip_to_line_end(pos)
+        end
+        @pos = pos
+        width = break_width(pos)
+        break if width == 0
+        charge(pos - @line_start + 1)
+        skip_line(width)
+        crossed_line = true
+        @simple_key_allowed = true if @flow_level == 0
+      end
+      if crossed_line && @flow_level > 0 && !end_at?(@pos)
+        check_flow_indentation
+      end
+    end
+
+    private def only_spaces_between?(from : Int32, to : Int32) : Bool
+      index = from
+      while index < to
+        return false unless byte_at(index) == 0x20
+        index += 1
+      end
+      true
+    end
+
+    # Raises unless the current line starts with more spaces than the
+    # enclosing block's indentation (YAML 1.2: lines of a flow collection
+    # or a multi-line quoted scalar are indented like block content).
+    private def check_flow_indentation : Nil
+      spaces = 0
+      while byte_at(@line_start + spaces) == 0x20
+        spaces += 1
+      end
+      return if spaces > @indent
+      scanner_error(nil, mark, "found a line indented less than the block that holds it")
+    end
+
     # Returns the position of the line break or end of input at or after
     # *pos*.
     private def skip_to_line_end(pos : Int32) : Int32
@@ -758,12 +900,18 @@ module Mica::YAML
       end
     end
 
-    private def scan_directive : Token
+    private def scan_directive : Token?
       start_mark = mark
       @pos += 1
       name_start = @pos
-      while class_at(@pos) & ALPHA != 0
-        @pos += 1
+      if @strict
+        until blankz_at?(@pos)
+          @pos += 1
+        end
+      else
+        while class_at(@pos) & ALPHA != 0
+          @pos += 1
+        end
       end
       if @pos == name_start
         scanner_error("while scanning a directive", start_mark, "could not find expected directive name")
@@ -778,13 +926,18 @@ module Mica::YAML
       elsif name == "TAG".to_slice
         handle, prefix = scan_tag_directive_value(start_mark)
         token = Token.new(Token::Kind::TagDirective, start_mark, mark, value: prefix, handle: handle)
+      elsif @strict
+        # A reserved directive: YAML 1.2 says to ignore it.
+        @pos = skip_to_line_end(@pos)
+        token = nil
       else
         scanner_error("while scanning a directive", start_mark, "found unknown directive name")
       end
+      blanks_start = @pos
       while blank_at?(@pos)
         @pos += 1
       end
-      @pos = skip_to_line_end(@pos) if byte_at(@pos) == 0x23
+      @pos = skip_to_line_end(@pos) if byte_at(@pos) == 0x23 && (!@strict || @pos > blanks_start)
       unless breakz_at?(@pos)
         scanner_error("while scanning a directive", start_mark, "did not find expected comment or line break")
       end
@@ -844,12 +997,18 @@ module Mica::YAML
       start_mark = mark
       @pos += 1
       name_start = @pos
-      while class_at(@pos) & ALPHA != 0
-        @pos += 1
+      if @strict
+        until blankz_at?(@pos) || flow_indicator_at?(@pos)
+          @pos += 1
+        end
+      else
+        while class_at(@pos) & ALPHA != 0
+          @pos += 1
+        end
       end
       length = @pos - name_start
       following = byte_at(@pos)
-      unless length > 0 && (blankz_at?(@pos) || following == 0x3F || following == 0x3A || following == 0x2C ||
+      unless length > 0 && (@strict || blankz_at?(@pos) || following == 0x3F || following == 0x3A || following == 0x2C ||
              following == 0x5D || following == 0x7D || following == 0x25 || following == 0x40 || following == 0x60)
         scanner_error(kind.anchor? ? "while scanning an anchor" : "while scanning an alias", start_mark,
           "did not find expected alphabetic or numeric character")
@@ -993,16 +1152,19 @@ module Mica::YAML
           @pos += 1
         end
       end
+      blanks_start = @pos
       while blank_at?(@pos)
         @pos += 1
       end
-      @pos = skip_to_line_end(@pos) if byte_at(@pos) == 0x23
+      # YAML 1.2: a comment needs white space before it.
+      @pos = skip_to_line_end(@pos) if byte_at(@pos) == 0x23 && (!@strict || @pos > blanks_start)
       unless breakz_at?(@pos)
         scanner_error("while scanning a block scalar", start_mark, "did not find expected comment or line break")
       end
       width = break_width(@pos)
       skip_line(width) if width != 0
-      indent = 0
+      # -1 while the indentation is not known yet.
+      indent = -1
       if increment > 0
         indent = @indent >= 0 ? @indent + increment : increment
       end
@@ -1012,6 +1174,9 @@ module Mica::YAML
       leading_break = 0_u8
       leading_blank = false
       while @pos - @line_start == indent && !end_at?(@pos)
+        # YAML 1.2: a scalar at the top level may have no indentation, and
+        # then a document marker ends it.
+        break if indent == 0 && document_indicator_at?(@pos)
         trailing_blank = blank_at?(@pos)
         if !literal && leading_break == LINE_FEED && !leading_blank && !trailing_blank
           @text << 0x20_u8 if @breaks.empty?
@@ -1027,7 +1192,13 @@ module Mica::YAML
         charge(line_end - @pos + 1)
         @pos = line_end
         width = break_width(@pos)
-        leading_break = skip_line(width) if width != 0
+        if width != 0
+          leading_break = skip_line(width)
+        elsif @strict
+          # YAML 1.2 parsers read the end of input after a line's content
+          # as that line's break.
+          leading_break = LINE_FEED
+        end
         indent, end_mark = scan_block_scalar_breaks(indent, start_mark)
       end
       if chomping != -1 && leading_break != 0
@@ -1049,33 +1220,56 @@ module Mica::YAML
 
     # Reads the indentation and empty lines before a block scalar line,
     # collecting the line breaks in `@breaks`, and settles the scalar's
-    # indentation when it is not known yet. Returns the indentation and the
-    # mark after the last line break.
+    # indentation when it is not known yet (*indent* is -1). Returns the
+    # indentation and the mark after the last line break.
     private def scan_block_scalar_breaks(indent : Int32, start_mark : Mark) : {Int32, Mark}
       max_indent = 0
+      widest_empty_line = 0
       end_mark = mark
       loop do
         # Only spaces sit between the line start and here, so the column
         # is the byte distance.
-        while (indent == 0 || @pos - @line_start < indent) && byte_at(@pos) == 0x20
+        while (indent < 0 || @pos - @line_start < indent) && byte_at(@pos) == 0x20
           @pos += 1
         end
         column = @pos - @line_start
         max_indent = column if column > max_indent
-        if (indent == 0 || column < indent) && byte_at(@pos) == 0x09
-          scanner_error("while scanning a block scalar", start_mark,
-            "found a tab character where an indentation space is expected")
+        if byte_at(@pos) == 0x09
+          if @strict
+            if column < (indent < 0 ? @indent + 1 : indent)
+              scanner_error("while scanning a block scalar", start_mark,
+                "found a tab character where an indentation space is expected")
+            end
+          elsif indent < 0 || column < indent
+            scanner_error("while scanning a block scalar", start_mark,
+              "found a tab character where an indentation space is expected")
+          end
         end
         width = break_width(@pos)
-        break if width == 0
+        if width == 0
+          # YAML 1.2 parsers read spaces before the end of input as an
+          # empty line.
+          @breaks << 0x0A_u8 if @strict && end_at?(@pos) && column > 0 && only_spaces_between?(@line_start, @pos)
+          break
+        end
+        widest_empty_line = column if column > widest_empty_line
         charge(column + 1)
         write_break(@breaks, skip_line(width))
         end_mark = mark
       end
-      if indent == 0
-        indent = max_indent
-        indent = @indent + 1 if indent < @indent + 1
-        indent = 1 if indent < 1
+      if indent < 0
+        if @strict
+          indent = @pos - @line_start
+          indent = @indent + 1 if indent < @indent + 1
+          if widest_empty_line > indent && !end_at?(@pos)
+            scanner_error("while scanning a block scalar", start_mark,
+              "found an empty line indented more than the first line of text")
+          end
+        else
+          indent = max_indent
+          indent = @indent + 1 if indent < @indent + 1
+          indent = 1 if indent < 1
+        end
       end
       {indent, end_mark}
     end
@@ -1194,6 +1388,7 @@ module Mica::YAML
           flush_segment(blanks_start)
           write_fold(leading_break)
           @segment_start = @pos
+          check_flow_indentation if @strict && !end_at?(@pos)
         end
       end
       value = finish_scalar(@pos)
@@ -1258,6 +1453,17 @@ module Mica::YAML
       @pos += code_length
     end
 
+    # libyaml rejects any tab before a plain scalar's indentation; YAML
+    # 1.2 only when text follows it on the line.
+    private def plain_tab_is_indentation? : Bool
+      return true unless @strict
+      pos = @pos
+      while blank_at?(pos)
+        pos += 1
+      end
+      !breakz_at?(pos)
+    end
+
     private def scan_plain_scalar : Token
       start_mark = mark
       end_mark = start_mark
@@ -1279,7 +1485,9 @@ module Mica::YAML
           if cls & stop_mask == 0
             pos += 1
           elsif cls & COLON != 0
-            if @flow_level > 0
+            if @flow_level > 0 && @strict
+              break if flow_indicator_at?(pos + 1)
+            elsif @flow_level > 0
               following = byte_at(pos + 1)
               if following == 0x2C || following == 0x3F || following == 0x5B || following == 0x5D ||
                  following == 0x7B || following == 0x7D
@@ -1310,7 +1518,7 @@ module Mica::YAML
         break unless blank_at?(@pos) || break_at?(@pos)
         loop do
           if blank_at?(@pos)
-            if leading_blanks && byte_at(@pos) == 0x09 && column < indent
+            if leading_blanks && byte_at(@pos) == 0x09 && column < indent && plain_tab_is_indentation?
               scanner_error("while scanning a plain scalar", start_mark,
                 "found a tab character that violates indentation")
             end

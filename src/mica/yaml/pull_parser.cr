@@ -121,6 +121,9 @@ module Mica::YAML
     @depth : Int32 = 0
     @limits : ParseLimits
     @strict : Bool
+    # True at the start of the stream and after a `...` marker: only then
+    # may YAML 1.2 directives or a document without `---` follow.
+    @document_ended_explicitly : Bool = true
 
     # Creates a parser over *source* and reads the `StreamStart` event.
     # *limits* bounds the parse and *timeout* its wall-clock time (nil for
@@ -311,13 +314,18 @@ module Mica::YAML
 
     private def parse_document_start(implicit : Bool) : Nil
       token = @scanner.peek
-      unless implicit
+      if !implicit || @strict
         while token.kind.document_end?
           @scanner.skip
           token = @scanner.peek
+          @document_ended_explicitly = true
         end
       end
       kind = token.kind
+      implicit = true if @strict && @document_ended_explicitly
+      if @strict && !@document_ended_explicitly && (kind.version_directive? || kind.tag_directive?)
+        parser_error("did not find expected <document start>", token.start_mark)
+      end
       if implicit && !kind.version_directive? && !kind.tag_directive? && !kind.document_start? && !kind.stream_end?
         process_directives
         @version_directive = nil
@@ -368,6 +376,7 @@ module Mica::YAML
         implicit = false
       end
       @document_tag_directives.clear
+      @document_ended_explicitly = !implicit
       @state = State::DocumentStart
       @implicit = implicit
       event(EventKind::DocumentEnd, start_mark, end_mark)
@@ -541,6 +550,10 @@ module Mica::YAML
         @marks.pop
         collection_end(EventKind::MappingEnd, token.start_mark, token.end_mark)
         @scanner.skip
+      elsif @strict && token.kind.value?
+        # YAML 1.2: a value indicator with no key before it has an empty key.
+        @state = State::BlockMappingValue
+        empty_scalar(token.start_mark)
       else
         parser_error("while parsing a block mapping", @marks.pop, "did not find expected key", token.start_mark)
       end
@@ -588,6 +601,10 @@ module Mica::YAML
           mapping_start(true, MappingStyle::Flow, token.start_mark, token.end_mark)
           @scanner.skip
           return
+        elsif @strict && token.kind.value?
+          @state = State::FlowSequenceEntryMappingKey
+          mapping_start(true, MappingStyle::Flow, token.start_mark, token.start_mark)
+          return
         elsif !token.kind.flow_sequence_end?
           @states << State::FlowSequenceEntry
           parse_node(false, false)
@@ -606,6 +623,9 @@ module Mica::YAML
       if !kind.value? && !kind.flow_entry? && !kind.flow_sequence_end?
         @states << State::FlowSequenceEntryMappingValue
         parse_node(false, false)
+      elsif @strict
+        @state = State::FlowSequenceEntryMappingValue
+        empty_scalar(token.start_mark)
       else
         mark = token.end_mark
         @scanner.skip
@@ -664,6 +684,10 @@ module Mica::YAML
             empty_scalar(token.start_mark)
           end
           return
+        elsif @strict && token.kind.value?
+          @state = State::FlowMappingValue
+          empty_scalar(token.start_mark)
+          return
         elsif !token.kind.flow_mapping_end?
           @states << State::FlowMappingEmptyValue
           parse_node(false, false)
@@ -705,7 +729,7 @@ module Mica::YAML
       while token.kind.version_directive? || token.kind.tag_directive?
         if token.kind.version_directive?
           parser_error("found duplicate %YAML directive", token.start_mark) if version
-          if token.major != 1 || (token.minor != 1 && token.minor != 2)
+          if token.major != 1 || (!@strict && token.minor != 1 && token.minor != 2)
             parser_error("found incompatible YAML document", token.start_mark)
           end
           version = {token.major, token.minor}
