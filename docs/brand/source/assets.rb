@@ -46,9 +46,9 @@ end
 def chart_frame(palette, width, height, title, subtitle_lines)
   body = []
   body << %(<rect x=".75" y=".75" width="#{width - 1.5}" height="#{height - 1.5}" rx="18" fill="#{palette[:panel]}" stroke="#{palette[:panel_edge]}" stroke-width="1.5"/>)
-  body << text_at('Fraunces-600', 30, -0.005, title, left: 48, baseline: 64, fill: palette[:text])
+  body << text_at('Fraunces-600', 34, -0.005, title, left: 48, baseline: 68, fill: palette[:text])
   subtitle_lines.each_with_index do |line, index|
-    body << text_at('Manrope-400', 16.5, 0, line, left: 49, baseline: 96 + index * 24, fill: palette[:muted])
+    body << text_at('Manrope-400', 19, 0, line, left: 49, baseline: 104 + index * 27, fill: palette[:muted])
   end
   body
 end
@@ -56,9 +56,9 @@ end
 def legend(palette, entries, left, baseline)
   cursor = left
   entries.map do |label, color|
-    swatch = %(<rect x="#{cursor}" y="#{baseline - 12}" width="14" height="14" rx="3" fill="#{color}"/>)
-    text = text_at('Manrope-500', 15, 0, label, left: cursor + 22, baseline: baseline, fill: palette[:text])
-    cursor += 22 + text_width('Manrope-500', 15, 0, label) + 34
+    swatch = %(<rect x="#{cursor}" y="#{baseline - 14}" width="16" height="16" rx="3" fill="#{color}"/>)
+    text = text_at('Manrope-500', 18, 0, label, left: cursor + 24, baseline: baseline, fill: palette[:text])
+    cursor += 24 + text_width('Manrope-500', 18, 0, label) + 36
     swatch + text
   end.join("\n")
 end
@@ -79,9 +79,9 @@ end
 
 def regex_chart(palette)
   width = 1280
-  row_height = 104
-  top = 196
-  height = top + REGEX_ROWS.size * row_height + 70
+  row_height = 110
+  top = 218
+  height = top + REGEX_ROWS.size * row_height + 80
   axis_left = 380
   axis_width = 800
   max_factor = 30.0
@@ -89,31 +89,31 @@ def regex_chart(palette)
   body = chart_frame(palette, width, height, 'Mica::Regex against PCRE2 with JIT',
                      ['How many times as fast as Crystal\'s stdlib Regex (PCRE2 10.49, JIT on). Geometric means over 479 cases',
                       '(412 for static patterns) from rebar, Amber\'s own patterns and ReDoS families. Longer is better.'])
-  body << legend(palette, [['Mica::Regex, compiled at run time', palette[:blue]], ['Mica::Regex.static, compiled while the app builds', palette[:brass]]], 49, 170)
+  body << legend(palette, [['Mica::Regex, compiled at run time', palette[:blue]], ['Mica::Regex.static, compiled while the app builds', palette[:brass]]], 49, 186)
   [1, 2, 5, 10, 20].each do |tick|
     tick_x = scale.call(tick.to_f).round(1)
     body << %(<line x1="#{tick_x}" x2="#{tick_x}" y1="#{top - 6}" y2="#{top + REGEX_ROWS.size * row_height - 10}" stroke="#{palette[:grid]}" stroke-width="#{tick == 1 ? 2 : 1}"/>)
-    body << text_at('FiraMono-Regular', 13, 0, "#{tick}×", left: tick_x, baseline: top + REGEX_ROWS.size * row_height + 12, fill: palette[:faint], anchor: :middle)
+    body << text_at('FiraMono-Regular', 15, 0, "#{tick}×", left: tick_x, baseline: top + REGEX_ROWS.size * row_height + 14, fill: palette[:faint], anchor: :middle)
   end
-  body << text_at('Manrope-400', 13.5, 0, '1× = PCRE2-JIT (log scale)', left: axis_left, baseline: top + REGEX_ROWS.size * row_height + 36, fill: palette[:faint])
+  body << text_at('Manrope-400', 15.5, 0, '1× = PCRE2-JIT (log scale)', left: axis_left, baseline: top + REGEX_ROWS.size * row_height + 42, fill: palette[:faint])
   REGEX_ROWS.each_with_index do |(metric, note, runtime, static), index|
     row_top = top + index * row_height
-    body << text_at('Manrope-700', 18, 0, metric, left: 49, baseline: row_top + 30, fill: palette[:text])
-    body << text_at('Manrope-400', 14, 0, note, left: 49, baseline: row_top + 52, fill: palette[:muted])
-    [[runtime, palette[:blue], 6], [static, palette[:brass], 46]].each do |(times, color, offset)|
+    body << text_at('Manrope-700', 21, 0, metric, left: 49, baseline: row_top + 32, fill: palette[:text])
+    body << text_at('Manrope-400', 16, 0, note, left: 49, baseline: row_top + 56, fill: palette[:muted])
+    [[runtime, palette[:blue], 6], [static, palette[:brass], 50]].each do |(times, color, offset)|
       factor = times[1] / times[0]
       bar_top = row_top + offset
       bar_end = scale.call(factor)
       label = "#{fmt_factor(factor)}× as fast"
       detail = "#{time_label(times[0])} vs #{time_label(times[1])}"
-      body << %(<rect x="#{axis_left}" y="#{bar_top}" width="#{(bar_end - axis_left).round(1)}" height="32" rx="6" fill="#{color}"/>)
-      label_width = text_width('Manrope-700', 16, 0, label)
-      if bar_end - axis_left > label_width + text_width('FiraMono-Regular', 12.5, 0, detail) + 60
-        body << text_at('Manrope-700', 16, 0, label, left: bar_end - 14, baseline: bar_top + 22, fill: palette[:panel], anchor: :end)
-        body << text_at('FiraMono-Regular', 12.5, 0, detail, left: axis_left + 14, baseline: bar_top + 21, fill: palette[:panel])
+      body << %(<rect x="#{axis_left}" y="#{bar_top}" width="#{(bar_end - axis_left).round(1)}" height="36" rx="6" fill="#{color}"/>)
+      label_width = text_width('Manrope-700', 19, 0, label)
+      if bar_end - axis_left > label_width + text_width('FiraMono-Regular', 14.5, 0, detail) + 60
+        body << text_at('Manrope-700', 19, 0, label, left: bar_end - 14, baseline: bar_top + 25, fill: palette[:panel], anchor: :end)
+        body << text_at('FiraMono-Regular', 14.5, 0, detail, left: axis_left + 14, baseline: bar_top + 24, fill: palette[:panel])
       else
-        body << text_at('Manrope-700', 16, 0, label, left: bar_end + 12, baseline: bar_top + 22, fill: palette[:text])
-        body << text_at('FiraMono-Regular', 12.5, 0, detail, left: bar_end + 24 + label_width, baseline: bar_top + 21, fill: palette[:muted])
+        body << text_at('Manrope-700', 19, 0, label, left: bar_end + 12, baseline: bar_top + 25, fill: palette[:text])
+        body << text_at('FiraMono-Regular', 14.5, 0, detail, left: bar_end + 24 + label_width, baseline: bar_top + 24, fill: palette[:muted])
       end
     end
   end
@@ -135,11 +135,11 @@ AMBER_ROWS = [
 
 def amber_chart(palette)
   width = 1280
-  row_height = 54
-  top = 176
-  height = top + AMBER_ROWS.size * row_height + 86
-  axis_left = 450
-  axis_width = 720
+  row_height = 64
+  top = 196
+  height = top + AMBER_ROWS.size * row_height + 96
+  axis_left = 480
+  axis_width = 690
   max_factor = 3.5
   scale = lambda { |factor| axis_left + factor / max_factor * axis_width }
   body = chart_frame(palette, width, height, 'The patterns Amber apps run, on first use',
@@ -148,21 +148,21 @@ def amber_chart(palette)
   [0, 1, 2, 3].each do |tick|
     tick_x = scale.call(tick.to_f).round(1)
     body << %(<line x1="#{tick_x}" x2="#{tick_x}" y1="#{top - 8}" y2="#{top + AMBER_ROWS.size * row_height}" stroke="#{tick == 1 ? palette[:faint] : palette[:grid]}" stroke-width="#{tick == 1 ? 1.5 : 1}"#{tick == 1 ? ' stroke-dasharray="4 4"' : ''}/>)
-    body << text_at('FiraMono-Regular', 13, 0, "#{tick}×", left: tick_x, baseline: top + AMBER_ROWS.size * row_height + 22, fill: palette[:faint], anchor: :middle)
+    body << text_at('FiraMono-Regular', 15, 0, "#{tick}×", left: tick_x, baseline: top + AMBER_ROWS.size * row_height + 24, fill: palette[:faint], anchor: :middle)
   end
-  body << text_at('Manrope-400', 13.5, 0, '1× = PCRE2-JIT', left: scale.call(1.0) + 8, baseline: top - 14, fill: palette[:faint])
+  body << text_at('Manrope-400', 15.5, 0, '1× = PCRE2-JIT', left: scale.call(1.0) + 8, baseline: top - 16, fill: palette[:faint])
   AMBER_ROWS.each_with_index do |(group, note, cases, mica, pcre), index|
     row_top = top + index * row_height
     factor = pcre / mica
-    body << text_at('Manrope-700', 17, 0, group, left: 49, baseline: row_top + 22, fill: palette[:text])
-    body << text_at('Manrope-400', 13.5, 0, "#{note} · #{cases} cases", left: 49, baseline: row_top + 41, fill: palette[:muted])
+    body << text_at('Manrope-700', 20, 0, group, left: 49, baseline: row_top + 24, fill: palette[:text])
+    body << text_at('Manrope-400', 15.5, 0, "#{note} · #{cases} cases", left: 49, baseline: row_top + 46, fill: palette[:muted])
     bar_end = scale.call(factor)
-    body << %(<rect x="#{axis_left}" y="#{row_top + 6}" width="#{(bar_end - axis_left).round(1)}" height="30" rx="6" fill="#{palette[:blue]}"/>)
-    body << text_at('FiraMono-Regular', 12.5, 0, "#{format('%.2f', mica)} µs vs #{format('%.2f', pcre)} µs", left: axis_left + 14, baseline: row_top + 26, fill: palette[:panel])
-    body << text_at('Manrope-700', 16, 0, "#{format('%.1f', factor)}× as fast", left: bar_end + 12, baseline: row_top + 27, fill: palette[:text])
+    body << %(<rect x="#{axis_left}" y="#{row_top + 8}" width="#{(bar_end - axis_left).round(1)}" height="36" rx="6" fill="#{palette[:blue]}"/>)
+    body << text_at('FiraMono-Regular', 14.5, 0, "#{format('%.2f', mica)} µs vs #{format('%.2f', pcre)} µs", left: axis_left + 14, baseline: row_top + 31, fill: palette[:panel])
+    body << text_at('Manrope-700', 19, 0, "#{format('%.1f', factor)}× as fast", left: bar_end + 12, baseline: row_top + 32, fill: palette[:text])
   end
   total = 552.64 / 210.91
-  body << text_at('Manrope-700', 17, 0, "All 104 Amber cases: #{format('%.1f', total)}× as fast (210.91 µs vs 552.64 µs).", left: 49, baseline: height - 30, fill: palette[:text])
+  body << text_at('Manrope-700', 20, 0, "All 104 Amber cases: #{format('%.1f', total)}× as fast (210.91 µs vs 552.64 µs).", left: 49, baseline: height - 30, fill: palette[:text])
   svg_open(width, height, 'The patterns Amber apps run, on first use',
            'Process-cold times, Mica::Regex against PCRE2 with JIT. ' +
            AMBER_ROWS.map { |group, _, cases, mica, pcre| "#{group} (#{cases} cases): #{format('%.1f', pcre / mica)} times as fast, #{mica} µs vs #{pcre} µs" }.join('; ') +
@@ -173,21 +173,21 @@ end
 # ---------------------------------------------------------------- ReDoS panel
 def redos_panel(palette)
   width = 1280
-  height = 250
+  height = 296
   body = chart_frame(palette, width, height, 'Hostile patterns finish',
                      ['112 ReDoS cases from 13 families: (a+)+$, the OWASP email pattern, Cloudflare 2019, Stack Overflow 2016 and more.'])
   stats = [
     ['8.8×', 'as fast, warm search', '330.1 ns vs 2.91 µs per search', palette[:blue]],
-    ['0', 'limits hit by Mica::Regex', 'PCRE2-JIT stopped on a limit 28 times and timed out once', palette[:brass]],
+    ['0', 'limits hit by Mica::Regex', 'PCRE2-JIT: 28 limit stops, 1 timeout', palette[:brass]],
     ['13 of 13', 'families inside 1,000 ms', 'growth slopes 0.81 to 1.0: linear in the input', palette[:amber]]
   ]
   column = (width - 96) / 3.0
   stats.each_with_index do |(big, label, detail, color), index|
     left = 49 + index * column
-    body << %(<rect x="#{left.round(1)}" y="128" width="4" height="84" rx="2" fill="#{color}"/>)
-    body << text_at('Fraunces-700', 44, -0.01, big, left: left + 20, baseline: 172, fill: color)
-    body << text_at('Manrope-700', 16, 0, label, left: left + 20, baseline: 196, fill: palette[:text])
-    body << text_at('Manrope-400', 13.5, 0, detail, left: left + 20, baseline: 216, fill: palette[:muted])
+    body << %(<rect x="#{left.round(1)}" y="140" width="4" height="112" rx="2" fill="#{color}"/>)
+    body << text_at('Fraunces-700', 54, -0.01, big, left: left + 22, baseline: 192, fill: color)
+    body << text_at('Manrope-700', 19, 0, label, left: left + 22, baseline: 222, fill: palette[:text])
+    body << text_at('Manrope-400', 16, 0, detail, left: left + 22, baseline: 246, fill: palette[:muted])
   end
   svg_open(width, height, 'Hostile patterns finish',
            'Across 112 ReDoS cases, Mica::Regex is 8.8 times as fast on warm search (330.1 ns vs 2.91 µs) and hits no limit; PCRE2 with JIT stopped on its match or JIT stack limit 28 times and timed out once. All 13 ReDoS families finish within 1,000 ms, with growth slopes from 0.81 to 1.0.') +
@@ -203,11 +203,11 @@ INFLATE_ROWS = [
 
 def inflate_chart(palette)
   width = 1280
-  row_height = 70
-  top = 176
-  height = top + INFLATE_ROWS.size * row_height + 92
-  axis_left = 440
-  axis_width = 680
+  row_height = 82
+  top = 200
+  height = top + INFLATE_ROWS.size * row_height + 96
+  axis_left = 480
+  axis_width = 620
   max_factor = 2.5
   scale = lambda { |factor| axis_left + factor / max_factor * axis_width }
   body = chart_frame(palette, width, height, 'Inflate against system zlib',
@@ -217,22 +217,22 @@ def inflate_chart(palette)
     tick_x = scale.call(tick.to_f).round(1)
     body << %(<line x1="#{tick_x}" x2="#{tick_x}" y1="#{top - 8}" y2="#{top + INFLATE_ROWS.size * row_height}" stroke="#{tick.zero? ? palette[:grid] : palette[:faint]}" stroke-width="1.5"#{tick.zero? ? '' : ' stroke-dasharray="4 4"'}/>)
   end
-  body << text_at('Manrope-400', 13.5, 0, 'zlib', left: scale.call(1.0), baseline: top - 14, fill: palette[:faint], anchor: :middle)
-  body << text_at('Manrope-400', 13.5, 0, 'Z1 bar: 2× slower', left: scale.call(2.0), baseline: top - 14, fill: palette[:faint], anchor: :middle)
+  body << text_at('Manrope-400', 15.5, 0, 'zlib', left: scale.call(1.0), baseline: top - 14, fill: palette[:faint], anchor: :middle)
+  body << text_at('Manrope-400', 15.5, 0, 'Z1 bar: 2× slower', left: scale.call(2.0), baseline: top - 14, fill: palette[:faint], anchor: :middle)
   INFLATE_ROWS.each_with_index do |(mode, note, factor, speed, low, high), index|
     row_top = top + index * row_height
-    body << text_at('Manrope-700', 17, 0, mode, left: 49, baseline: row_top + 26, fill: palette[:text])
-    body << text_at('Manrope-400', 13.5, 0, note, left: 49, baseline: row_top + 46, fill: palette[:muted])
+    body << text_at('Manrope-700', 20, 0, mode, left: 49, baseline: row_top + 30, fill: palette[:text])
+    body << text_at('Manrope-400', 15.5, 0, note, left: 49, baseline: row_top + 54, fill: palette[:muted])
     zlib_end = scale.call(1.0)
     bar_end = scale.call(factor)
-    body << %(<rect x="#{axis_left}" y="#{row_top + 10}" width="#{(zlib_end - axis_left).round(1)}" height="34" rx="6" fill="#{palette[:bar_track]}" stroke="#{palette[:panel_edge]}"/>)
-    body << %(<rect x="#{zlib_end.round(1)}" y="#{row_top + 10}" width="#{(bar_end - zlib_end).round(1)}" height="34" rx="0" fill="#{palette[:brass]}" fill-opacity=".85"/>)
-    body << %(<rect x="#{axis_left}" y="#{row_top + 10}" width="#{(bar_end - axis_left).round(1)}" height="34" rx="6" fill="none" stroke="#{palette[:brass]}" stroke-width="1.5"/>)
-    body << text_at('FiraMono-Regular', 12.5, 0, 'zlib time', left: axis_left + 14, baseline: row_top + 32, fill: palette[:muted])
-    body << text_at('Manrope-700', 16, 0, "#{format('%.2f', factor)}× slower", left: [bar_end, scale.call(2.0)].max + 14, baseline: row_top + 27, fill: palette[:text])
-    body << text_at('FiraMono-Regular', 12, 0, "95%: #{format('%.2f', 1 / high)} to #{format('%.2f', 1 / low)}", left: [bar_end, scale.call(2.0)].max + 14, baseline: row_top + 45, fill: palette[:muted])
+    body << %(<rect x="#{axis_left}" y="#{row_top + 12}" width="#{(zlib_end - axis_left).round(1)}" height="40" rx="6" fill="#{palette[:bar_track]}" stroke="#{palette[:panel_edge]}"/>)
+    body << %(<rect x="#{zlib_end.round(1)}" y="#{row_top + 12}" width="#{(bar_end - zlib_end).round(1)}" height="40" rx="0" fill="#{palette[:brass]}" fill-opacity=".85"/>)
+    body << %(<rect x="#{axis_left}" y="#{row_top + 12}" width="#{(bar_end - axis_left).round(1)}" height="40" rx="6" fill="none" stroke="#{palette[:brass]}" stroke-width="1.5"/>)
+    body << text_at('FiraMono-Regular', 14.5, 0, 'zlib time', left: axis_left + 14, baseline: row_top + 37, fill: palette[:muted])
+    body << text_at('Manrope-700', 19, 0, "#{format('%.2f', factor)}× slower", left: [bar_end, scale.call(2.0)].max + 14, baseline: row_top + 31, fill: palette[:text])
+    body << text_at('FiraMono-Regular', 14, 0, "95%: #{format('%.2f', 1 / high)} to #{format('%.2f', 1 / low)}", left: [bar_end, scale.call(2.0)].max + 14, baseline: row_top + 53, fill: palette[:muted])
   end
-  body << text_at('Manrope-400', 15, 0, 'The Z1 milestone allowed up to 2× slower than zlib one-shot, and every mode is inside it.', left: 49, baseline: height - 32, fill: palette[:muted])
+  body << text_at('Manrope-400', 17, 0, 'The Z1 milestone allowed up to 2× slower than zlib one-shot, and every mode is inside it.', left: 49, baseline: height - 32, fill: palette[:muted])
   svg_open(width, height, 'Inflate against system zlib',
            'Decode time relative to system zlib, geometric means over 93 cases. One-shot: 1.45 times slower. Streaming with 64 KiB buffers: 1.83 times slower. Against zlib reusing one output buffer: 1.86 times slower. The Z1 bar was no more than 2 times slower.') +
     body.join("\n") + '</svg>'
