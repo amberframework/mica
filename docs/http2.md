@@ -142,4 +142,16 @@ cc -O2 -I/tmp/nghttp2/prefix/include bench/hpack/nghttp2_runner.c /tmp/nghttp2/p
 /usr/bin/ruby bench/hpack/run_ab.rb bench/bin/hpack/mica_runner bench/bin/hpack/nghttp2_runner bench/data/hpack/corpus.bin 10 bench/data/hpack/run
 ```
 
-SPEED_RESULT
+On m4-mini-01 (Apple M4 Mac mini, 10 cores), 10 rounds, each keeping each
+engine's median of 15 timed passes over every story of the 14
+implementation directories (548,382 fields, 8,436,756 block bytes, one
+decoder per story):
+
+| Engine | Median pass | Block MB/s |
+|---|---|---|
+| Mica | 22.90 ms | 368.4 |
+| nghttp2 1.71.0 | 31.42 ms | 268.5 |
+
+Mica decodes **1.37× as fast as** nghttp2 (median of the per-round ratios
+1.373; bootstrap 95% interval 1.344 to 1.441). Both decoders produce the
+same field count and field bytes on every pass.
