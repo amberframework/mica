@@ -17,7 +17,7 @@ mode, path, reps = ARGV[0], ARGV[1], ARGV[2].to_i
 input = File.read(path).to_slice
 expected = ARGV[3].to_i
 chunk = Bytes.new(65_536)
-decode = ->do
+decode = -> do
   if mode == "oneshot"
     output = Bytes.new(expected)
     size = LibC::SizeT.new(expected)

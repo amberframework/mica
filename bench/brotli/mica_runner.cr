@@ -10,7 +10,7 @@ mode, path, reps = ARGV[0], ARGV[1], ARGV[2].to_i
 input = File.read(path).to_slice
 limits = Mica::Brotli::DecodeLimits::TRUSTED_ASSET
 buffer = Bytes.new(65_536)
-decode = ->do
+decode = -> do
   if mode == "oneshot"
     Mica::Brotli.decode(input, limits: limits, timeout: nil).size
   else
