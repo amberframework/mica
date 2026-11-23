@@ -36,6 +36,8 @@ module Mica::Brotli
     @cache : StaticArray(Int32, 4) = INITIAL_CACHE
     @commands = [] of Command
     @next_insert = 0
+    @dictionary_lookups = 0_i64
+    @dictionary_hits = 0_i64
     @header_written = false
     @metablock_writer : MetablockWriter
 
@@ -45,7 +47,9 @@ module Mica::Brotli
       Encoder.check(@quality, @window_bits)
       @max_backward = (1 << @window_bits) - 16
       @metablock_size = @quality <= 4 ? 1 << 18 : 1 << 20
-      hash_bits = Math.min(HASH_BITS[@quality], @window_bits + 1)
+      # A small input needs no more hash buckets than about twice its positions.
+      size_bits = Math.max(10, 33 - Math.max(history_size, 1).leading_zeros_count)
+      hash_bits = Math.min(Math.min(HASH_BITS[@quality], @window_bits + 1), size_bits)
       chain = Math.min(Math.min(history_size, 1 << @window_bits), MAX_CHAIN)
       @finder = MatchFinder.new(hash_bits, chain, CHAIN_DEPTH[@quality])
       @metablock_writer = MetablockWriter.new(@quality)
@@ -234,13 +238,21 @@ module Mica::Brotli
       end
       length, distance, score = @finder.find(input, position, limit, max_distance, NICE_LENGTH[@quality])
       best = Match.new(length, length, distance, score, false) if length > 0 && score > best.score
-      if @quality >= 4 && best.output < 12
+      if @quality >= 4 && best.output == 0 && dictionary_worth_trying?
+        @dictionary_lookups += 1
         output, word_length, word_id, score = DictionaryMatcher.find(input, position, limit, max_distance, best.score)
         if output > 0
+          @dictionary_hits += 1
           best = Match.new(output, word_length, max_distance + 1 + word_id, score, true)
         end
       end
       best
+    end
+
+    # Dictionary lookups stop paying once fewer than 1 in 128 finds a
+    # word (google/brotli keeps the same ratio).
+    private def dictionary_worth_trying? : Bool
+      @dictionary_lookups < 128 || @dictionary_hits * 128 >= @dictionary_lookups
     end
 
     # Adds a command of *insert* literals followed by *match*.

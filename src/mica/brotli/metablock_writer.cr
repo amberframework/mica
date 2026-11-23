@@ -143,7 +143,9 @@ module Mica::Brotli
     # 5, one cluster.
     private def choose_literal_model(input : Bytes, start : Int32, commands : Array(Command)) : {Int32, Bytes, Int32}
       single = Bytes.new(64, 0_u8)
-      return {MODE_LSB6, single, 1} if @quality < 5
+      literal_count = commands.sum(0_i64) { |entry| entry.insert.to_i64 }
+      # Few literals cannot pay for extra prefix codes.
+      return {MODE_LSB6, single, 1} if @quality < 5 || literal_count < 1024
       best = {MODE_LSB6, single, 1}
       best_cost = Float64::MAX
       {MODE_UTF8, MODE_SIGNED}.each do |mode|
