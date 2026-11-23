@@ -1,9 +1,9 @@
-# The encoder pipeline of qualities 5 to 9 is a port of google/brotli 1.2.1's
-# libbrotlienc (MIT license, copyright the Brotli Authors; the license
-# text is in LICENSE.google-brotli next to this file): the same
-# hashers, backward reference search, greedy block splitting and
-# bit stream layout, written for Crystal over a flat input buffer instead
-# of a ring buffer.
+# The encoder pipeline of qualities 5 to 11 is a port of google/brotli
+# 1.2.1's libbrotlienc (MIT license, copyright the Brotli Authors; the
+# license text is in LICENSE.google-brotli next to this file): the same
+# hashers, backward reference search, optimal parse, block splitting,
+# clustering and bit stream layout, written for Crystal over a flat input
+# buffer instead of a ring buffer.
 module Mica::Brotli::Encode
   NUM_DISTANCE_SHORT_CODES =  16
   NUM_LITERAL_SYMBOLS      = 256

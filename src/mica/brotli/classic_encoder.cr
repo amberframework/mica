@@ -1,20 +1,16 @@
 module Mica::Brotli
-  # The Brotli encoder (RFC 7932) behind `Brotli.encode` and
-  # `Brotli::Writer`. It turns input into metablocks: LZ77 commands from
-  # hash chains (greedy, lazy, or an optimal parse from quality 10) with
-  # the four-entry distance cache and static dictionary references, then
-  # `MetablockWriter` models and writes them. A metablock that would not
-  # be smaller than its bytes is stored uncompressed.
+  # The earlier Brotli encoder, which `Encoder` uses for qualities 0 to 4.
+  # It turns input into metablocks: LZ77 commands from hash chains
+  # (greedy, or lazy at 4) with the four-entry distance cache and static
+  # dictionary references, then `MetablockWriter` models and writes them.
+  # A metablock that would not be smaller than its bytes is stored
+  # uncompressed.
   #
-  # Quality sets the effort:
-  #
-  # | Quality | Matching | Modeling |
-  # |---|---|---|
-  # | 0, 1 | one candidate per hash, greedy | one prefix code per category |
-  # | 2, 3 | hash chains of 4 and 8, distance cache | same |
-  # | 4 | chains of 16, lazy matching, dictionary | same |
-  # | 5 to 9 | chains of 16 to 256, lazy | literal context modeling and block splitting |
-  # | 10, 11 | optimal parse over chains of 64 and 256 | same |
+  # | Quality | Matching |
+  # |---|---|
+  # | 0, 1 | one candidate per hash, greedy |
+  # | 2, 3 | hash chains of 4 and 8, distance cache |
+  # | 4 | chains of 16, lazy matching, dictionary |
   #
   # :nodoc:
   class ClassicEncoder
@@ -131,11 +127,7 @@ module Mica::Brotli
     private def write_metablock(writer : BitWriter, input : Bytes, start : Int32, length : Int32,
                                 stream_offset : Int64, is_last : Bool) : Nil
       saved_cache = @cache
-      if @quality >= 10
-        optimal_parse(input, start, start + length, stream_offset)
-      else
-        parse(input, start, start + length, stream_offset)
-      end
+      parse(input, start, start + length, stream_offset)
       mark = writer.mark
       @metablock_writer.write(writer, input, start, length, @commands, is_last)
       used = writer.bit_size - mark.position
