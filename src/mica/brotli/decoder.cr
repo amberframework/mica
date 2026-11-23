@@ -186,6 +186,9 @@ module Mica::Brotli
     # The tree of the current literal block when its context map row names
     # one tree, else -1.
     @literal_tree_fixed : Int32 = -1
+    # Per literal block type: the tree its whole context map row names, or
+    # -1 when the row names more than one (worked out once per header).
+    @fixed_tree_by_type = StaticArray(Int32, 256).new(-1)
 
     def initialize(@limits : DecodeLimits)
       @meter = Core::WorkMeter.new(@limits.work_budget(nil))
@@ -534,6 +537,7 @@ module Mica::Brotli
       distance_trees.times { @distance_trees << read_prefix_code(distance_alphabet, distance_alphabet) }
 
       @meter.enforce { position } if @meter.charge(@table.size)
+      find_fixed_literal_trees(literal_types)
       select_literal_block
       @command_tree = @command_trees.unsafe_fetch(0)
       @distance_map_offset = 0
@@ -842,11 +846,23 @@ module Mica::Brotli
       block_type = @block_type[0]
       @context_lookup_offset = @context_modes[block_type].to_i32 << 9
       @literal_map_offset = block_type << 6
-      row = @literal_map.to_unsafe + @literal_map_offset
-      first = row[0]
-      @literal_tree_fixed = -1
-      return unless (1...64).all? { |index| row[index] == first }
-      @literal_tree_fixed = @literal_trees.unsafe_fetch(first.to_i32)
+      @literal_tree_fixed = @fixed_tree_by_type.unsafe_fetch(block_type)
+    end
+
+    # Fills `@fixed_tree_by_type` for the *types* literal block types: a
+    # row of 64 equal context map entries (compared as eight 8-byte words)
+    # always selects the same tree.
+    private def find_fixed_literal_trees(types : Int32) : Nil
+      map = @literal_map.to_unsafe
+      types.times do |block_type|
+        row = map + (block_type << 6)
+        pattern = row[0].to_u64 &* 0x0101010101010101_u64
+        same = true
+        8.times do |word|
+          same = false unless (row + (word << 3)).as(UInt64*).value == pattern
+        end
+        @fixed_tree_by_type[block_type] = same ? @literal_trees.unsafe_fetch(row[0].to_i32) : -1
+      end
     end
 
     # --- Output ---------------------------------------------------------
