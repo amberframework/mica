@@ -66,6 +66,30 @@ rescue Mica::Encoding::ConversionError
   "<error>"
 end
 
+# The kind of a decode divergence.
+def decode_kind(iconv : Outcome, mica : Outcome) : String
+  if iconv.text.nil? && mica.text
+    "iconv rejects, Mica decodes"
+  elsif iconv.text && mica.text.nil?
+    "Mica rejects, iconv decodes"
+  elsif iconv.text && mica.text
+    "both decode, different text"
+  else
+    "both reject, skip output differs"
+  end
+end
+
+# The kind of an encode divergence.
+def encode_kind(iconv : String, mica : String) : String
+  if iconv == "<error>"
+    "Mica writes, iconv rejects"
+  elsif mica == "<error>"
+    "iconv writes, Mica rejects"
+  else
+    "both write, different bytes"
+  end
+end
+
 def random_bytes(random : Random) : Bytes
   Bytes.new(random.rand(1..24)) do
     case random.rand(10)
@@ -107,18 +131,18 @@ seed = (ARGV[0]? || abort("usage: iconv_differential SEED CASES [report.tsv]")).
 cases = (ARGV[1]? || abort("usage: iconv_differential SEED CASES [report.tsv]")).to_i
 report = ARGV[2]?
 
-groups = Hash({String, String, String}, {Int32, String}).new
+groups = Hash({String, String, String, String}, {Int32, String}).new
 total_divergent = 0
 unsupported = [] of String
 NAMES.each do |name|
   codec = Mica::Encoding.lookup!(name, Mica::Encoding::LabelRule::IconvCompatible)
   begin
-    String.new(Bytes[0x41], name)
+    "A".encode(name)
   rescue ArgumentError
     unsupported << name
     next
   end
-  random = Random::PCG32.new(seed, name.hash)
+  random = Random::PCG32.new(seed, NAMES.index!(name).to_u64)
   divergent = 0
   cases.times do
     bytes = random_bytes(random)
@@ -127,7 +151,7 @@ NAMES.each do |name|
     window = shrink(bytes) { |candidate| iconv_decode(candidate, name) != mica_decode(candidate, codec) }
     expected = iconv_decode(window, name)
     actual = mica_decode(window, codec)
-    key = {name, "decode", window.hexstring}
+    key = {name, "decode", decode_kind(expected, actual), window.hexstring}
     count, _ = groups[key]? || {0, ""}
     groups[key] = {count + 1, "iconv #{expected.text.inspect}/#{expected.skipped.inspect} mica #{actual.text.inspect}/#{actual.skipped.inspect}"}
   end
@@ -137,25 +161,26 @@ NAMES.each do |name|
     next if iconv_encode(text, name) == mica_encode(text, codec)
     encode_divergent += 1
     first = text.chars.find { |char| iconv_encode(char.to_s, name) != mica_encode(char.to_s, codec) }
-    key = {name, "encode", first ? "U+%04X" % first.ord : "context:#{text.inspect}"}
-    count, _ = groups[key]? || {0, ""}
     sample = first ? first.to_s : text
+    key = {name, "encode", encode_kind(iconv_encode(sample, name), mica_encode(sample, codec)), first ? "U+%04X" % first.ord : "context:#{text.inspect}"}
+    count, _ = groups[key]? || {0, ""}
     groups[key] = {count + 1, "iconv #{iconv_encode(sample, name)} mica #{mica_encode(sample, codec)}"}
   end
   total_divergent += divergent + encode_divergent
   puts "#{name.ljust(12)} decode #{divergent} / #{cases} diverge, encode #{encode_divergent} / #{cases // 4} diverge"
 end
 puts "not supported by this iconv: #{unsupported.join(", ")}" unless unsupported.empty?
-by_encoding = groups.keys.group_by { |key| {key[0], key[1]} }
-puts "seed=#{seed} cases=#{cases} divergent=#{total_divergent} distinct_groups=#{groups.size}"
-by_encoding.each do |(name, direction), keys|
-  puts "  #{name} #{direction}: #{keys.size} groups, e.g. #{keys.first(3).map { |key| "#{key[2]} (#{groups[key][1]})" }.join("; ")}"
+by_kind = groups.keys.group_by { |key| {key[0], key[1], key[2]} }
+puts "seed=#{seed} cases=#{cases} divergent=#{total_divergent} distinct_inputs=#{groups.size} kinds=#{by_kind.size}"
+by_kind.each do |(name, direction, kind), keys|
+  cases_in_kind = keys.sum { |key| groups[key][0] }
+  puts "  #{name}\t#{direction}\t#{kind}\t#{cases_in_kind} cases\t#{keys.size} minimal inputs\te.g. #{keys.first(3).map { |key| "#{key[3]} (#{groups[key][1]})" }.join("; ")}"
 end
 if report
   File.open(report, "w") do |file|
-    file << "encoding\tdirection\tminimal input\tcount\tbehavior\n"
+    file << "encoding\tdirection\tkind\tminimal input\tcount\tbehavior\n"
     groups.to_a.sort_by! { |key, _| key }.each do |key, value|
-      file << key[0] << '\t' << key[1] << '\t' << key[2] << '\t' << value[0] << '\t' << value[1] << '\n'
+      file << key[0] << "\t" << key[1] << "\t" << key[2] << "\t" << key[3] << "\t" << value[0] << "\t" << value[1] << "\n"
     end
   end
 end
