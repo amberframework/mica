@@ -366,11 +366,11 @@ module Mica::Encoding
   class SingleByteEncoder < Encoder
     include EncoderLoop
 
-    @tables : {Slice(UInt16), Slice(UInt8), Slice(UInt32), Slice(UInt8)}?
+    @reverse : ReverseTable?
 
     def initialize(codec : Codec, error_mode : ErrorMode)
       super(codec, error_mode)
-      @tables = Tables.single_byte_encode_tables(codec)
+      @reverse = Tables.single_byte_reverse(codec)
     end
 
     private def encode_code_point(code_point : Int32, output : Bytes, written : Int32) : Int32
@@ -378,8 +378,8 @@ module Mica::Encoding
         output[written] = code_point.to_u8!
         return written + 1
       end
-      offset = if tables = @tables
-                 Tables.reverse(code_point, *tables)
+      offset = if reverse = @reverse
+                 reverse.pointer_for(code_point)
                elsif @codec.iso8859_1?
                  code_point <= 0xFF ? code_point - 0x80 : -1
                elsif @codec.x_user_defined?

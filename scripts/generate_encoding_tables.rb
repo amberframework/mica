@@ -11,7 +11,10 @@
 # Every input file's sha256 is checked against conformance/encoding/MANIFEST
 # before it is read; a mismatch stops the script and names the file. Each
 # generated file starts with the commit and the sha256 of the files it came
-# from. Tables are `Slice.literal`s, which compile to read-only data.
+# from. Tables are `Slice.literal`s, which compile to read-only data; the
+# reverse lookups encoders use are built from them at run time, on first use
+# (`Mica::Encoding::ReverseTable`), so a program carries only the forward
+# indexes.
 #
 # Only the Ruby standard library is used (system /usr/bin/ruby).
 
@@ -93,38 +96,6 @@ def write(name, content)
   puts "wrote src/mica/encoding/tables/#{name}"
 end
 
-# A reverse table for the Basic Multilingual Plane: `pages` holds, for each
-# high byte, 0 or the 1-based number of a 256-entry block in `values`; each
-# entry is the value plus one (0 = unmapped). Code points above U+FFFF go in
-# a sorted pair list.
-def reverse_tables(pairs)
-  bmp = {}
-  astral = {}
-  pairs.each do |code_point, value|
-    target = code_point > 0xFFFF ? astral : bmp
-    target[code_point] = value unless target.key?(code_point)
-  end
-  pages = Array.new(256, 0)
-  values = []
-  bmp.keys.map { |cp| cp >> 8 }.uniq.sort.each_with_index do |page, number|
-    pages[page] = number + 1
-    block = Array.new(256, 0)
-    bmp.each { |cp, value| block[cp & 0xFF] = value + 1 if cp >> 8 == page }
-    values.concat(block)
-  end
-  sorted = astral.sort
-  [pages, values, sorted.map(&:first), sorted.map(&:last)]
-end
-
-def emit_reverse(io, prefix, pairs, value_type)
-  pages, values, astral_code_points, astral_values = reverse_tables(pairs)
-  io << "  # Reverse lookup (code point -> #{prefix.downcase.tr('_', ' ')}): see Mica::Encoding::Tables.reverse.\n"
-  io << "  #{prefix}_PAGES = #{literal('UInt16', pages)}\n\n"
-  io << "  #{prefix}_VALUES = #{literal(value_type, values)}\n\n"
-  io << "  #{prefix}_ASTRAL_CODE_POINTS = #{literal('UInt32', astral_code_points)}\n\n"
-  io << "  #{prefix}_ASTRAL_VALUES = #{literal(value_type, astral_values)}\n\n"
-end
-
 FileUtils.mkdir_p(OUTPUT)
 
 # --- Labels ---------------------------------------------------------------
@@ -163,7 +134,6 @@ write('single_byte.cr', build do |io|
     end
     io << "  # #{name}: bytes 0x80 to 0xFF; 0 means no code point.\n"
     io << "  #{constant} = #{literal('UInt16', forward)}\n\n"
-    emit_reverse(io, "#{constant}_ENCODE", index.map { |pointer, cp| [cp, pointer] }, 'UInt8')
   end
   io << "end\n"
 end)
@@ -185,9 +155,7 @@ write('jis0208.cr', build do |io|
   io << "module Mica::Encoding::Tables\n"
   io << "  JIS0208 = #{literal('UInt16', forward_table(jis0208, 'jis0208'))}\n\n"
   # Index pointer: the first pointer for a code point.
-  emit_reverse(io, 'JIS0208_ENCODE', jis0208.map { |pointer, cp| [cp, pointer] }, 'UInt16')
   # Index Shift_JIS pointer: the first pointer outside 8272 to 8835.
-  emit_reverse(io, 'SHIFT_JIS_ENCODE', jis0208.reject { |pointer, _| pointer.between?(8272, 8835) }.map { |pointer, cp| [cp, pointer] }, 'UInt16')
   io << "end\n"
 end)
 
@@ -212,7 +180,6 @@ write('euc_kr.cr', build do |io|
   header(io, ['index-euc-kr.txt'], 'Index EUC-KR.')
   io << "module Mica::Encoding::Tables\n"
   io << "  EUC_KR = #{literal('UInt16', forward_table(euc_kr, 'euc-kr'))}\n\n"
-  emit_reverse(io, 'EUC_KR_ENCODE', euc_kr.map { |pointer, cp| [cp, pointer] }, 'UInt16')
   io << "end\n"
 end)
 
@@ -222,7 +189,6 @@ write('gb18030.cr', build do |io|
   header(io, ['index-gb18030.txt', 'index-gb18030-ranges.txt'], 'Index gb18030 and index gb18030 ranges.')
   io << "module Mica::Encoding::Tables\n"
   io << "  GB18030 = #{literal('UInt16', forward_table(gb18030, 'gb18030'))}\n\n"
-  emit_reverse(io, 'GB18030_ENCODE', gb18030.map { |pointer, cp| [cp, pointer] }, 'UInt16')
   io << "  # Index gb18030 ranges: pointer offsets and their code point offsets, both ascending.\n"
   io << "  GB18030_RANGE_POINTERS = #{literal('UInt32', ranges.map(&:first))}\n\n"
   io << "  GB18030_RANGE_CODE_POINTS = #{literal('UInt32', ranges.map(&:last))}\n"
@@ -230,25 +196,9 @@ write('gb18030.cr', build do |io|
 end)
 
 big5 = read_index('big5')
-big5_last = [0x2550, 0x255E, 0x2561, 0x256A, 0x5341, 0x5345]
-# Index Big5 pointer: pointers below (0xA1 - 0x81) * 157 excluded, and the last
-# pointer for the six code points above.
-standard = big5.reject { |pointer, _| pointer < (0xA1 - 0x81) * 157 }
-big5_pairs = standard.map { |pointer, cp| [cp, pointer] }
-big5_last.each do |cp|
-  last = standard.select { |_, code_point| code_point == cp }.map(&:first).max
-  big5_pairs.reject! { |code_point, _| code_point == cp }
-  big5_pairs.unshift([cp, last])
-end
-# BIG5-HKSCS (iconv-compatible rule): the Big5 pointer where there is one,
-# otherwise the first pointer anywhere in the index, so the Hong Kong
-# Supplementary Character Set encodes too.
-hkscs_pairs = big5_pairs + big5.map { |pointer, cp| [cp, pointer] }
 write('big5.cr', build do |io|
   header(io, ['index-big5.txt'], 'Index Big5.')
   io << "module Mica::Encoding::Tables\n"
   io << "  BIG5 = #{literal('UInt32', forward_table(big5, 'big5'))}\n\n"
-  emit_reverse(io, 'BIG5_ENCODE', big5_pairs, 'UInt16')
-  emit_reverse(io, 'BIG5_HKSCS_ENCODE', hkscs_pairs, 'UInt16')
   io << "end\n"
 end)

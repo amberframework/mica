@@ -9,6 +9,75 @@ require "./tables/big5"
 
 # Lookups over the generated index tables (scripts/generate_encoding_tables.rb).
 # Every table is a read-only `Slice.literal`; nothing here allocates.
+module Mica::Encoding
+  # A reverse index (code point to pointer), built from a forward index
+  # the first time an encoder needs it. The Basic Multilingual Plane is a
+  # page map (one entry per high byte: 0, or the 1-based number of a
+  # 256-entry block whose entries are pointer + 1); code points above
+  # U+FFFF go in a hash. Built once per process (constants initialize
+  # lazily and under a lock) and read-only afterwards.
+  class ReverseTable
+    @pages = StaticArray(UInt16, 256).new(0_u16)
+    @values = [] of UInt16
+    @astral = {} of Int32 => Int32
+
+    # Indexes every pointer of *forward* from *first_pointer* on, outside
+    # *excluded*, keeping the first pointer for each code point.
+    def initialize(forward : Slice, first_pointer : Int32 = 0, excluded : Range(Int32, Int32)? = nil)
+      (first_pointer...forward.size).each do |pointer|
+        next if excluded && excluded.includes?(pointer)
+        code_point = forward.unsafe_fetch(pointer).to_i32
+        add(code_point, pointer, replace: false) unless code_point == 0
+      end
+    end
+
+    # Makes each of *code_points* map to its last pointer at or after
+    # *first_pointer* in *forward*.
+    def prefer_last(forward : Slice, code_points : Tuple, first_pointer : Int32) : self
+      code_points.each do |target|
+        last = (first_pointer...forward.size).reverse_each.find { |pointer| forward.unsafe_fetch(pointer).to_i32 == target }
+        add(target, last, replace: true) if last
+      end
+      self
+    end
+
+    # Adds the first pointer of every code point of *forward* still missing.
+    def fill_from(forward : Slice) : self
+      forward.each_with_index do |code_point, pointer|
+        add(code_point.to_i32, pointer, replace: false) unless code_point == 0
+      end
+      self
+    end
+
+    # Returns the pointer for *code_point*, or -1.
+    @[AlwaysInline]
+    def pointer_for(code_point : Int32) : Int32
+      if code_point <= 0xFFFF
+        page = @pages.unsafe_fetch(code_point >> 8).to_i32
+        return -1 if page == 0
+        @values.unsafe_fetch(((page - 1) << 8) | (code_point & 0xFF)).to_i32 - 1
+      else
+        @astral.fetch(code_point, -1)
+      end
+    end
+
+    private def add(code_point : Int32, pointer : Int32, replace : Bool) : Nil
+      if code_point > 0xFFFF
+        @astral[code_point] = pointer if replace || !@astral.has_key?(code_point)
+        return
+      end
+      page = @pages[code_point >> 8].to_i32
+      if page == 0
+        @values.concat(Array(UInt16).new(256, 0_u16))
+        page = @values.size // 256
+        @pages[code_point >> 8] = page.to_u16
+      end
+      slot = ((page - 1) << 8) | (code_point & 0xFF)
+      @values[slot] = (pointer + 1).to_u16 if replace || @values[slot] == 0
+    end
+  end
+end
+
 module Mica::Encoding::Tables
   # Returns the index code point for *pointer* in *index*, or -1 when the
   # pointer has none.
@@ -19,29 +88,24 @@ module Mica::Encoding::Tables
     code_point == 0 ? -1 : code_point
   end
 
-  # Returns the value a reverse table holds for *code_point* (a pointer, or
-  # for the single-byte tables the byte minus 0x80), or -1 when it holds
-  # none. A reverse table is four slices: a page map for the Basic
-  # Multilingual Plane (one entry per high byte: 0, or the 1-based number
-  # of a 256-entry block in *values*, whose entries are value + 1), and a
-  # sorted list of code points above U+FFFF with their values.
-  @[AlwaysInline]
-  def self.reverse(code_point : Int32, pages : Slice(UInt16), values : Slice(T), astral_code_points : Slice(UInt32), astral_values : Slice(T)) : Int32 forall T
-    if code_point <= 0xFFFF
-      page = pages.unsafe_fetch(code_point >> 8).to_i32
-      return -1 if page == 0
-      values.unsafe_fetch(((page - 1) << 8) | (code_point & 0xFF)).to_i32 - 1
-    else
-      found = astral_code_points.bsearch_index { |candidate| candidate >= code_point.to_u32 }
-      return -1 unless found && astral_code_points.unsafe_fetch(found) == code_point.to_u32
-      astral_values.unsafe_fetch(found).to_i32
-    end
-  end
+  # Reverse lookups, each built from its forward index on first use.
+  # Index pointer: the first pointer for a code point.
+  JIS0208_ENCODE = ReverseTable.new(JIS0208)
+  # Index Shift_JIS pointer: the first pointer outside 8272 to 8835.
+  SHIFT_JIS_ENCODE = ReverseTable.new(JIS0208, excluded: 8272..8835)
+  EUC_KR_ENCODE    = ReverseTable.new(EUC_KR)
+  GB18030_ENCODE   = ReverseTable.new(GB18030)
+  # Index Big5 pointer: pointers below (0xA1 - 0x81) * 157 excluded, and the
+  # last pointer for six code points.
+  BIG5_ENCODE = ReverseTable.new(BIG5, first_pointer: (0xA1 - 0x81) * 157).prefer_last(BIG5, {0x2550, 0x255E, 0x2561, 0x256A, 0x5341, 0x5345}, (0xA1 - 0x81) * 157)
+  # BIG5-HKSCS (iconv-compatible): the Big5 pointer where there is one,
+  # otherwise the first pointer anywhere in the index.
+  BIG5_HKSCS_ENCODE = ReverseTable.new(BIG5, first_pointer: (0xA1 - 0x81) * 157).prefer_last(BIG5, {0x2550, 0x255E, 0x2561, 0x256A, 0x5341, 0x5345}, (0xA1 - 0x81) * 157).fill_from(BIG5)
 
   {% for name in %w(JIS0208_ENCODE SHIFT_JIS_ENCODE EUC_KR_ENCODE GB18030_ENCODE BIG5_ENCODE BIG5_HKSCS_ENCODE) %}
     # Returns the pointer for *code_point* in this reverse table, or -1.
     def self.{{ name.downcase.id }}(code_point : Int32) : Int32
-      reverse(code_point, {{ name.id }}_PAGES, {{ name.id }}_VALUES, {{ name.id }}_ASTRAL_CODE_POINTS, {{ name.id }}_ASTRAL_VALUES)
+      {{ name.id }}.pointer_for(code_point)
     end
   {% end %}
 
@@ -82,20 +146,21 @@ module Mica::Encoding::Tables
     {% end %}
   end
 
-  # The reverse tables for a table-driven single-byte *codec*, or nil for
-  # the ones encoded by arithmetic (exact ISO-8859-1, x-user-defined,
-  # US-ASCII). Pass them to `reverse`; a value is the byte minus 0x80.
-  def self.single_byte_encode_tables(codec : Codec) : {Slice(UInt16), Slice(UInt8), Slice(UInt32), Slice(UInt8)}?
+  {% for member in %w(IBM866 ISO8859_2 ISO8859_3 ISO8859_4 ISO8859_5 ISO8859_6 ISO8859_7 ISO8859_8 ISO8859_10 ISO8859_13 ISO8859_14 ISO8859_15 ISO8859_16 KOI8_R KOI8_U Macintosh Windows874 Windows1250 Windows1251 Windows1252 Windows1253 Windows1254 Windows1255 Windows1256 Windows1257 Windows1258 XMacCyrillic) %}
+    {{ member.upcase.id }}_ENCODE = ReverseTable.new({{ member.upcase.id }})
+  {% end %}
+
+  # The reverse lookup for a table-driven single-byte *codec* (a pointer is
+  # the byte minus 0x80), or nil for the ones encoded by arithmetic (exact
+  # ISO-8859-1, x-user-defined, US-ASCII).
+  def self.single_byte_reverse(codec : Codec) : ReverseTable?
     {% begin %}
       case codec
       {% for member in %w(IBM866 ISO8859_2 ISO8859_3 ISO8859_4 ISO8859_5 ISO8859_6 ISO8859_7 ISO8859_8 ISO8859_10 ISO8859_13 ISO8859_14 ISO8859_15 ISO8859_16 KOI8_R KOI8_U Macintosh Windows874 Windows1250 Windows1251 Windows1252 Windows1253 Windows1254 Windows1255 Windows1256 Windows1257 Windows1258 XMacCyrillic) %}
-        when Codec::{{ member.id }}
-          { {{ member.upcase.id }}_ENCODE_PAGES, {{ member.upcase.id }}_ENCODE_VALUES, {{ member.upcase.id }}_ENCODE_ASTRAL_CODE_POINTS, {{ member.upcase.id }}_ENCODE_ASTRAL_VALUES }
+        when Codec::{{ member.id }} then {{ member.upcase.id }}_ENCODE
       {% end %}
-      when Codec::ISO8859_8_I
-        {ISO8859_8_ENCODE_PAGES, ISO8859_8_ENCODE_VALUES, ISO8859_8_ENCODE_ASTRAL_CODE_POINTS, ISO8859_8_ENCODE_ASTRAL_VALUES}
-      else
-        nil
+      when Codec::ISO8859_8_I then ISO8859_8_ENCODE
+      else                         nil
       end
     {% end %}
   end
