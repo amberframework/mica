@@ -1100,13 +1100,6 @@ module Mica::Brotli
       meta_left = @meta_remaining
       command_tree = @command_tree
       out_end = @out_end
-      distance_row = @distance_map.to_unsafe + @distance_map_offset
-      distance_trees = @distance_trees.to_unsafe
-      direct_codes = @direct_codes
-      postfix_bits = @postfix_bits
-      postfix_mask = @postfix_mask
-      ring_base = @ring_base
-      max_backward = @max_backward
     end
 
     # Executes whole commands with the bit buffer, the input position and
@@ -1136,14 +1129,6 @@ module Mica::Brotli
       implicit = false
       command_tree = 0
       out_end = 0
-      # And the metablock's distance parameters, read on every distance.
-      distance_row = @distance_map.to_unsafe
-      distance_trees = @distance_trees.to_unsafe
-      direct_codes = 0
-      postfix_bits = 0
-      postfix_mask = 0
-      ring_base = 0_i64
-      max_backward = 0
       table = @table.to_unsafe
       ring = @ring.to_unsafe
       fast_load
@@ -1217,16 +1202,16 @@ module Mica::Brotli
               map_row = @literal_map.to_unsafe + @literal_map_offset
               next
             end
-            # A run of literals in one block that the input margin covers
-            # (a literal takes at most 15 bits, so two bytes), decoded
-            # without the per-literal checks.
-            run = left < block_left ? left : block_left
-            room = (in_limit &- in_pos) >> 1
-            run = room if room < run
-            run = 1 if run < 1
-            block_left &-= run
-            left &-= run
             if fixed_tree >= 0
+              # A block with one tree: a run of literals that the input
+              # margin covers (a literal takes at most 15 bits, so two
+              # bytes), decoded without per-literal checks or context.
+              run = left < block_left ? left : block_left
+              room = (in_limit &- in_pos) >> 1
+              run = room if room < run
+              run = 1 if run < 1
+              block_left &-= run
+              left &-= run
               run.times do
                 fast_refill if nbits < 15
                 literal = 0
@@ -1241,18 +1226,18 @@ module Mica::Brotli
                 p2 = p1
                 p1 = ring[pos &- 1].to_i32!
               end
-            else
-              run.times do
-                tree = trees[map_row[lookup_row[p1] | lookup_row[256 &+ p2]]]
-                fast_refill if nbits < 15
-                literal = 0
-                fast_symbol(tree, literal)
-                ring[pos] = literal.to_u8!
-                pos &+= 1
-                p2 = p1
-                p1 = literal
-              end
+              next
             end
+            block_left &-= 1
+            tree = trees[map_row[lookup_row[p1] | lookup_row[256 &+ p2]]]
+            fast_refill if nbits < 15
+            literal = 0
+            fast_symbol(tree, literal)
+            ring[pos] = literal.to_u8!
+            pos &+= 1
+            p2 = p1
+            p1 = literal
+            left &-= 1
           end
           @block_left[0] = block_left
           meta_left &-= insert
@@ -1270,11 +1255,10 @@ module Mica::Brotli
             fast_switch(2)
             distance_left = @block_left[2]
             @distance_map_offset = @block_type[2] << 2
-            distance_row = @distance_map.to_unsafe + @distance_map_offset
           end
           distance_left &-= 1
           context = copy_length > 4 ? 3 : copy_length &- 2
-          tree = distance_trees[distance_row[context]]
+          tree = @distance_trees.unsafe_fetch(@distance_map.unsafe_fetch(@distance_map_offset &+ context).to_i32!)
           fast_refill
           fast_symbol(tree, code)
           if code < 16
@@ -1283,20 +1267,20 @@ module Mica::Brotli
               fast_save
               malformed("Distance code #{code} gives a distance below 1")
             end
-          elsif code < 16 &+ direct_codes
+          elsif code < 16 &+ @direct_codes
             distance = code &- 15
           else
-            offset_code = code &- direct_codes &- 16
-            width = 1 &+ (offset_code >> (postfix_bits &+ 1))
-            high = offset_code >> postfix_bits
-            low = offset_code & postfix_mask
+            offset_code = code &- @direct_codes &- 16
+            width = 1 &+ (offset_code >> (@postfix_bits &+ 1))
+            high = offset_code >> @postfix_bits
+            low = offset_code & @postfix_mask
             offset = ((2 &+ (high & 1)) << width) &- 4
             fast_bits(width, extra)
-            distance = ((offset &+ extra) << postfix_bits) &+ low &+ direct_codes &+ 1
+            distance = ((offset &+ extra) << @postfix_bits) &+ low &+ @direct_codes &+ 1
           end
         end
-        total = ring_base + pos
-        max_distance = total < max_backward ? total.to_i32 : max_backward
+        total = @ring_base + pos
+        max_distance = total < @max_backward ? total.to_i32 : @max_backward
         if distance > max_distance
           fast_save
           start_dictionary_word(distance, max_distance)
@@ -1319,17 +1303,9 @@ module Mica::Brotli
           @stage = Stage::Copy
           return
         end
-        if distance >= 16
-          # Whole 16-byte pieces; up to 15 bytes past the copy land in the
-          # slack or in history no back reference can reach (the window
-          # reaches back at most its size less 16).
-          at = 0
-          while at < copy_length
-            (ring + (pos &+ at)).as(UInt128*).value = (ring + (source &+ at)).as(UInt128*).value
-            at &+= 16
-          end
-        elsif distance >= 8
-          # Whole 8-byte words, the same way.
+        if distance >= 8
+          # Whole 8-byte words; up to 7 bytes past the copy land in the
+          # slack or in history no back reference can reach.
           at = 0
           while at < copy_length
             (ring + (pos &+ at)).as(UInt64*).value = (ring + (source &+ at)).as(UInt64*).value
