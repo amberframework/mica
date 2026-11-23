@@ -8,8 +8,6 @@ module Mica::Brotli::Encode
     getter totals : Slice(UInt64)
     getter bit_costs : Slice(Float64)
 
-    # With *cleared* false the counts start undefined: for sets whose
-    # histograms are each cleared or overwritten before use.
     # Storage comes from *arena* when given (dropped with it), else from
     # the collector. With *cleared* false the counts start undefined: for
     # sets whose histograms are each cleared or overwritten before use.
@@ -30,7 +28,7 @@ module Mica::Brotli::Encode
 
     @[AlwaysInline]
     def [](index : Int) : Pointer(UInt32)
-      @data + index &* @data_size
+      @data + index.to_i64! &* @data_size
     end
 
     @[AlwaysInline]
@@ -390,6 +388,154 @@ module Mica::Brotli::Encode
         metablock.literal_context_map = map
       end
       metablock
+    end
+
+    # The metablock of qualities 10 and 11 (google/brotli's
+    # BrotliBuildMetaBlock): picks the distance parameters (NPOSTFIX 0 to 3
+    # and NDIRECT) that cost the fewest bits and rewrites the commands'
+    # distance codes for them, splits literals, commands and distances into
+    # block types, then clusters one literal histogram per block type and
+    # context (64 per type) and one distance histogram per type and distance
+    # context into at most 256 each. Returns the metablock and the distance
+    # parameters to store it with.
+    def self.build(data : UInt8*, position : Int32, previous_byte : UInt8, previous_byte2 : UInt8,
+                   commands : CommandBuffer, params : DistanceParams, literal_context_mode : Int32, quality : Int32,
+                   arena : Arena) : {MetaBlock, DistanceParams}
+      original = params
+      best = params
+      best_cost = 1e99
+      check_original = true
+      scratch = HistogramSet.new(NUM_HISTOGRAM_DISTANCES, 1)
+      direct_msb = 0
+      4.times do |postfix|
+        while direct_msb < 16
+          direct = direct_msb << postfix
+          candidate = DistanceParams.new(postfix.to_u32, direct.to_u32)
+          check_original = false if postfix == original.postfix_bits && direct == original.direct_codes
+          cost = distance_cost(commands, original, candidate, scratch)
+          break if cost.nil? || cost > best_cost
+          best_cost = cost
+          best = candidate
+          direct_msb += 1
+        end
+        direct_msb -= 1 if direct_msb > 0
+        direct_msb //= 2
+      end
+      if check_original
+        cost = distance_cost(commands, original, original, scratch)
+        best = original if cost && cost < best_cost
+      end
+      recompute_distance_prefixes(commands, original, best)
+      literal_split, command_split, distance_split = BlockSplitter.split_block(commands, data, position, quality)
+      literal_histograms = HistogramSet.new(NUM_LITERAL_SYMBOLS, literal_split.num_types << LITERAL_CONTEXT_BITS)
+      command_histograms = HistogramSet.new(NUM_COMMAND_SYMBOLS, command_split.num_types, arena)
+      distance_histograms = HistogramSet.new(NUM_HISTOGRAM_DISTANCES, distance_split.num_types << DISTANCE_CONTEXT_BITS)
+      build_histograms_with_context(commands, literal_split, command_split, distance_split, data, position,
+        previous_byte, previous_byte2, literal_context_mode, literal_histograms, command_histograms,
+        distance_histograms)
+      literal_clusters, literal_map = Cluster.cluster_histograms(literal_histograms, 256)
+      distance_clusters, distance_map = Cluster.cluster_histograms(distance_histograms, 256)
+      metablock = MetaBlock.new(literal_split, command_split, distance_split, literal_clusters, command_histograms,
+        distance_clusters)
+      metablock.literal_context_map = literal_map
+      metablock.distance_context_map = distance_map
+      {metablock, best}
+    end
+
+    # The bits the distances of *commands* take under *candidate* (their
+    # prefix code's estimated size plus the extra bits), or nil when a
+    # distance is out of its reach (google/brotli's ComputeDistanceCost).
+    private def self.distance_cost(commands : CommandBuffer, original : DistanceParams, candidate : DistanceParams,
+                                   scratch : HistogramSet) : Float64?
+      scratch.clear(0)
+      same = original.postfix_bits == candidate.postfix_bits && original.direct_codes == candidate.direct_codes
+      extra_bits = 0.0
+      commands.size.times do |i|
+        entry = commands[i]
+        next unless entry.copy_length != 0 && entry.command_prefix >= 128
+        if same
+          prefix = entry.distance_prefix
+        else
+          distance = entry.restore_distance_code(original)
+          return nil if distance > candidate.max_distance
+          prefix, _ = Encode.prefix_encode_distance(distance, candidate.direct_codes, candidate.postfix_bits)
+        end
+        scratch.add(0, prefix & 0x3FF)
+        extra_bits += prefix >> 10
+      end
+      Cluster.population_cost(scratch, 0) + extra_bits
+    end
+
+    private def self.recompute_distance_prefixes(commands : CommandBuffer, original : DistanceParams,
+                                                 chosen : DistanceParams) : Nil
+      return if original.postfix_bits == chosen.postfix_bits && original.direct_codes == chosen.direct_codes
+      commands.size.times do |i|
+        entry = commands[i]
+        next unless entry.copy_length != 0 && entry.command_prefix >= 128
+        prefix, extra = Encode.prefix_encode_distance(entry.restore_distance_code(original), chosen.direct_codes,
+          chosen.postfix_bits)
+        commands[i] = entry.with_distance(prefix, extra)
+      end
+    end
+
+    # One histogram per block type (literals: per type and literal context;
+    # distances: per type and distance context), in command order
+    # (google/brotli's BrotliBuildHistogramsWithContext).
+    private def self.build_histograms_with_context(commands : CommandBuffer, literal_split : BlockSplit,
+                                                   command_split : BlockSplit, distance_split : BlockSplit,
+                                                   data : UInt8*, position : Int32, previous_byte : UInt8,
+                                                   previous_byte2 : UInt8, literal_context_mode : Int32,
+                                                   literal_histograms : HistogramSet,
+                                                   command_histograms : HistogramSet,
+                                                   distance_histograms : HistogramSet) : Nil
+      lut = Tables::CONTEXT_LOOKUP.to_unsafe + literal_context_mode &* 512
+      literal_it = BlockSplitIterator.new(literal_split)
+      command_it = BlockSplitIterator.new(command_split)
+      distance_it = BlockSplitIterator.new(distance_split)
+      commands.size.times do |i|
+        entry = commands[i]
+        command_histograms.add(command_it.next_type, entry.command_prefix)
+        entry.insert_length.times do
+          type = literal_it.next_type
+          context = (type << LITERAL_CONTEXT_BITS) &+ (lut[previous_byte] | lut[256 &+ previous_byte2])
+          literal = data[position]
+          literal_histograms.add(context, literal)
+          previous_byte2 = previous_byte
+          previous_byte = literal
+          position &+= 1
+        end
+        copy = entry.copy_length.to_i32!
+        position &+= copy
+        next if copy == 0
+        previous_byte2 = data[position &- 2]
+        previous_byte = data[position &- 1]
+        if entry.command_prefix >= 128
+          context = (distance_it.next_type << DISTANCE_CONTEXT_BITS) &+ entry.distance_context.to_i32!
+          distance_histograms.add(context, entry.distance_prefix & 0x3FF)
+        end
+      end
+    end
+
+    # Walks a block split one symbol at a time.
+    private struct BlockSplitIterator
+      @index = 0
+      @type = 0
+      @length : UInt32
+
+      def initialize(@split : BlockSplit)
+        @length = @split.num_blocks > 0 ? @split.lengths[0] : 0_u32
+      end
+
+      # The block type of the next symbol.
+      def next_type : Int32
+        if @length == 0
+          @index &+= 1
+          @type = @split.types[@index].to_i32
+          @length = @split.lengths[@index]
+        end
+        @length &-= 1
+        @type
+      end
     end
 
     # google/brotli's BrotliOptimizeHistograms.

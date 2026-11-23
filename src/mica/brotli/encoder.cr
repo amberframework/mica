@@ -10,7 +10,14 @@ module Mica::Brotli
   # 8 MiB, which is split greedily into block types, given static literal
   # context maps when the UTF-8 byte classes predict each other, and
   # written with run-length-friendly prefix codes. A metablock that would
-  # not be smaller than its bytes is stored uncompressed. Other qualities
+  # not be smaller than its bytes is stored uncompressed.
+  #
+  # Qualities 10 and 11 follow libbrotlienc too: a binary tree of
+  # positions finds every match length, an optimal parse (one pass at 10,
+  # two at 11) picks the commands by estimated bits, the distance code
+  # parameters are chosen per metablock, and literals, commands and
+  # distances are split into block types and clustered, with literal
+  # context maps from the UTF-8 or signed context model. Qualities 0 to 4
   # use `ClassicEncoder`.
   #
   # :nodoc:
@@ -25,6 +32,7 @@ module Mica::Brotli
 
     @classic : ClassicEncoder?
     @hasher : Hasher?
+    @tree_hasher : Encode::BinaryTreeHasher?
     @size_hint : Int64
     @block_bits : Int32
     @params = Encode::DistanceParams.new(0_u32, 0_u32)
@@ -154,11 +162,15 @@ module Mica::Brotli
         hasher.release
         @hasher = nil
       end
+      if tree_hasher = @tree_hasher
+        tree_hasher.release
+        @tree_hasher = nil
+      end
       @arena.release
     end
 
     private def ported? : Bool
-      5 <= @quality <= 9
+      @quality >= 5
     end
 
     private def hasher : Hasher
@@ -178,6 +190,10 @@ module Mica::Brotli
     # Finds the commands of `input[position, bytes]` (google/brotli's
     # EncodeData, up to the metablock decision).
     private def process_block(input : Bytes, position : Int32, bytes : Int32, is_last : Bool, stream_offset : Int64) : Nil
+      if @quality >= 10
+        process_block_optimally(input, position, bytes, is_last, stream_offset)
+        return
+      end
       data = input.to_unsafe
       current = hasher
       unless @hasher_prepared
@@ -200,6 +216,34 @@ module Mica::Brotli
                                         find_commands(current, data, position, bytes, stream_offset)
                                       else
                                         find_commands(current, data, position, bytes, stream_offset)
+                                      end
+      @num_literals += literals
+    end
+
+    # Qualities 10 and 11: the binary tree hasher and the optimal parse
+    # (google/brotli's EncodeData with BrotliCreateZopfliBackwardReferences
+    # or BrotliCreateHqZopfliBackwardReferences).
+    private def process_block_optimally(input : Bytes, position : Int32, bytes : Int32, is_last : Bool,
+                                        stream_offset : Int64) : Nil
+      data = input.to_unsafe
+      tree = @tree_hasher ||= Encode::BinaryTreeHasher.new(@window_bits,
+        position == 0 && stream_offset == 0 && is_last, bytes)
+      unless @hasher_prepared
+        tree.prepare
+        @hasher_prepared = true
+      end
+      tree.stitch_to_previous_block(bytes, position, data)
+      if @commands.size > 0 && @last_insert_length == 0
+        position, bytes = extend_last_command(data, position, bytes, stream_offset)
+      end
+      @last_insert_length, literals = if @quality == 10
+                                        Encode::Zopfli.create_backward_references(bytes, position, data, @quality,
+                                          @window_bits, stream_offset, @params, tree, @cache.to_unsafe,
+                                          @last_insert_length, @commands)
+                                      else
+                                        Encode::Zopfli.create_hq_backward_references(bytes, position, data, @quality,
+                                          @window_bits, stream_offset, @params, tree, @cache.to_unsafe,
+                                          @last_insert_length, @commands)
                                       end
       @num_literals += literals
     end
@@ -236,7 +280,7 @@ module Mica::Brotli
       {position, bytes}
     end
 
-    # google/brotli's WriteMetaBlockInternal for qualities 4 to 9.
+    # google/brotli's WriteMetaBlockInternal from quality 5.
     private def write_metablock(writer : BitWriter, data : UInt8*, start : Int32, bytes : Int32, is_last : Bool) : Nil
       unless should_compress?(data, start, bytes)
         restore_cache
@@ -246,13 +290,21 @@ module Mica::Brotli
       mark = writer.mark
       previous_byte = start >= 1 ? data[start - 1] : 0_u8
       previous_byte2 = start >= 2 ? data[start - 2] : 0_u8
-      num_contexts, context_map = Encode::MetablockBuilder.decide_over_literal_context_modeling(data, start, bytes,
-        @quality, @size_hint)
-      metablock = Encode::MetablockBuilder.build_greedy(data, start, previous_byte, previous_byte2, num_contexts,
-        context_map, @commands, @arena)
-      Encode::MetablockBuilder.optimize_histograms(@params.alphabet_size.to_i32, metablock, @arena)
-      Encode::MetablockStore.store(data, start, bytes, previous_byte, previous_byte2, is_last, @params,
-        Encode::CONTEXT_UTF8, @commands, metablock, @arena, writer)
+      if @quality >= 10
+        mode = Encode::LiteralCost.mostly_utf8?(data + start, bytes) ? Encode::CONTEXT_UTF8 : Encode::CONTEXT_SIGNED
+        metablock, params = Encode::MetablockBuilder.build(data, start, previous_byte, previous_byte2, @commands,
+          @params, mode, @quality, @arena)
+      else
+        mode = Encode::CONTEXT_UTF8
+        params = @params
+        num_contexts, context_map = Encode::MetablockBuilder.decide_over_literal_context_modeling(data, start, bytes,
+          @quality, @size_hint)
+        metablock = Encode::MetablockBuilder.build_greedy(data, start, previous_byte, previous_byte2, num_contexts,
+          context_map, @commands, @arena)
+      end
+      Encode::MetablockBuilder.optimize_histograms(params.alphabet_size.to_i32, metablock, @arena)
+      Encode::MetablockStore.store(data, start, bytes, previous_byte, previous_byte2, is_last, params,
+        mode, @commands, metablock, @arena, writer)
       @arena.reset
       used = writer.bit_size - mark.position + (mark.position & 7)
       if bytes + 4 < (used >> 3)
