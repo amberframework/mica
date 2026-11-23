@@ -329,6 +329,123 @@ corpus and format, every case where Mica is slower than zlib with its
 margin, every case's absolute numbers for both engines with the ratio and
 interval, peak memory, the load averages, and the method and machine.
 
+### Z3 run: every case
+
+Run at `8c1f61e` on 2026-11-22: an M1 Max with macOS's zlib 1.2.12, four
+engines (`mica-oneshot`, `zlib-oneshot-fresh`, `mica-stream`,
+`zlib-stream`), 8 rounds and 16 for every case whose interval reached
+1.0, one runner process at a time. The machine was shared: the 1-minute
+load average ran from 20.5 to 104 (median 30) on 10 cores. The Silesia
+archive host was unreachable, so each extracted file was checked against
+its sha256 in `corpus.tsv` and the driver was called directly; the
+uncommitted `json_1m.json` body was added for its three cases at the
+sha256 the encoder driver pins.
+
+- One-shot: 1.09× as fast as zlib [1.08, 1.09]; 74 of 93 cases at or
+  above zlib.
+- Streaming: 1.12× as fast as zlib [1.11, 1.12]; 92 of 93 cases at or
+  above zlib.
+
+Each cell reads "N× as fast" or "N× slower" than zlib; the interval is
+the 95% paired-bootstrap interval of the speed ratio (zlib time over Mica
+time), so above 1.0 Mica is faster.
+
+| case | one-shot | 95% interval | streaming | 95% interval |
+|---|---|---|---|---|
+| http/json_1m.json:deflate | 1.21× slower | [0.78, 0.88] | 1.09× as fast | [1.08, 1.10] |
+| http/json_1m.json:zlib | 1.17× slower | [0.78, 0.93] | 1.08× as fast | [1.04, 1.14] |
+| http/html_1m.html:zlib | 1.14× slower | [0.83, 0.94] | 1.10× as fast | [1.08, 1.13] |
+| canterbury/kennedy.xls:zlib | 1.13× slower | [0.88, 0.90] | 1.02× as fast | [1.00, 1.03] |
+| http/html_1m.html:gzip | 1.12× slower | [0.81, 0.98] | 1.11× as fast | [1.08, 1.15] |
+| canterbury/cp.html:gzip | 1.12× slower | [0.88, 0.91] | 1.06× as fast | [1.05, 1.07] |
+| canterbury/cp.html:zlib | 1.10× slower | [0.88, 0.95] | 1.07× as fast | [1.06, 1.09] |
+| http/html_1m.html:deflate | 1.09× slower | [0.83, 0.98] | 1.10× as fast | [1.05, 1.14] |
+| canterbury/kennedy.xls:gzip | 1.08× slower | [0.90, 0.96] | 1.03× as fast | [1.02, 1.04] |
+| canterbury/cp.html:deflate | 1.08× slower | [0.85, 1.02] | 1.13× as fast | [1.08, 1.20] |
+| http/json_1m.json:gzip | 1.08× slower | [0.86, 1.00] | 1.09× as fast | [1.07, 1.14] |
+| canterbury/ptt5:zlib | 1.05× slower | [0.88, 1.04] | 1.10× as fast | [1.06, 1.15] |
+| canterbury/kennedy.xls:deflate | 1.04× slower | [0.93, 0.99] | 1.08× as fast | [1.04, 1.14] |
+| canterbury/ptt5:gzip | 1.03× slower | [0.90, 1.03] | 1.10× as fast | [1.07, 1.12] |
+| silesia/nci:zlib | 1.03× slower | [0.93, 1.00] | 1.10× as fast | [1.06, 1.16] |
+| silesia/xml:gzip | 1.02× slower | [0.92, 1.04] | 1.10× as fast | [1.06, 1.13] |
+| canterbury/asyoulik.txt:zlib | 1.02× slower | [0.96, 1.00] | 1.01× as fast | [0.94, 1.08] |
+| canterbury/plrabn12.txt:deflate | 1.01× slower | [0.92, 1.04] | 1.15× as fast | [1.13, 1.17] |
+| canterbury/ptt5:deflate | 1.01× slower | [0.94, 1.04] | 1.11× as fast | [1.05, 1.15] |
+| silesia/sao:deflate | 1.01× as fast | [0.95, 1.05] | 1.09× as fast | [1.05, 1.13] |
+| silesia/x-ray:gzip | 1.01× as fast | [0.99, 1.03] | 1.02× as fast | [0.99, 1.05] |
+| silesia/mr:deflate | 1.01× as fast | [0.97, 1.06] | 1.14× as fast | [1.08, 1.21] |
+| silesia/osdb:deflate | 1.01× as fast | [0.95, 1.08] | 1.13× as fast | [1.09, 1.19] |
+| silesia/nci:gzip | 1.02× as fast | [1.01, 1.03] | 1.11× as fast | [1.09, 1.14] |
+| canterbury/alice29.txt:zlib | 1.02× as fast | [0.98, 1.06] | 1.06× as fast | [1.02, 1.11] |
+| silesia/x-ray:deflate | 1.02× as fast | [0.99, 1.06] | 1.03× as fast | [0.99, 1.07] |
+| silesia/osdb:gzip | 1.03× as fast | [0.97, 1.10] | 1.05× as fast | [0.99, 1.10] |
+| silesia/x-ray:zlib | 1.03× as fast | [1.01, 1.06] | 1.04× as fast | [1.03, 1.04] |
+| canterbury/asyoulik.txt:deflate | 1.03× as fast | [1.01, 1.05] | 1.08× as fast | [1.07, 1.09] |
+| silesia/xml:deflate | 1.03× as fast | [0.99, 1.07] | 1.20× as fast | [1.15, 1.25] |
+| canterbury/alice29.txt:gzip | 1.03× as fast | [1.02, 1.05] | 1.10× as fast | [1.09, 1.11] |
+| silesia/xml:zlib | 1.03× as fast | [1.00, 1.07] | 1.16× as fast | [1.10, 1.26] |
+| silesia/mozilla:zlib | 1.03× as fast | [1.01, 1.05] | 1.08× as fast | [1.07, 1.09] |
+| silesia/osdb:zlib | 1.04× as fast | [1.00, 1.08] | 1.07× as fast | [1.02, 1.13] |
+| silesia/sao:gzip | 1.04× as fast | [1.01, 1.06] | 1.07× as fast | [1.06, 1.07] |
+| silesia/ooffice:deflate | 1.04× as fast | [1.03, 1.05] | 1.08× as fast | [1.06, 1.10] |
+| canterbury/alice29.txt:deflate | 1.04× as fast | [1.03, 1.05] | 1.11× as fast | [1.09, 1.13] |
+| silesia/dickens:zlib | 1.04× as fast | [1.01, 1.08] | 1.10× as fast | [1.05, 1.16] |
+| silesia/samba:zlib | 1.04× as fast | [1.01, 1.09] | 1.12× as fast | [1.08, 1.17] |
+| silesia/mr:gzip | 1.05× as fast | [1.04, 1.05] | 1.08× as fast | [1.05, 1.10] |
+| silesia/sao:zlib | 1.05× as fast | [1.00, 1.10] | 1.07× as fast | [1.02, 1.12] |
+| silesia/webster:zlib | 1.05× as fast | [1.01, 1.08] | 1.10× as fast | [1.05, 1.13] |
+| silesia/nci:deflate | 1.05× as fast | [1.04, 1.07] | 1.13× as fast | [1.12, 1.14] |
+| silesia/ooffice:zlib | 1.05× as fast | [1.02, 1.10] | 1.06× as fast | [1.05, 1.08] |
+| canterbury/asyoulik.txt:gzip | 1.05× as fast | [1.02, 1.10] | 1.06× as fast | [1.05, 1.08] |
+| silesia/mr:zlib | 1.06× as fast | [1.03, 1.09] | 1.06× as fast | [1.04, 1.07] |
+| silesia/dickens:gzip | 1.06× as fast | [1.05, 1.07] | 1.09× as fast | [1.04, 1.12] |
+| silesia/samba:deflate | 1.06× as fast | [1.03, 1.09] | 1.13× as fast | [1.12, 1.14] |
+| silesia/mozilla:gzip | 1.06× as fast | [1.05, 1.08] | 1.07× as fast | [1.04, 1.10] |
+| silesia/ooffice:gzip | 1.06× as fast | [1.03, 1.12] | 1.08× as fast | [1.06, 1.09] |
+| canterbury/fields.c:zlib | 1.07× as fast | [1.06, 1.07] | 1.09× as fast | [1.08, 1.10] |
+| canterbury/fields.c:gzip | 1.07× as fast | [1.06, 1.08] | 1.08× as fast | [1.03, 1.11] |
+| canterbury/lcet10.txt:zlib | 1.07× as fast | [1.03, 1.10] | 1.09× as fast | [1.09, 1.10] |
+| canterbury/plrabn12.txt:zlib | 1.07× as fast | [1.06, 1.08] | 1.11× as fast | [1.10, 1.12] |
+| silesia/webster:deflate | 1.07× as fast | [1.02, 1.11] | 1.20× as fast | [1.16, 1.27] |
+| silesia/reymont:gzip | 1.08× as fast | [0.99, 1.18] | 1.22× as fast | [1.15, 1.30] |
+| canterbury/plrabn12.txt:gzip | 1.08× as fast | [1.06, 1.10] | 1.12× as fast | [1.11, 1.12] |
+| silesia/mozilla:deflate | 1.08× as fast | [1.06, 1.12] | 1.10× as fast | [1.09, 1.11] |
+| silesia/dickens:deflate | 1.09× as fast | [1.04, 1.15] | 1.09× as fast | [1.03, 1.13] |
+| canterbury/lcet10.txt:gzip | 1.09× as fast | [1.07, 1.12] | 1.12× as fast | [1.11, 1.13] |
+| silesia/reymont:zlib | 1.09× as fast | [1.05, 1.18] | 1.12× as fast | [1.11, 1.13] |
+| canterbury/fields.c:deflate | 1.09× as fast | [1.08, 1.11] | 1.16× as fast | [1.15, 1.17] |
+| silesia/samba:gzip | 1.11× as fast | [1.03, 1.27] | 1.10× as fast | [1.09, 1.11] |
+| canterbury/lcet10.txt:deflate | 1.12× as fast | [1.08, 1.15] | 1.13× as fast | [1.12, 1.13] |
+| canterbury/xargs.1:zlib | 1.12× as fast | [1.10, 1.13] | 1.13× as fast | [1.12, 1.15] |
+| canterbury/grammar.lsp:zlib | 1.12× as fast | [1.10, 1.14] | 1.17× as fast | [1.17, 1.18] |
+| silesia/reymont:deflate | 1.12× as fast | [1.07, 1.21] | 1.16× as fast | [1.15, 1.16] |
+| silesia/webster:gzip | 1.12× as fast | [1.08, 1.21] | 1.12× as fast | [1.08, 1.15] |
+| canterbury/grammar.lsp:deflate | 1.14× as fast | [1.12, 1.15] | 1.23× as fast | [1.22, 1.24] |
+| canterbury/grammar.lsp:gzip | 1.14× as fast | [1.12, 1.17] | 1.17× as fast | [1.16, 1.18] |
+| canterbury/xargs.1:gzip | 1.14× as fast | [1.13, 1.16] | 1.13× as fast | [1.12, 1.14] |
+| canterbury/sum:zlib | 1.15× as fast | [1.13, 1.17] | 1.15× as fast | [1.12, 1.18] |
+| canterbury/xargs.1:deflate | 1.16× as fast | [1.13, 1.20] | 1.19× as fast | [1.17, 1.21] |
+| canterbury/sum:deflate | 1.16× as fast | [1.14, 1.18] | 1.22× as fast | [1.21, 1.24] |
+| canterbury/sum:gzip | 1.17× as fast | [1.15, 1.18] | 1.12× as fast | [1.05, 1.17] |
+| http/html_16k.html:zlib | 1.17× as fast | [1.04, 1.26] | 1.09× as fast | [1.08, 1.09] |
+| http/json_16k.json:zlib | 1.21× as fast | [1.19, 1.23] | 1.10× as fast | [1.08, 1.14] |
+| http/html_16k.html:gzip | 1.26× as fast | [1.22, 1.29] | 1.09× as fast | [1.08, 1.10] |
+| http/json_1k.json:zlib | 1.27× as fast | [1.17, 1.33] | 1.32× as fast | [1.30, 1.35] |
+| http/html_64k.html:zlib | 1.27× as fast | [1.15, 1.35] | 1.12× as fast | [1.10, 1.15] |
+| http/json_16k.json:gzip | 1.28× as fast | [1.23, 1.33] | 1.09× as fast | [1.08, 1.10] |
+| http/html_16k.html:deflate | 1.29× as fast | [1.27, 1.32] | 1.15× as fast | [1.11, 1.21] |
+| http/json_16k.json:deflate | 1.30× as fast | [1.27, 1.34] | 1.17× as fast | [1.16, 1.18] |
+| http/json_1k.json:gzip | 1.32× as fast | [1.30, 1.36] | 1.27× as fast | [1.24, 1.29] |
+| http/html_64k.html:gzip | 1.35× as fast | [1.22, 1.48] | 1.08× as fast | [0.97, 1.18] |
+| http/json_1k.json:deflate | 1.38× as fast | [1.33, 1.44] | 1.42× as fast | [1.41, 1.44] |
+| http/json_64k.json:zlib | 1.39× as fast | [1.30, 1.45] | 1.01× slower | [0.99, 1.00] |
+| http/html_64k.html:deflate | 1.39× as fast | [1.34, 1.45] | 1.13× as fast | [1.04, 1.20] |
+| http/json_64k.json:gzip | 1.44× as fast | [1.37, 1.50] | 1.05× as fast | [0.97, 1.14] |
+| http/json_64k.json:deflate | 1.47× as fast | [1.31, 1.59] | 1.12× as fast | [1.07, 1.21] |
+| http/html_1k.html:zlib | 1.51× as fast | [1.34, 1.65] | 1.26× as fast | [1.25, 1.27] |
+| http/html_1k.html:gzip | 1.60× as fast | [1.43, 1.75] | 1.21× as fast | [1.20, 1.22] |
+| http/html_1k.html:deflate | 1.62× as fast | [1.56, 1.66] | 1.29× as fast | [1.25, 1.31] |
+
 ## Deflate encoders (`bench/deflate_encode/`)
 
 Mica's encoders against the system zlib's `deflate` at levels 1, 6 and 9.

@@ -2,13 +2,16 @@
 # Builds Mica's README art in light and dark: badges, the benchmark charts and
 # the ReDoS panel. Every number below is quoted from the verified benchmark
 # reports (regex: R3-verify-12 at commit f0bb0f6, the code tagged v0.2.0;
-# Inflate: Z1 run full-20261121T133443Z-6232bc9, merged in #18).
-# Usage: assets.rb <art-dir> <out-dir>
+# Inflate: Z3 run inflate-8c1f61e, 2026-11-22).
+# Usage: assets.rb <art-dir> <out-dir> [chart ...]
+#   With chart names (badges, regex-speed, amber-patterns, redos, inflate,
+#   amber-lockup) only those are written.
 require_relative 'mica_kit'
 include MicaKit
 
-ART = ARGV[0] or abort 'usage: assets.rb <art-dir> <out-dir>'
-OUT = ARGV[1] or abort 'usage: assets.rb <art-dir> <out-dir>'
+ART = ARGV[0] or abort 'usage: assets.rb <art-dir> <out-dir> [chart ...]'
+OUT = ARGV[1] or abort 'usage: assets.rb <art-dir> <out-dir> [chart ...]'
+LIST_OF_CHARTS = ARGV[2..]
 
 def fmt_factor(value)
   value >= 10 ? value.round.to_s : format('%.1f', value)
@@ -196,46 +199,46 @@ def redos_panel(palette)
 end
 
 # ---------------------------------------------------------------- Inflate chart
-INFLATE_ROWS = [
-  ['One-shot', 'zlib allocating its output per decode, as Mica does', 1.45, 0.691, 0.678, 0.705],
-  ['Streaming', 'readers with 64 KiB buffers', 1.83, 0.548, 0.531, 0.566],
-  ['One-shot, zlib at its best', 'zlib reusing one output buffer', 1.86, 0.538, 0.520, 0.556]
-].freeze
+# [mode, note, speed (zlib time / Mica time, geometric mean), 95% low, 95% high,
+#  cases at or above zlib, cases]
+INFLATE_ROWS = [["One-shot", "zlib allocating its output per decode, as Mica does", 1.087, 1.082, 1.092, 74, 93], ["Streaming", "readers with 64 KiB buffers", 1.116, 1.111, 1.12, 92, 93]].freeze
+INFLATE_RUN = 'Z3 at 8c1f61e, 2026-11-22'
+
+def speed_words(speed)
+  speed >= 1 ? "#{format('%.2f', speed)}× as fast" : "#{format('%.2f', 1 / speed)}× slower"
+end
 
 def inflate_chart(palette)
   width = 1280
-  row_height = 82
+  row_height = 100
   top = 200
-  height = top + INFLATE_ROWS.size * row_height + 96
+  height = top + INFLATE_ROWS.size * row_height + 80
   axis_left = 480
-  axis_width = 620
-  max_factor = 2.5
-  scale = lambda { |factor| axis_left + factor / max_factor * axis_width }
+  axis_width = 480
+  max_time = 1.25
+  scale = lambda { |time| axis_left + time / max_time * axis_width }
   body = chart_frame(palette, width, height, 'Inflate against system zlib',
-                     ['Mica::Gzip, Mica::Zlib and Mica::Deflate decode time against zlib, geometric means over 93 cases (Canterbury,',
-                      'Silesia and real HTTP bodies, each as gzip, zlib and raw DEFLATE). Shorter is better: zlib is still faster.'])
-  [0, 1, 2].each do |tick|
-    tick_x = scale.call(tick.to_f).round(1)
-    body << %(<line x1="#{tick_x}" x2="#{tick_x}" y1="#{top - 8}" y2="#{top + INFLATE_ROWS.size * row_height}" stroke="#{tick.zero? ? palette[:grid] : palette[:faint]}" stroke-width="1.5"#{tick.zero? ? '' : ' stroke-dasharray="4 4"'}/>)
-  end
-  body << text_at('Manrope-400', 15.5, 0, 'zlib', left: scale.call(1.0), baseline: top - 14, fill: palette[:faint], anchor: :middle)
-  body << text_at('Manrope-400', 15.5, 0, 'Z1 bar: 2× slower', left: scale.call(2.0), baseline: top - 14, fill: palette[:faint], anchor: :middle)
-  INFLATE_ROWS.each_with_index do |(mode, note, factor, speed, low, high), index|
+                     ['Mica::Gzip, Mica::Zlib and Mica::Deflate decode time against zlib 1.2.12, geometric means over 93 cases',
+                      '(Canterbury, Silesia and real HTTP bodies, each as gzip, zlib and raw DEFLATE). Shorter is faster.'])
+  tick_x = scale.call(1.0).round(1)
+  body << %(<line x1="#{tick_x}" x2="#{tick_x}" y1="#{top - 8}" y2="#{top + INFLATE_ROWS.size * row_height}" stroke="#{palette[:faint]}" stroke-width="1.5" stroke-dasharray="4 4"/>)
+  body << text_at('Manrope-400', 15.5, 0, 'zlib time', left: scale.call(1.0), baseline: top - 14, fill: palette[:faint], anchor: :middle)
+  INFLATE_ROWS.each_with_index do |(mode, note, speed, low, high, at_or_above, cases), index|
     row_top = top + index * row_height
     body << text_at('Manrope-700', 20, 0, mode, left: 49, baseline: row_top + 30, fill: palette[:text])
     body << text_at('Manrope-400', 15.5, 0, note, left: 49, baseline: row_top + 54, fill: palette[:muted])
-    zlib_end = scale.call(1.0)
-    bar_end = scale.call(factor)
-    body << %(<rect x="#{axis_left}" y="#{row_top + 12}" width="#{(zlib_end - axis_left).round(1)}" height="40" rx="6" fill="#{palette[:bar_track]}" stroke="#{palette[:panel_edge]}"/>)
-    body << %(<rect x="#{zlib_end.round(1)}" y="#{row_top + 12}" width="#{(bar_end - zlib_end).round(1)}" height="40" rx="0" fill="#{palette[:series]}" fill-opacity=".85"/>)
-    body << %(<rect x="#{axis_left}" y="#{row_top + 12}" width="#{(bar_end - axis_left).round(1)}" height="40" rx="6" fill="none" stroke="#{palette[:series]}" stroke-width="1.5"/>)
-    body << text_at('Manrope-600', 14.5, 0, 'zlib time', left: axis_left + 14, baseline: row_top + 37, fill: palette[:muted])
-    body << text_at('Manrope-700', 19, 0, "#{format('%.2f', factor)}× slower", left: [bar_end, scale.call(2.0)].max + 14, baseline: row_top + 31, fill: palette[:text])
-    body << text_at('Manrope-600', 14, 0, "95%: #{format('%.2f', 1 / high)} to #{format('%.2f', 1 / low)}", left: [bar_end, scale.call(2.0)].max + 14, baseline: row_top + 53, fill: palette[:muted])
+    bar_end = scale.call(1 / speed)
+    body << %(<rect x="#{axis_left}" y="#{row_top + 12}" width="#{(bar_end - axis_left).round(1)}" height="40" rx="6" fill="#{palette[:series]}" fill-opacity=".85"/>)
+    body << text_at('Manrope-600', 14.5, 0, 'Mica time', left: axis_left + 14, baseline: row_top + 37, fill: palette[:panel])
+    label_left = [bar_end, scale.call(1.0)].max + 14
+    body << text_at('Manrope-700', 19, 0, speed_words(speed), left: label_left, baseline: row_top + 31, fill: palette[:text])
+    body << text_at('Manrope-600', 14, 0, "95%: #{format('%.2f', low)} to #{format('%.2f', high)}×", left: label_left, baseline: row_top + 53, fill: palette[:muted])
+    body << text_at('Manrope-600', 14, 0, "#{at_or_above} of #{cases} cases at or above zlib", left: label_left, baseline: row_top + 73, fill: palette[:muted])
   end
-  body << text_at('Manrope-400', 17, 0, 'The Z1 milestone allowed up to 2× slower than zlib one-shot, and every mode is inside it.', left: 49, baseline: height - 32, fill: palette[:muted])
+  body << text_at('Manrope-400', 17, 0, "Run #{INFLATE_RUN}. Every case, with its interval: docs/benchmarks.md, Inflate.", left: 49, baseline: height - 32, fill: palette[:muted])
+  description = INFLATE_ROWS.map { |row| "#{row[0]}: #{speed_words(row[2])} (#{row[5]} of #{row[6]} cases at or above zlib)" }.join('. ')
   svg_open(width, height, 'Inflate against system zlib',
-           'Decode time relative to system zlib, geometric means over 93 cases. One-shot: 1.45 times slower. Streaming with 64 KiB buffers: 1.83 times slower. Against zlib reusing one output buffer: 1.86 times slower. The Z1 bar was no more than 2 times slower.') +
+           "Decode speed against system zlib 1.2.12, geometric means over 93 cases. #{description}.") +
     body.join("\n") + '</svg>'
 end
 
@@ -255,11 +258,17 @@ def amber_lockup(palette)
 end
 
 { 'light' => LIGHT, 'dark' => DARK }.each do |name, palette|
-  File.write(File.join(OUT, "amber-lockup-#{name}.svg"), amber_lockup(palette))
-  File.write(File.join(OUT, "badges-#{name}.svg"), badges(palette))
-  File.write(File.join(OUT, "regex-speed-#{name}.svg"), regex_chart(palette))
-  File.write(File.join(OUT, "amber-patterns-#{name}.svg"), amber_chart(palette))
-  File.write(File.join(OUT, "redos-#{name}.svg"), redos_panel(palette))
-  File.write(File.join(OUT, "inflate-#{name}.svg"), inflate_chart(palette))
+  {
+    'amber-lockup' => -> { amber_lockup(palette) },
+    'badges' => -> { badges(palette) },
+    'regex-speed' => -> { regex_chart(palette) },
+    'amber-patterns' => -> { amber_chart(palette) },
+    'redos' => -> { redos_panel(palette) },
+    'inflate' => -> { inflate_chart(palette) }
+  }.each do |chart, draw|
+    next unless LIST_OF_CHARTS.empty? || LIST_OF_CHARTS.include?(chart)
+
+    File.write(File.join(OUT, "#{chart}-#{name}.svg"), draw.call)
+  end
 end
 puts Dir[File.join(OUT, '*.svg')].sort.map { |path| "#{File.basename(path)} #{File.size(path)}" }
