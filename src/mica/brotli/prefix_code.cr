@@ -84,19 +84,20 @@ module Mica::Brotli
       start = store.append(ROOT_SIZE)
       if used <= 1
         entry = used == 1 ? symbols[0].to_u32 << 8 : 0_u32
-        table = store.to_unsafe + start
-        ROOT_SIZE.times { |index| table[index] = entry }
+        Slice.new(store.to_unsafe + start, ROOT_SIZE).fill(entry)
         return start
       end
 
       # Symbols sorted by code length, then by value: canonical order.
       offsets = StaticArray(Int32, 16).new(0)
       (2..MAX_LENGTH).each { |length| offsets[length] = offsets[length - 1] + count[length - 1] }
+      sorted_out = sorted.to_unsafe
       used.times do |index|
         symbol = symbols.unsafe_fetch(index)
-        length = lengths.unsafe_fetch(symbol.to_i32)
-        sorted[offsets[length]] = symbol
-        offsets[length] += 1
+        length = lengths.unsafe_fetch(symbol.to_i32).to_i32
+        slot = offsets.unsafe_fetch(length)
+        sorted_out[slot] = symbol
+        offsets.unsafe_put(length, slot &+ 1)
       end
 
       at = 0
