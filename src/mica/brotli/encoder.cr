@@ -46,13 +46,19 @@ module Mica::Brotli
     def initialize(@quality : Int32, @window_bits : Int32, history_size : Int32)
       Encoder.check(@quality, @window_bits)
       @max_backward = (1 << @window_bits) - 16
-      @metablock_size = @quality <= 4 ? 1 << 18 : 1 << 20
+      @metablock_size = Encoder.metablock_size(@quality)
       # A small input needs no more hash buckets than about twice its positions.
       size_bits = Math.max(10, 33 - Math.max(history_size, 1).leading_zeros_count)
       hash_bits = Math.min(Math.min(HASH_BITS[@quality], @window_bits + 1), size_bits)
       chain = Math.min(Math.min(history_size, 1 << @window_bits), MAX_CHAIN)
       @finder = MatchFinder.new(hash_bits, chain, CHAIN_DEPTH[@quality])
       @metablock_writer = MetablockWriter.new(@quality)
+    end
+
+    # The most input one metablock holds at *quality*: 256 KiB below 5,
+    # 1 MiB from 5.
+    def self.metablock_size(quality : Int32) : Int32
+      quality <= 4 ? 1 << 18 : 1 << 20
     end
 
     def self.check(quality : Int32, window_bits : Int32) : Nil
