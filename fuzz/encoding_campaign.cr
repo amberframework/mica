@@ -112,5 +112,6 @@ iterations.times do |iteration|
 end
 seconds = (Time.instant - started).total_seconds
 puts "seed=#{seed} iterations=#{iterations} codecs=#{codecs.size} input_bytes=#{bytes_converted} crashes=#{crashes} chunking_mismatches=#{mismatches} bound_overruns=#{overruns} slow_cases=#{slow} seconds=#{seconds.round(1)}"
+failures.sort_by! { |line| line.includes?(" raised ") ? 0 : 1 }
 failures.first(50).each { |line| puts "  FAIL #{line}" }
 exit(failures.empty? ? 0 : 1)

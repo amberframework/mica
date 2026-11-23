@@ -108,9 +108,9 @@ module Mica::Encoding
   # `flush(output, written) : Int32` for the end of the input and
   # `ascii_direct? : Bool` when ASCII bytes are written as themselves.
   module EncoderLoop
-    # Room one step may need: a 3-byte escape and a 2-byte character, a
-    # held character and the next one, or a 10-byte character reference.
-    STEP_ROOM = 12
+    # Room one step may need: at most a 3-byte escape (ISO-2022-JP back to
+    # ASCII) and a 10-byte character reference.
+    STEP_ROOM = MIN_OUTPUT_BYTES
 
     @code_point = 0
     @seen = 0
@@ -299,6 +299,9 @@ module Mica::Encoding
     private def encode_code_point(code_point : Int32, output : Bytes, written : Int32) : Int32
       if code_point > 0xFFFF
         if @ucs2
+          # A character reference would be ASCII bytes in a UTF-16 stream,
+          # so replacement writes U+FFFD instead.
+          return put_unit(output, written, 0xFFFD) if @error_mode.replacement?
           @unmappable = code_point
           return written
         end
