@@ -16,9 +16,11 @@
 #
 # Components:
 #
-#   deflate   Mica::Deflate, Mica::Zlib and Mica::Gzip (decoders and
-#             encoders) with Mica::Core. The library requires
-#             "<destination>/mica/deflate".
+#   deflate      Mica::Deflate, Mica::Zlib and Mica::Gzip (decoders and
+#                encoders) with Mica::Core. The library requires
+#                "<destination>/mica/deflate".
+#   compression  deflate plus Mica::Brotli. The library requires
+#                "<destination>/mica/deflate" and "<destination>/mica/brotli".
 #
 # The destination receives:
 #
@@ -58,8 +60,17 @@ end
 
 # The paths each component takes from `src/mica`.
 LIST_OF_PATHS_BY_COMPONENT = {
-  "deflate" => ["src/mica/core.cr", "src/mica/core", "src/mica/deflate.cr", "src/mica/deflate", "src/mica/zlib.cr",
-                "src/mica/gzip.cr"],
+  "deflate"     => ["src/mica/core.cr", "src/mica/core", "src/mica/deflate.cr", "src/mica/deflate", "src/mica/zlib.cr",
+                    "src/mica/gzip.cr"],
+  "compression" => ["src/mica/core.cr", "src/mica/core", "src/mica/deflate.cr", "src/mica/deflate", "src/mica/zlib.cr",
+                    "src/mica/gzip.cr", "src/mica/brotli.cr", "src/mica/brotli"],
+}.freeze
+
+# The files a library requires for each component; each must exist at the
+# commit taken.
+LIST_OF_ENTRY_FILES_BY_COMPONENT = {
+  "deflate"     => ["src/mica/deflate.cr"],
+  "compression" => ["src/mica/deflate.cr", "src/mica/brotli.cr"],
 }.freeze
 
 # Returns {path => contents} for the files of *component* and LICENSE at
@@ -87,7 +98,9 @@ end
 def vendor(commit, component, namespace, destination)
   full_commit = run_git("rev-parse", "--verify", "#{commit}^{commit}").strip
   files = files_at(full_commit, component)
-  fail_with("commit #{full_commit} holds no src/mica/#{component}.cr") unless files.key?("src/mica/#{component}.cr")
+  LIST_OF_ENTRY_FILES_BY_COMPONENT.fetch(component).each do |entry_file|
+    fail_with("commit #{full_commit} holds no #{entry_file}") unless files.key?(entry_file)
+  end
 
   FileUtils.rm_rf(File.join(destination, "mica"))
   FileUtils.rm_f([File.join(destination, MANIFEST_NAME), File.join(destination, LICENSE_NAME)])
@@ -100,7 +113,8 @@ def vendor(commit, component, namespace, destination)
       written = contents
     else
       relative_path = path.delete_prefix("src/")
-      written = under_namespace(contents, namespace)
+      # Data files (the Brotli dictionary) are copied byte for byte.
+      written = path.end_with?(".cr") ? under_namespace(contents, namespace) : contents
     end
     target = File.join(destination, relative_path)
     FileUtils.mkdir_p(File.dirname(target))

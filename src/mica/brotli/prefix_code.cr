@@ -18,17 +18,6 @@ module Mica::Brotli
     # The longest code length Brotli allows.
     MAX_LENGTH = 15
 
-    # Each byte value with its bits reversed.
-    REVERSED_BYTE = begin
-      table = StaticArray(UInt16, 256).new(0_u16)
-      256.times do |value|
-        reversed = 0
-        8.times { |bit| reversed |= ((value >> bit) & 1) << (7 - bit) }
-        table[value] = reversed.to_u16
-      end
-      table
-    end
-
     # The tables of one metablock header, end to end.
     class Store
       getter size : Int32 = 0
@@ -180,8 +169,7 @@ module Mica::Brotli
     # Reverses the low *width* (at most 15) bits of *code*.
     @[AlwaysInline]
     def self.reverse(code : Int32, width : Int32) : Int32
-      full = (REVERSED_BYTE[code & 0xFF].to_i32 << 8) | REVERSED_BYTE[(code >> 8) & 0xFF].to_i32
-      full >> (16 - width)
+      (code.to_u32.bit_reverse >> (32 - width)).to_i32
     end
   end
 end
