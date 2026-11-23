@@ -32,6 +32,9 @@ module Mica::Brotli
     # Bytes of slack after the transformed-word buffer (uppercasing may
     # touch two bytes past a word, RFC 7932, section 8).
     WORD_BUFFER = 64
+    # The largest streaming ring a released decoder keeps for the next
+    # stream (the window of `DecodeLimits::REQUEST_BODY`).
+    KEPT_RING_BYTES = (4 << 20) + SLACK
 
     # Order of the code length code lengths (RFC 7932, section 3.5).
     CODE_LENGTH_ORDER = StaticArray[1, 2, 3, 4, 0, 5, 17, 6, 16, 7, 8, 9, 10, 11, 12, 13, 14, 15]
@@ -176,6 +179,10 @@ module Mica::Brotli
     @linear : Bool = false
     # The streaming input buffer, kept between decodes.
     @input_buffer : Bytes?
+    # The streaming output ring, kept between decodes when it is at most
+    # `KEPT_RING_BYTES`. A one-shot decode hands its ring to the caller,
+    # so it never keeps one.
+    @kept_ring : Bytes = Bytes.empty
     # The tree of the current literal block when its context map row names
     # one tree, else -1.
     @literal_tree_fixed : Int32 = -1
@@ -197,6 +204,7 @@ module Mica::Brotli
     def release : Nil
       @io = nil
       @input = Bytes.empty
+      @kept_ring = @ring if !@linear && @ring.size <= KEPT_RING_BYTES && @ring.size > @kept_ring.size
       @ring = Bytes.empty
       @ring_size = 0
       @@spare.set(self)
@@ -221,7 +229,7 @@ module Mica::Brotli
       end
       @linear = io.nil?
       @produced = 0_i64
-      @ring = Bytes.empty
+      @ring = @linear ? Bytes.empty : @kept_ring
       @ring_size = 0
       @ring_cap = 0
       @full_ring = 0
@@ -662,6 +670,12 @@ module Mica::Brotli
       repeat = 0
       repeat_length = 0
       space = 32_768
+      # The used-symbol list and per-length counts in locals for the loop
+      # (`add_code_symbol` inlined); stored back at the end.
+      used_symbols = @code_used
+      length_count = @code_count
+      lengths_out = @lengths.to_unsafe
+      symbols_out = @code_symbols.to_unsafe
       # The bit buffer and input position live in locals while at least
       # 16 input bytes remain (a code length symbol and its extra bits take
       # at most 8 bits); near the end the careful readers take over.
@@ -708,7 +722,10 @@ module Mica::Brotli
         if code < 16
           repeat = 0
           if code != 0
-            add_code_symbol(symbol, code)
+            lengths_out[symbol] = code.to_u8!
+            symbols_out[used_symbols] = symbol.to_u16!
+            used_symbols &+= 1
+            length_count[code] &+= 1
             previous = code
             space -= 32_768 >> code
           end
@@ -735,9 +752,13 @@ module Mica::Brotli
           malformed("Code length repeat runs past the alphabet")
         end
         if repeat_length != 0
+          length_byte = repeat_length.to_u8!
           delta.times do |index|
-            add_code_symbol(symbol + index, repeat_length)
+            lengths_out[symbol &+ index] = length_byte
+            symbols_out[used_symbols &+ index] = (symbol &+ index).to_u16!
           end
+          used_symbols &+= delta
+          length_count[repeat_length] &+= delta
         end
         symbol += delta
         space -= delta << (15 - repeat_length) if repeat_length != 0
@@ -745,6 +766,8 @@ module Mica::Brotli
       @bits = bits
       @bit_count = nbits
       @in_pos = in_pos
+      @code_used = used_symbols
+      @code_count = length_count
       malformed("Prefix code is not complete") if space != 0
     end
 
@@ -776,15 +799,21 @@ module Mica::Brotli
     end
 
     private def inverse_move_to_front(map : Bytes, size : Int32) : Nil
-      mtf = @mtf
-      256.times { |index| mtf[index] = index.to_u8 }
+      mtf = @mtf.to_unsafe
+      # The identity permutation, eight bytes per store.
+      word = 0x0706050403020100_u64
+      32.times do |index|
+        (mtf + (index << 3)).as(UInt64*).value = word
+        word &+= 0x0808080808080808_u64
+      end
+      entries = map.to_unsafe
       size.times do |index|
-        position = map[index].to_i32
+        position = entries[index].to_i32!
         value = mtf[position]
-        map[index] = value
+        entries[index] = value
         while position > 0
-          mtf[position] = mtf[position - 1]
-          position -= 1
+          mtf[position] = mtf[position &- 1]
+          position &-= 1
         end
         mtf[0] = value
       end
@@ -828,7 +857,7 @@ module Mica::Brotli
       return if @ring_size == @full_ring || @ring_size == @ring_cap
       want = @pos.to_i64 + count
       return if want <= @ring_size
-      if @linear && @is_last
+      if @is_last
         # The last metablock's length is the rest of the output.
         size = want < @ring_cap ? want.to_i32 : @ring_cap
       else
@@ -842,10 +871,16 @@ module Mica::Brotli
       grow_ring(size) if size > @ring_size
     end
 
+    # Makes the ring *size* bytes long. A kept ring that is large enough
+    # grows in place; otherwise the bytes so far move to a new buffer.
+    # The new buffer is not zeroed: a copy only reads bytes the stream
+    # has written (a distance never reaches past the output so far).
     private def grow_ring(size : Int32) : Nil
-      ring = Bytes.new(size + SLACK)
-      ring.copy_from(@ring.to_unsafe, @pos) if @pos > 0
-      @ring = ring
+      if @ring.size < size + SLACK
+        ring = Bytes.new(GC.malloc_atomic(LibC::SizeT.new(size + SLACK)).as(UInt8*), size + SLACK)
+        ring.copy_from(@ring.to_unsafe, @pos) if @pos > 0
+        @ring = ring
+      end
       @ring_size = size
       update_out_end
     end
@@ -1027,6 +1062,9 @@ module Mica::Brotli
       @bit_count = nbits
       @in_pos = in_pos
       @pos = pos
+      @block_left[1] = command_left
+      @block_left[2] = distance_left
+      @distances = last_distances
     end
 
     private macro fast_load
@@ -1036,6 +1074,9 @@ module Mica::Brotli
       pos = @pos
       table = @table.to_unsafe
       ring = @ring.to_unsafe
+      command_left = @block_left[1]
+      distance_left = @block_left[2]
+      last_distances = @distances
     end
 
     # Executes whole commands with the bit buffer, the input position and
@@ -1052,15 +1093,22 @@ module Mica::Brotli
       nbits = 0
       in_pos = 0
       pos = 0
+      # The command and distance block counts and the last four distances
+      # live in locals: as instance variables every store to them had to be
+      # repeated in memory, since a ring write might alias them.
+      command_left = 0
+      distance_left = 0
+      last_distances = @distances
       table = @table.to_unsafe
       ring = @ring.to_unsafe
       fast_load
       while @meta_remaining > 0 && in_pos <= in_limit
-        if @block_left[1] == 0
+        if command_left == 0
           fast_switch(1)
+          command_left = @block_left[1]
           @command_tree = @command_trees.unsafe_fetch(@block_type[1])
         end
-        @block_left[1] &-= 1
+        command_left &-= 1
         fast_refill
         symbol = 0
         fast_symbol(@command_tree, symbol)
@@ -1149,19 +1197,20 @@ module Mica::Brotli
         end
 
         code = 0
-        distance = @distances[0]
+        distance = last_distances[0]
         unless @implicit_distance
-          if @block_left[2] == 0
+          if distance_left == 0
             fast_switch(2)
+            distance_left = @block_left[2]
             @distance_map_offset = @block_type[2] << 2
           end
-          @block_left[2] &-= 1
+          distance_left &-= 1
           context = copy_length > 4 ? 3 : copy_length - 2
           tree = @distance_trees.unsafe_fetch(@distance_map.unsafe_fetch(@distance_map_offset + context).to_i32!)
           fast_refill
           fast_symbol(tree, code)
           if code < 16
-            distance = @distances[SHORT_DISTANCE_INDEX[code]] + SHORT_DISTANCE_DELTA[code]
+            distance = last_distances.unsafe_fetch(SHORT_DISTANCE_INDEX.unsafe_fetch(code)) &+ SHORT_DISTANCE_DELTA.unsafe_fetch(code)
             if distance <= 0
               fast_save
               malformed("Distance code #{code} gives a distance below 1")
@@ -1188,10 +1237,7 @@ module Mica::Brotli
           next
         end
         if code != 0
-          @distances[3] = @distances[2]
-          @distances[2] = @distances[1]
-          @distances[1] = @distances[0]
-          @distances[0] = distance
+          last_distances = StaticArray[distance, last_distances[0], last_distances[1], last_distances[2]]
         end
         if copy_length > @meta_remaining
           fast_save
@@ -1346,6 +1392,7 @@ module Mica::Brotli
       malformed("Dictionary transform #{transform_id} does not exist") if transform_id >= Tables::TRANSFORMS.size
       offset = Dictionary::OFFSETS_BY_LENGTH[length] + word_index * length
       transform = Tables::TRANSFORMS.unsafe_fetch(transform_id)
+      return if write_plain_word(transform, offset, length)
       size = apply_transform(transform, Dictionary::DATA.to_unsafe + offset, length)
       malformed("Dictionary word runs past the metablock") if size > @meta_remaining
       if @pos + size <= @out_end
@@ -1366,6 +1413,45 @@ module Mica::Brotli
       @word_left = size
       @word_at = 0
       @stage = Stage::Word
+    end
+
+    # Writes a dictionary word whose transform only adds a prefix and a
+    # suffix (kind 0, the common case) straight into the ring, the word in
+    # whole 8-byte words, when it fits before `@out_end`. Returns false,
+    # writing nothing, otherwise.
+    private def write_plain_word(transform : Tables::Transform, offset : Int32, length : Int32) : Bool
+      return false unless transform.kind == 0
+      prefix = transform.prefix
+      suffix = transform.suffix
+      size = prefix.size &+ length &+ suffix.size
+      malformed("Dictionary word runs past the metablock") if size > @meta_remaining
+      return false if @pos &+ size > @out_end
+      data = Dictionary::DATA
+      # The 8-byte reads stay inside the dictionary.
+      return false if offset &+ length &+ 8 > data.size
+      destination = @ring.to_unsafe + @pos
+      index = 0
+      while index < prefix.size
+        destination[index] = prefix.unsafe_fetch(index)
+        index &+= 1
+      end
+      destination += prefix.size
+      source = data.to_unsafe + offset
+      at = 0
+      while at < length
+        (destination + at).as(UInt64*).value = (source + at).as(UInt64*).value
+        at &+= 8
+      end
+      destination += length
+      index = 0
+      while index < suffix.size
+        destination[index] = suffix.unsafe_fetch(index)
+        index &+= 1
+      end
+      @pos &+= size
+      @meta_remaining &-= size
+      @stage = Stage::Command
+      true
     end
 
     # Writes the transformed *word* into `@word`; returns its length.

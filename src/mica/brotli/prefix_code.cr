@@ -101,15 +101,23 @@ module Mica::Brotli
 
       at = 0
       code = 0
-      max_length = 0
-      # Codes of at most ROOT_BITS bits fill the root directly.
+      max_length = MAX_LENGTH
+      while max_length > 1 && count[max_length] == 0
+        max_length -= 1
+      end
+      # Codes of at most ROOT_BITS bits fill the root directly. A code no
+      # longer than *table_bits* fills only the first `1 << table_bits`
+      # entries, which then repeat to fill the root (as google/brotli's
+      # builder does): copying is cheaper than striding over 256 entries.
+      table_bits = max_length < ROOT_BITS ? max_length : ROOT_BITS
+      table_size = 1 << table_bits
+      table = store.to_unsafe + start
       (1..ROOT_BITS).each do |length|
         step = 1 << length
         count[length].times do
-          entry = (sorted[at].to_u32 << 8) | length.to_u32
+          entry = (sorted.unsafe_fetch(at).to_u32 << 8) | length.to_u32
           index = reverse(code, length)
-          table = store.to_unsafe + start
-          while index < ROOT_SIZE
+          while index < table_size
             table[index] = entry
             index += step
           end
@@ -117,6 +125,11 @@ module Mica::Brotli
           code += 1
         end
         code <<= 1
+      end
+      filled = table_size
+      while filled < ROOT_SIZE
+        (table + filled).copy_from(table, filled)
+        filled <<= 1
       end
 
       # Longer codes go to second-level tables, one per root index; codes
