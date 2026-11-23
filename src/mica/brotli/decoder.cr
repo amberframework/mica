@@ -628,17 +628,83 @@ module Mica::Brotli
       end
       malformed("Code length code is not complete") unless used == 1 || space == 0
 
-      code_table = @table.size
-      PrefixCode.build(code_lengths.to_slice, @table, @sorted, @code_symbols)
-      @code_used = 0
+      # The code length code is at most 5 bits long: a 32-entry table of
+      # (symbol << 3 | length), on the stack.
+      code_table = StaticArray(UInt16, 32).new(0_u16)
+      if used == 1
+        single = (0...18).find { |index| code_lengths[index] != 0 } || 0
+        32.times { |index| code_table[index] = (single << 3).to_u16 }
+      else
+        per_length = StaticArray(Int32, 6).new(0)
+        code_lengths.each { |length| per_length[length] += 1 }
+        # The first canonical code of each length.
+        next_code = StaticArray(Int32, 6).new(0)
+        code = 0
+        (1..5).each do |length|
+          next_code[length] = code
+          code = (code + per_length[length]) << 1
+        end
+        18.times do |symbol|
+          length = code_lengths[symbol].to_i32
+          next if length == 0
+          index = PrefixCode.reverse(next_code[length], length)
+          next_code[length] += 1
+          entry = ((symbol << 3) | length).to_u16
+          while index < 32
+            code_table[index] = entry
+            index += 1 << length
+          end
+        end
+      end
 
       symbol = 0
       previous = 8
       repeat = 0
       repeat_length = 0
       space = 32_768
+      # The bit buffer and input position live in locals while at least
+      # 16 input bytes remain (a code length symbol and its extra bits take
+      # at most 8 bits); near the end the careful readers take over.
+      input = @input.to_unsafe
+      bits = @bits
+      nbits = @bit_count
+      in_pos = @in_pos
+      in_limit = @in_end - 16
       while symbol < alphabet && space > 0
-        code = read_symbol(code_table)
+        careful = in_pos > in_limit
+        code = 0
+        extra = 0
+        if careful
+          @bits = bits
+          @bit_count = nbits
+          @in_pos = in_pos
+          refill if @bit_count < 5
+          entry = code_table[(@bits & 31).to_i32!]
+          width = (entry & 7).to_i32
+          truncated if width > @bit_count
+          @bits >>= width
+          @bit_count -= width
+          code = (entry >> 3).to_i32
+          extra = read_bits(code == 16 ? 2 : 3) if code >= 16
+          input = @input.to_unsafe
+          bits = @bits
+          nbits = @bit_count
+          in_pos = @in_pos
+          in_limit = @in_end - 16
+        else
+          fast_refill if nbits < 8
+          entry = code_table[(bits & 31).to_i32!]
+          width = (entry & 7).to_i32!
+          bits >>= width
+          nbits &-= width
+          code = (entry >> 3).to_i32!
+          if code >= 16
+            width = code == 16 ? 2 : 3
+            extra = (bits & ((1_u64 << width) &- 1)).to_i32!
+            bits >>= width
+            nbits &-= width
+          end
+        end
         if code < 16
           repeat = 0
           if code != 0
@@ -660,9 +726,14 @@ module Mica::Brotli
           repeat -= 2
           repeat <<= extra_bits
         end
-        repeat += read_bits(extra_bits) + 3
+        repeat += extra + 3
         delta = repeat - old_repeat
-        malformed("Code length repeat runs past the alphabet") if symbol + delta > alphabet
+        if symbol + delta > alphabet
+          @bits = bits
+          @bit_count = nbits
+          @in_pos = in_pos
+          malformed("Code length repeat runs past the alphabet")
+        end
         if repeat_length != 0
           delta.times do |index|
             add_code_symbol(symbol + index, repeat_length)
@@ -671,9 +742,10 @@ module Mica::Brotli
         symbol += delta
         space -= delta << (15 - repeat_length) if repeat_length != 0
       end
+      @bits = bits
+      @bit_count = nbits
+      @in_pos = in_pos
       malformed("Prefix code is not complete") if space != 0
-      # The code length code's table is not needed any more.
-      @table.truncate(code_table)
     end
 
     private def read_context_map(map : Bytes, size : Int32, trees : Int32) : Nil
@@ -891,37 +963,63 @@ module Mica::Brotli
 
     # The fast loop starts a symbol only while this many input bytes
     # remain, so its refills can load 8 bytes without checking the end.
-    FAST_INPUT_MARGIN = 64
+    FAST_INPUT_MARGIN = 128
 
     # Refills the local bit buffer of `fast_commands` from 8 input bytes.
     private macro fast_refill
       %word = (input + in_pos).as(UInt64*).value
       bits |= %word << nbits
-      %count = (63 - nbits) >> 3
-      in_pos += %count
-      nbits += %count << 3
+      %count = (63 &- nbits) >> 3
+      in_pos &+= %count
+      nbits &+= %count << 3
     end
 
     # Reads one symbol in `fast_commands` (at least 15 bits are buffered).
     private macro fast_symbol(tree, into)
-      %entry = table[{{tree}} + (bits & 0xFF).to_i32]
-      %width = (%entry & 0xFF).to_i32
+      %entry = table[{{tree}} &+ (bits & 0xFF).to_i32!]
+      %width = (%entry & 0xFF).to_i32!
       if %width > PrefixCode::ROOT_BITS
-        %sub = %width - PrefixCode::ROOT_BITS
-        %entry = table[{{tree}} + (%entry >> 8).to_i32 + ((bits >> PrefixCode::ROOT_BITS) & ((1_u64 << %sub) - 1)).to_i32]
-        %width = (%entry & 0xFF).to_i32 + PrefixCode::ROOT_BITS
+        %sub = %width &- PrefixCode::ROOT_BITS
+        %entry = table[{{tree}} &+ (%entry >> 8).to_i32! &+ ((bits >> PrefixCode::ROOT_BITS) & ((1_u64 << %sub) &- 1)).to_i32!]
+        %width = (%entry & 0xFF).to_i32! &+ PrefixCode::ROOT_BITS
       end
       bits >>= %width
-      nbits -= %width
-      {{into}} = (%entry >> 8).to_i32
+      nbits &-= %width
+      {{into}} = (%entry >> 8).to_i32!
     end
 
     # Reads *count* (at most 24) bits in `fast_commands`.
     private macro fast_bits(count, into)
       fast_refill if nbits < {{count}}
-      {{into}} = (bits & ((1_u64 << {{count}}) - 1)).to_i32
+      {{into}} = (bits & ((1_u64 << {{count}}) &- 1)).to_i32!
       bits >>= {{count}}
-      nbits -= {{count}}
+      nbits &-= {{count}}
+    end
+
+    # Switches the block type of *category* in `fast_commands` (RFC 7932,
+    # section 6): reads the block type code and the block count.
+    private macro fast_switch(category)
+      fast_refill
+      %code = 0
+      fast_symbol(@type_tree[{{category}}], %code)
+      %types = @num_types[{{category}}]
+      %block_type =
+        case %code
+        when 0 then @type_ring[{{category}} * 2]
+        when 1 then @type_ring[{{category}} * 2 + 1] &+ 1
+        else        %code &- 2
+        end
+      %block_type &-= %types if %block_type >= %types
+      @type_ring[{{category}} * 2] = @type_ring[{{category}} * 2 + 1]
+      @type_ring[{{category}} * 2 + 1] = %block_type
+      @block_type[{{category}}] = %block_type
+      fast_refill
+      %length_code = 0
+      fast_symbol(@length_tree[{{category}}], %length_code)
+      %extra = 0
+      %width = BLOCK_LENGTH_EXTRA[%length_code]
+      fast_bits(%width, %extra)
+      @block_left[{{category}}] = BLOCK_LENGTH_BASE[%length_code] &+ %extra
     end
 
     private macro fast_save
@@ -959,13 +1057,10 @@ module Mica::Brotli
       fast_load
       while @meta_remaining > 0 && in_pos <= in_limit
         if @block_left[1] == 0
-          fast_save
-          switch_block(1)
+          fast_switch(1)
           @command_tree = @command_trees.unsafe_fetch(@block_type[1])
-          fast_load
-          break if in_pos > in_limit
         end
-        @block_left[1] -= 1
+        @block_left[1] &-= 1
         fast_refill
         symbol = 0
         fast_symbol(@command_tree, symbol)
@@ -977,13 +1072,13 @@ module Mica::Brotli
         width = INSERT_EXTRA[insert_code]
         if width > 0
           fast_bits(width, extra)
-          insert += extra
+          insert &+= extra
         end
         copy_length = COPY_BASE[copy_code]
         width = COPY_EXTRA[copy_code]
         if width > 0
           fast_bits(width, extra)
-          copy_length += extra
+          copy_length &+= extra
         end
         @implicit_distance = symbol < 128
         @copy_length = copy_length
@@ -991,7 +1086,7 @@ module Mica::Brotli
           fast_save
           malformed("Insert length runs past the metablock")
         end
-        if pos + insert > @out_end
+        if pos &+ insert > @out_end
           fast_save
           @insert_left = insert
           @stage = Stage::Insert
@@ -999,8 +1094,8 @@ module Mica::Brotli
         end
         if insert > 0
           if pos > 0
-            p1 = ring[pos - 1].to_i32
-            p2 = pos > 1 ? ring[pos - 2].to_i32 : (@ring_base + pos >= 2 ? ring[@ring_size - 1].to_i32 : 0)
+            p1 = ring[pos &- 1].to_i32!
+            p2 = pos > 1 ? ring[pos &- 2].to_i32 : (@ring_base + pos >= 2 ? ring[@ring_size - 1].to_i32 : 0)
           else
             fast_save
             p1, p2 = last_two_bytes
@@ -1017,37 +1112,35 @@ module Mica::Brotli
               fast_save
               @block_left[0] = block_left
               @insert_left = left
-              @meta_remaining -= insert - left
+              @meta_remaining &-= insert - left
               @stage = Stage::Insert
               return
             end
             if block_left == 0
-              fast_save
-              switch_block(0)
+              fast_switch(0)
               select_literal_block
-              fast_load
               block_left = @block_left[0]
               fixed_tree = @literal_tree_fixed
               lookup_row = lookup + @context_lookup_offset
               map_row = @literal_map.to_unsafe + @literal_map_offset
               next
             end
-            block_left -= 1
+            block_left &-= 1
             tree = fixed_tree
             if tree < 0
-              tree = trees[map_row[lookup_row[p1] | lookup_row[256 + p2]]]
+              tree = trees[map_row[lookup_row[p1] | lookup_row[256 &+ p2]]]
             end
             fast_refill if nbits < 15
             literal = 0
             fast_symbol(tree, literal)
-            ring[pos] = literal.to_u8
-            pos += 1
+            ring[pos] = literal.to_u8!
+            pos &+= 1
             p2 = p1
             p1 = literal
-            left -= 1
+            left &-= 1
           end
           @block_left[0] = block_left
-          @meta_remaining -= insert
+          @meta_remaining &-= insert
         end
         if @meta_remaining == 0
           fast_save
@@ -1059,14 +1152,12 @@ module Mica::Brotli
         distance = @distances[0]
         unless @implicit_distance
           if @block_left[2] == 0
-            fast_save
-            switch_block(2)
+            fast_switch(2)
             @distance_map_offset = @block_type[2] << 2
-            fast_load
           end
-          @block_left[2] -= 1
+          @block_left[2] &-= 1
           context = copy_length > 4 ? 3 : copy_length - 2
-          tree = @distance_trees.unsafe_fetch(@distance_map.unsafe_fetch(@distance_map_offset + context).to_i32)
+          tree = @distance_trees.unsafe_fetch(@distance_map.unsafe_fetch(@distance_map_offset + context).to_i32!)
           fast_refill
           fast_symbol(tree, code)
           if code < 16
@@ -1119,16 +1210,16 @@ module Mica::Brotli
           # slack or in history no back reference can reach.
           at = 0
           while at < copy_length
-            (ring + pos + at).as(UInt64*).value = (ring + source + at).as(UInt64*).value
-            at += 8
+            (ring + (pos &+ at)).as(UInt64*).value = (ring + (source &+ at)).as(UInt64*).value
+            at &+= 8
           end
         else
           copy_length.times do |index|
-            ring[pos + index] = ring[source + index]
+            ring[pos &+ index] = ring[source &+ index]
           end
         end
-        pos += copy_length
-        @meta_remaining -= copy_length
+        pos &+= copy_length
+        @meta_remaining &-= copy_length
       end
       fast_save
       @stage = Stage::Command
@@ -1258,8 +1349,15 @@ module Mica::Brotli
       size = apply_transform(transform, Dictionary::DATA.to_unsafe + offset, length)
       malformed("Dictionary word runs past the metablock") if size > @meta_remaining
       if @pos + size <= @out_end
-        # Room before the next stop: write the word straight out.
-        (@ring.to_unsafe + @pos).copy_from(@word.to_unsafe, size)
+        # Room before the next stop: write the word straight out, in whole
+        # 8-byte words (the ring has slack past its end).
+        source = @word.to_unsafe
+        destination = @ring.to_unsafe + @pos
+        at = 0
+        while at < size
+          (destination + at).as(UInt64*).value = (source + at).as(UInt64*).value
+          at &+= 8
+        end
         @pos += size
         @meta_remaining -= size
         @stage = Stage::Command
@@ -1272,10 +1370,13 @@ module Mica::Brotli
 
     # Writes the transformed *word* into `@word`; returns its length.
     private def apply_transform(transform : Tables::Transform, word : UInt8*, length : Int32) : Int32
-      buffer = @word
+      buffer = @word.to_unsafe
       prefix = transform.prefix
-      buffer.to_unsafe.copy_from(prefix.to_unsafe, prefix.size)
-      size = prefix.size
+      size = 0
+      while size < prefix.size
+        buffer[size] = prefix.unsafe_fetch(size)
+        size &+= 1
+      end
       kind = transform.kind.to_i32
       start = 0
       if 1 <= kind <= 9
@@ -1285,8 +1386,12 @@ module Mica::Brotli
         length -= start
       end
       word_start = size
-      (buffer.to_unsafe + size).copy_from(word + start, length)
-      size += length
+      index = 0
+      while index < length
+        buffer[size &+ index] = word[start &+ index]
+        index &+= 1
+      end
+      size &+= length
       # Uppercasing may touch up to two bytes past the word; those bytes
       # are then overwritten by the suffix or ignored.
       buffer[size] = 0_u8
@@ -1303,13 +1408,17 @@ module Mica::Brotli
         end
       end
       suffix = transform.suffix
-      (buffer.to_unsafe + size).copy_from(suffix.to_unsafe, suffix.size)
-      size + suffix.size
+      index = 0
+      while index < suffix.size
+        buffer[size &+ index] = suffix.unsafe_fetch(index)
+        index &+= 1
+      end
+      size &+ suffix.size
     end
 
     # RFC 7932, section 8: uppercases the character at *at*; returns its
     # length in this simplified UTF-8 model.
-    private def uppercase(buffer : Bytes, at : Int32) : Int32
+    private def uppercase(buffer : UInt8*, at : Int32) : Int32
       byte = buffer[at]
       if byte < 0xC0
         buffer[at] = byte ^ 32 if 'a'.ord <= byte <= 'z'.ord
