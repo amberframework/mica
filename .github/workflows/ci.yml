@@ -22,6 +22,8 @@ jobs:
         run: crystal tool format --check src spec
       - name: Fetch the YAML test suite (pinned commit, sha256 verified)
         run: ruby conformance/yaml/fetch_suite.rb
+      - name: Fetch the HPACK test cases (pinned commit, sha256 verified)
+        run: ruby conformance/hpack/fetch_test_case.rb
       - name: Run specs
         run: crystal spec
 
