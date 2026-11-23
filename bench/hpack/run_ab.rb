@@ -48,7 +48,9 @@ File.open(corpus, 'rb') do |file|
   end
 end
 
-def median(values) = values.sort[values.size / 2]
+def median(values)
+  values.sort[values.size / 2]
+end
 
 ratios = (0...rounds).map do |round|
   by_engine = samples.select { |sample| sample[0] == round }.to_h { |sample| [sample[1], sample[2]] }
