@@ -1,0 +1,28 @@
+# Requirements for Mica::Brotli (milestone Z4, the pure-Crystal Brotli
+# decoder): the decoder requirements of RFC 7932, the public API and the
+# decode limits. The differential campaign against google/brotli 1.2.1
+# (fuzz/brotli_differential.cr) covers every construct the reference
+# encoder emits and the rejection of mutated streams.
+BROTLI-7932-A-dictionary	RFC 7932 Appendix A	The 122,784-byte static dictionary is embedded byte for byte, with NDBITS and DOFFSET per word length
+BROTLI-7932-B-transforms	RFC 7932 Appendix B	The 121 word transforms (prefix, elementary transform, suffix) are embedded in transform-ID order
+BROTLI-CONFORMANCE-testdata	google/brotli tests/testdata	Every conformance file of google/brotli v1.2.1 decodes to its original, one-shot and streaming
+BROTLI-7932-9.1-window	RFC 7932 9.1	WBITS 10 to 24 are decoded from the stream header
+BROTLI-7932-9.1-large-window	RFC 7932 9.1	The large-window marker (an extension outside RFC 7932) is rejected
+BROTLI-7932-9.2-uncompressed	RFC 7932 9.2	Uncompressed metablocks are copied after byte alignment
+BROTLI-7932-9.2-metadata	RFC 7932 9.2	Metadata metablocks are skipped and produce no output, including as the last metablock (as libbrotlidec does)
+BROTLI-7932-9.2-exuberant-nibble	RFC 7932 9.2	A metablock length of 5 or 6 nibbles whose last nibble is zero, or a metadata length whose last byte is zero, is rejected
+BROTLI-7932-9.2-padding	RFC 7932 9.2	Padding bits before uncompressed and metadata contents and after the last metablock must be zero
+BROTLI-7932-3.4-simple-duplicate	RFC 7932 3.4	A simple prefix code that lists a symbol twice or a symbol outside the alphabet is rejected
+BROTLI-7932-9.3-command-length	RFC 7932 9.3	Inserts, copies and dictionary words that run past their metablock are rejected
+BROTLI-7932-4-distance-copy	RFC 7932 4	Back references copy from the window, overlapping copies included
+BROTLI-7932-4-short-distance	RFC 7932 4	Short distance codes that give a distance below 1 are rejected
+BROTLI-7932-8-dictionary	RFC 7932 8	Distances beyond the window address static dictionary words and their transforms
+BROTLI-API-trailing	Mica API	Bytes after the last metablock are rejected
+BROTLI-API-truncation	Mica API	Input that ends inside a stream raises TruncatedStreamError
+BROTLI-API-streaming	Mica API	The Reader gives the one-shot result for every input chunking and read size, across ring wraps
+BROTLI-LIMIT-output	Mica limits	Output stops at max_output_bytes before the next byte is written
+BROTLI-LIMIT-ratio	Mica limits	Output beyond max_ratio times the input consumed is stopped once it passes 1 MiB
+BROTLI-LIMIT-window	Mica limits	A window above max_window_bytes is refused before any buffer is allocated
+BROTLI-LIMIT-metadata	Mica limits	Metadata beyond max_metadata_bytes is refused
+BROTLI-LIMIT-work	Mica limits	The work budget and the deadline stop a decode
+BROTLI-LIMIT-memory	Mica limits	The Reader's memory is bounded by the window, not by the output

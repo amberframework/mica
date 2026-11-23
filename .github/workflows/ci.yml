@@ -24,6 +24,8 @@ jobs:
         run: ruby conformance/yaml/fetch_suite.rb
       - name: Fetch the Encoding Standard and WPT vectors (pinned commits, sha256 verified)
         run: ruby conformance/encoding/fetch_vectors.rb
+      - name: Fetch the Brotli test files (pinned commit, sha256 verified)
+        run: ruby conformance/brotli/fetch_testdata.rb
       - name: Run specs
         run: crystal spec
 

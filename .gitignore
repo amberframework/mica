@@ -12,3 +12,4 @@ conformance/yaml-test-suite/
 docs/brand/fonts/
 docs/brand/source/textpath
 conformance/encoding-vectors/
+conformance/brotli-testdata/
