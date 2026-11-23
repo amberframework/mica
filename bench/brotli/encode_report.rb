@@ -11,8 +11,14 @@ def geo(values)
   Math.exp(values.sum { |v| Math.log(v) } / values.size)
 end
 
-def say(ratio)
-  ratio >= 1 ? "#{format("%.2f", ratio)}× as fast" : "#{format("%.2f", 1 / ratio)}× slower"
+# "1.20× as fast" or "1.20× slower"; with *compared*, the comparison word
+# the sentence needs ("as fast as", "slower than").
+def say(ratio, compared = false)
+  if ratio >= 1
+    "#{format("%.2f", ratio)}× as fast#{compared ? " as" : ""}"
+  else
+    "#{format("%.2f", 1 / ratio)}× slower#{compared ? " than" : ""}"
+  end
 end
 
 def percent(ratio)
@@ -36,7 +42,7 @@ data["cases"].map { |c| c[1] }.uniq.each do |quality|
   total_ref = keys.sum { |key| data["sizes"][key]["ref"] }
   puts "### Quality #{quality} encode, #{data["host"]} (#{data["cpu"]}), #{rounds} rounds, window 22"
   puts
-  puts "- Speed, geometric mean over #{keys.size} cases: Mica is **#{say(overall)}** than libbrotlienc 1.2.1 (95% interval #{format("%.3f", boot[50])} to #{format("%.3f", boot[1949])}× its speed)."
+  puts "- Speed, geometric mean over #{keys.size} cases: Mica is **#{say(overall, true)}** libbrotlienc 1.2.1 (95% interval #{format("%.3f", boot[50])} to #{format("%.3f", boot[1949])}× its speed)."
   puts "- Size: geometric mean **#{percent(geo(size.values))}**; corpus total #{total_mica} bytes against #{total_ref} (**#{percent(total_mica.to_f / total_ref)}**)."
   puts
   puts "| case | bytes | libbrotlienc size | Mica size | size | libbrotlienc MB/s | Mica MB/s | speed (95% interval) |"

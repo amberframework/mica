@@ -46,7 +46,7 @@ matches reach (1 << window_bits) - 16 bytes back). Anything else raises
 | 0, 1 | one candidate per hash, greedy | one prefix code per category |
 | 2, 3 | hash chains of 4 and 8, last-distance check | same |
 | 4 | chains of 16, lazy matching, four-entry distance cache, static dictionary | same |
-| 5 to 9 | chains of 16 to 256, lazy matching, dictionary | literal context modeling (UTF8 or signed mode, up to 16 clusters chosen by an entropy estimate) and greedy block splitting of literals, commands and distances |
+| 5 to 9 | libbrotlienc 1.2.1's hashers: buckets of the last 16 positions with a tag byte each (5, 6), or of the last 64 to 256 (7 to 9), 4-byte hashes (5-byte from a 1 MiB input); 4, 10 or 16 cached distances, lazy matching, static dictionary | libbrotlienc's greedy metablock: static literal context maps (1, 2, 3 or 13 contexts, chosen from UTF-8 byte-class statistics) and greedy block splitting of literals, commands and distances. On the benchmark corpus at window 22, `Brotli.encode` writes the same bytes as libbrotlienc 1.2.1 |
 | 10, 11 | a shortest-path (optimal) parse over chains of 64 and 256; 11 re-estimates its cost model and searches again | same |
 
 Every quality writes complex prefix codes with the run-length code
@@ -64,9 +64,10 @@ last one writes no bytes.
 
 | What | Bound |
 |---|---|
-| Hash heads | 4 B × 2^14 (quality 0) to 2^17 (quality 5 and up), fewer for inputs under 64 KiB |
-| Hash chain (quality 2 and up) | 4 B × min(window, input, 2^20): at most 4 MiB |
-| Metablock | 256 KiB of input below quality 5, 1 MiB from 5; commands and histograms for one metablock |
+| Hash heads (0 to 4, 10, 11) | 4 B × 2^14 (quality 0) to 2^17, fewer for inputs under 64 KiB |
+| Hash chain (2 to 4, 10, 11) | 4 B × min(window, input, 2^20): at most 4 MiB |
+| Hash table (5 to 9) | 2^14 buckets × 16 slots × 5 B (5: 1.3 MiB) up to 2^15 × 256 × 4 B (9: 32 MiB), outside the garbage collector; only the pages an input touches are faulted in |
+| Metablock | 256 KiB of input below quality 5; from 5, blocks of 64 KiB (256 KiB at 9) gather into a metablock of up to 2^(window + 1) bytes, with commands and per-metablock scratch outside the garbage collector |
 | Optimal parse (10, 11) | segments of 64 Ki positions: about 30 B per position plus the matches found |
 | `Writer` buffer | grows to 2 × window + one metablock (9 MiB at the default window), and drops whole windows of history |
 

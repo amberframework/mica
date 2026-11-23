@@ -1,5 +1,5 @@
 module Mica::Brotli
-  class Encoder
+  class ClassicEncoder
     # Positions per optimal-parse segment; matches stop at its end.
     SEGMENT = 1 << 16
 
