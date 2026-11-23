@@ -3,36 +3,33 @@ module Mica::Encoding
   # longest label either rule knows is under 20 bytes.
   MAX_LABEL_BYTES = 64
 
-  # Names whose iconv meaning `LabelRule::IconvCompatible` keeps, already
-  # trimmed and ASCII-lowercased. Names not listed here fall through to
-  # the Encoding Standard's labels (minus replacement's), which already
-  # cover `Shift_JIS`, `EUC-JP`, `GBK`, `windows-1252`, `KOI8-R` and so on
-  # under their usual iconv spellings.
-  ICONV_NAMES = {
-    "utf-8" => Codec::UTF8, "utf8" => Codec::UTF8,
-    "utf-16" => Codec::UTF16, "utf16" => Codec::UTF16, "unicode" => Codec::UTF16,
-    "utf-16be" => Codec::UTF16BE, "utf16be" => Codec::UTF16BE,
-    "utf-16le" => Codec::UTF16LE, "utf16le" => Codec::UTF16LE,
-    "utf-32" => Codec::UTF32, "utf32" => Codec::UTF32,
-    "utf-32be" => Codec::UTF32BE, "utf32be" => Codec::UTF32BE, "ucs-4" => Codec::UTF32BE,
-    "ucs4" => Codec::UTF32BE, "ucs-4be" => Codec::UTF32BE, "iso-10646-ucs-4" => Codec::UTF32BE,
-    "utf-32le" => Codec::UTF32LE, "utf32le" => Codec::UTF32LE, "ucs-4le" => Codec::UTF32LE,
-    "ucs-2" => Codec::UCS2, "ucs2" => Codec::UCS2, "iso-10646-ucs-2" => Codec::UCS2, "csunicode" => Codec::UCS2,
-    "ucs-2be" => Codec::UCS2BE, "ucs2be" => Codec::UCS2BE, "unicodebig" => Codec::UCS2BE,
-    "ucs-2le" => Codec::UCS2LE, "ucs2le" => Codec::UCS2LE, "unicodelittle" => Codec::UCS2LE,
-    "ascii" => Codec::USASCII, "us-ascii" => Codec::USASCII, "ansi_x3.4-1968" => Codec::USASCII,
-    "ansi_x3.4-1986" => Codec::USASCII, "iso646-us" => Codec::USASCII, "iso_646.irv:1991" => Codec::USASCII,
-    "iso-ir-6" => Codec::USASCII, "us" => Codec::USASCII, "646" => Codec::USASCII, "csascii" => Codec::USASCII,
-    "cp367" => Codec::USASCII, "ibm367" => Codec::USASCII,
-    "iso-8859-1" => Codec::ISO8859_1, "iso8859-1" => Codec::ISO8859_1, "iso_8859-1" => Codec::ISO8859_1,
-    "iso88591" => Codec::ISO8859_1, "iso_8859-1:1987" => Codec::ISO8859_1, "8859_1" => Codec::ISO8859_1,
-    "latin1" => Codec::ISO8859_1, "l1" => Codec::ISO8859_1, "cp819" => Codec::ISO8859_1,
-    "ibm819" => Codec::ISO8859_1, "iso-ir-100" => Codec::ISO8859_1, "csisolatin1" => Codec::ISO8859_1,
-    "big5-hkscs" => Codec::Big5HKSCS, "big5hkscs" => Codec::Big5HKSCS,
-    "cp936" => Codec::GBK, "euc-cn" => Codec::GBK, "euccn" => Codec::GBK,
-    "cp949" => Codec::EUCKR, "uhc" => Codec::EUCKR, "cp950" => Codec::Big5,
-    "eucjp" => Codec::EUCJP, "euckr" => Codec::EUCKR, "macroman" => Codec::Macintosh,
-  }
+  # Returns the codec for a name whose iconv meaning `LabelRule::IconvCompatible`
+  # keeps, given already trimmed and ASCII-lowercased, or nil. Names not
+  # listed here fall through to the Encoding Standard's labels (minus
+  # replacement's), which already cover `Shift_JIS`, `EUC-JP`, `GBK`,
+  # `windows-1252`, `KOI8-R` and so on under their usual iconv spellings.
+  def self.iconv_name(key : String) : Codec?
+    case key
+    when "utf-8", "utf8"                                                                                                                                  then Codec::UTF8
+    when "utf-16", "utf16", "unicode"                                                                                                                     then Codec::UTF16
+    when "utf-16be", "utf16be"                                                                                                                            then Codec::UTF16BE
+    when "utf-16le", "utf16le"                                                                                                                            then Codec::UTF16LE
+    when "utf-32", "utf32"                                                                                                                                then Codec::UTF32
+    when "utf-32be", "utf32be", "ucs-4", "ucs4", "ucs-4be", "iso-10646-ucs-4"                                                                             then Codec::UTF32BE
+    when "utf-32le", "utf32le", "ucs-4le"                                                                                                                 then Codec::UTF32LE
+    when "ucs-2", "ucs2", "iso-10646-ucs-2", "csunicode"                                                                                                  then Codec::UCS2
+    when "ucs-2be", "ucs2be", "unicodebig"                                                                                                                then Codec::UCS2BE
+    when "ucs-2le", "ucs2le", "unicodelittle"                                                                                                             then Codec::UCS2LE
+    when "ascii", "us-ascii", "ansi_x3.4-1968", "ansi_x3.4-1986", "iso646-us", "iso_646.irv:1991", "iso-ir-6", "us", "646", "csascii", "cp367", "ibm367"  then Codec::USASCII
+    when "iso-8859-1", "iso8859-1", "iso_8859-1", "iso88591", "iso_8859-1:1987", "8859_1", "latin1", "l1", "cp819", "ibm819", "iso-ir-100", "csisolatin1" then Codec::ISO8859_1
+    when "big5-hkscs", "big5hkscs"                                                                                                                        then Codec::Big5HKSCS
+    when "cp936", "euc-cn", "euccn"                                                                                                                       then Codec::GBK
+    when "cp949", "uhc", "euckr"                                                                                                                          then Codec::EUCKR
+    when "cp950"                                                                                                                                          then Codec::Big5
+    when "eucjp"                                                                                                                                          then Codec::EUCJP
+    when "macroman"                                                                                                                                       then Codec::Macintosh
+    end
+  end
 
   # Returns the encoding *label* names under *rule*, or nil when the rule
   # does not know it. Leading and trailing ASCII whitespace is ignored and
@@ -50,10 +47,10 @@ module Mica::Encoding
     return if label.bytesize > MAX_LABEL_BYTES
     key = normalize_label(label)
     if rule.web?
-      Tables::WEB_LABELS[key]?
-    elsif codec = ICONV_NAMES[key]?
+      Tables.web_label(key)
+    elsif codec = iconv_name(key)
       codec
-    elsif codec = Tables::WEB_LABELS[key]?
+    elsif codec = Tables.web_label(key)
       codec unless codec.replacement?
     end
   end

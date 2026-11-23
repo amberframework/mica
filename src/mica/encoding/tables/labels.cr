@@ -5,235 +5,243 @@
 #   encodings.json sha256 078212b3697f60b81225b6671bd9da2604497abff0aa8e96e4d46605c02ac9e7
 
 module Mica::Encoding::Tables
-  # 228 labels, already trimmed and ASCII-lowercased.
-  WEB_LABELS = {
-    "unicode-1-1-utf-8"   => Codec::UTF8,
-    "unicode11utf8"       => Codec::UTF8,
-    "unicode20utf8"       => Codec::UTF8,
-    "utf-8"               => Codec::UTF8,
-    "utf8"                => Codec::UTF8,
-    "x-unicode20utf8"     => Codec::UTF8,
-    "866"                 => Codec::IBM866,
-    "cp866"               => Codec::IBM866,
-    "csibm866"            => Codec::IBM866,
-    "ibm866"              => Codec::IBM866,
-    "csisolatin2"         => Codec::ISO8859_2,
-    "iso-8859-2"          => Codec::ISO8859_2,
-    "iso-ir-101"          => Codec::ISO8859_2,
-    "iso8859-2"           => Codec::ISO8859_2,
-    "iso88592"            => Codec::ISO8859_2,
-    "iso_8859-2"          => Codec::ISO8859_2,
-    "iso_8859-2:1987"     => Codec::ISO8859_2,
-    "l2"                  => Codec::ISO8859_2,
-    "latin2"              => Codec::ISO8859_2,
-    "csisolatin3"         => Codec::ISO8859_3,
-    "iso-8859-3"          => Codec::ISO8859_3,
-    "iso-ir-109"          => Codec::ISO8859_3,
-    "iso8859-3"           => Codec::ISO8859_3,
-    "iso88593"            => Codec::ISO8859_3,
-    "iso_8859-3"          => Codec::ISO8859_3,
-    "iso_8859-3:1988"     => Codec::ISO8859_3,
-    "l3"                  => Codec::ISO8859_3,
-    "latin3"              => Codec::ISO8859_3,
-    "csisolatin4"         => Codec::ISO8859_4,
-    "iso-8859-4"          => Codec::ISO8859_4,
-    "iso-ir-110"          => Codec::ISO8859_4,
-    "iso8859-4"           => Codec::ISO8859_4,
-    "iso88594"            => Codec::ISO8859_4,
-    "iso_8859-4"          => Codec::ISO8859_4,
-    "iso_8859-4:1988"     => Codec::ISO8859_4,
-    "l4"                  => Codec::ISO8859_4,
-    "latin4"              => Codec::ISO8859_4,
-    "csisolatincyrillic"  => Codec::ISO8859_5,
-    "cyrillic"            => Codec::ISO8859_5,
-    "iso-8859-5"          => Codec::ISO8859_5,
-    "iso-ir-144"          => Codec::ISO8859_5,
-    "iso8859-5"           => Codec::ISO8859_5,
-    "iso88595"            => Codec::ISO8859_5,
-    "iso_8859-5"          => Codec::ISO8859_5,
-    "iso_8859-5:1988"     => Codec::ISO8859_5,
-    "arabic"              => Codec::ISO8859_6,
-    "asmo-708"            => Codec::ISO8859_6,
-    "csiso88596e"         => Codec::ISO8859_6,
-    "csiso88596i"         => Codec::ISO8859_6,
-    "csisolatinarabic"    => Codec::ISO8859_6,
-    "ecma-114"            => Codec::ISO8859_6,
-    "iso-8859-6"          => Codec::ISO8859_6,
-    "iso-8859-6-e"        => Codec::ISO8859_6,
-    "iso-8859-6-i"        => Codec::ISO8859_6,
-    "iso-ir-127"          => Codec::ISO8859_6,
-    "iso8859-6"           => Codec::ISO8859_6,
-    "iso88596"            => Codec::ISO8859_6,
-    "iso_8859-6"          => Codec::ISO8859_6,
-    "iso_8859-6:1987"     => Codec::ISO8859_6,
-    "csisolatingreek"     => Codec::ISO8859_7,
-    "ecma-118"            => Codec::ISO8859_7,
-    "elot_928"            => Codec::ISO8859_7,
-    "greek"               => Codec::ISO8859_7,
-    "greek8"              => Codec::ISO8859_7,
-    "iso-8859-7"          => Codec::ISO8859_7,
-    "iso-ir-126"          => Codec::ISO8859_7,
-    "iso8859-7"           => Codec::ISO8859_7,
-    "iso88597"            => Codec::ISO8859_7,
-    "iso_8859-7"          => Codec::ISO8859_7,
-    "iso_8859-7:1987"     => Codec::ISO8859_7,
-    "sun_eu_greek"        => Codec::ISO8859_7,
-    "csiso88598e"         => Codec::ISO8859_8,
-    "csisolatinhebrew"    => Codec::ISO8859_8,
-    "hebrew"              => Codec::ISO8859_8,
-    "iso-8859-8"          => Codec::ISO8859_8,
-    "iso-8859-8-e"        => Codec::ISO8859_8,
-    "iso-ir-138"          => Codec::ISO8859_8,
-    "iso8859-8"           => Codec::ISO8859_8,
-    "iso88598"            => Codec::ISO8859_8,
-    "iso_8859-8"          => Codec::ISO8859_8,
-    "iso_8859-8:1988"     => Codec::ISO8859_8,
-    "visual"              => Codec::ISO8859_8,
-    "csiso88598i"         => Codec::ISO8859_8_I,
-    "iso-8859-8-i"        => Codec::ISO8859_8_I,
-    "logical"             => Codec::ISO8859_8_I,
-    "csisolatin6"         => Codec::ISO8859_10,
-    "iso-8859-10"         => Codec::ISO8859_10,
-    "iso-ir-157"          => Codec::ISO8859_10,
-    "iso8859-10"          => Codec::ISO8859_10,
-    "iso885910"           => Codec::ISO8859_10,
-    "l6"                  => Codec::ISO8859_10,
-    "latin6"              => Codec::ISO8859_10,
-    "iso-8859-13"         => Codec::ISO8859_13,
-    "iso8859-13"          => Codec::ISO8859_13,
-    "iso885913"           => Codec::ISO8859_13,
-    "iso-8859-14"         => Codec::ISO8859_14,
-    "iso8859-14"          => Codec::ISO8859_14,
-    "iso885914"           => Codec::ISO8859_14,
-    "csisolatin9"         => Codec::ISO8859_15,
-    "iso-8859-15"         => Codec::ISO8859_15,
-    "iso8859-15"          => Codec::ISO8859_15,
-    "iso885915"           => Codec::ISO8859_15,
-    "iso_8859-15"         => Codec::ISO8859_15,
-    "l9"                  => Codec::ISO8859_15,
-    "iso-8859-16"         => Codec::ISO8859_16,
-    "cskoi8r"             => Codec::KOI8_R,
-    "koi"                 => Codec::KOI8_R,
-    "koi8"                => Codec::KOI8_R,
-    "koi8-r"              => Codec::KOI8_R,
-    "koi8_r"              => Codec::KOI8_R,
-    "koi8-ru"             => Codec::KOI8_U,
-    "koi8-u"              => Codec::KOI8_U,
-    "csmacintosh"         => Codec::Macintosh,
-    "mac"                 => Codec::Macintosh,
-    "macintosh"           => Codec::Macintosh,
-    "x-mac-roman"         => Codec::Macintosh,
-    "dos-874"             => Codec::Windows874,
-    "iso-8859-11"         => Codec::Windows874,
-    "iso8859-11"          => Codec::Windows874,
-    "iso885911"           => Codec::Windows874,
-    "tis-620"             => Codec::Windows874,
-    "windows-874"         => Codec::Windows874,
-    "cp1250"              => Codec::Windows1250,
-    "windows-1250"        => Codec::Windows1250,
-    "x-cp1250"            => Codec::Windows1250,
-    "cp1251"              => Codec::Windows1251,
-    "windows-1251"        => Codec::Windows1251,
-    "x-cp1251"            => Codec::Windows1251,
-    "ansi_x3.4-1968"      => Codec::Windows1252,
-    "ascii"               => Codec::Windows1252,
-    "cp1252"              => Codec::Windows1252,
-    "cp819"               => Codec::Windows1252,
-    "csisolatin1"         => Codec::Windows1252,
-    "ibm819"              => Codec::Windows1252,
-    "iso-8859-1"          => Codec::Windows1252,
-    "iso-ir-100"          => Codec::Windows1252,
-    "iso8859-1"           => Codec::Windows1252,
-    "iso88591"            => Codec::Windows1252,
-    "iso_8859-1"          => Codec::Windows1252,
-    "iso_8859-1:1987"     => Codec::Windows1252,
-    "l1"                  => Codec::Windows1252,
-    "latin1"              => Codec::Windows1252,
-    "us-ascii"            => Codec::Windows1252,
-    "windows-1252"        => Codec::Windows1252,
-    "x-cp1252"            => Codec::Windows1252,
-    "cp1253"              => Codec::Windows1253,
-    "windows-1253"        => Codec::Windows1253,
-    "x-cp1253"            => Codec::Windows1253,
-    "cp1254"              => Codec::Windows1254,
-    "csisolatin5"         => Codec::Windows1254,
-    "iso-8859-9"          => Codec::Windows1254,
-    "iso-ir-148"          => Codec::Windows1254,
-    "iso8859-9"           => Codec::Windows1254,
-    "iso88599"            => Codec::Windows1254,
-    "iso_8859-9"          => Codec::Windows1254,
-    "iso_8859-9:1989"     => Codec::Windows1254,
-    "l5"                  => Codec::Windows1254,
-    "latin5"              => Codec::Windows1254,
-    "windows-1254"        => Codec::Windows1254,
-    "x-cp1254"            => Codec::Windows1254,
-    "cp1255"              => Codec::Windows1255,
-    "windows-1255"        => Codec::Windows1255,
-    "x-cp1255"            => Codec::Windows1255,
-    "cp1256"              => Codec::Windows1256,
-    "windows-1256"        => Codec::Windows1256,
-    "x-cp1256"            => Codec::Windows1256,
-    "cp1257"              => Codec::Windows1257,
-    "windows-1257"        => Codec::Windows1257,
-    "x-cp1257"            => Codec::Windows1257,
-    "cp1258"              => Codec::Windows1258,
-    "windows-1258"        => Codec::Windows1258,
-    "x-cp1258"            => Codec::Windows1258,
-    "x-mac-cyrillic"      => Codec::XMacCyrillic,
-    "x-mac-ukrainian"     => Codec::XMacCyrillic,
-    "chinese"             => Codec::GBK,
-    "csgb2312"            => Codec::GBK,
-    "csiso58gb231280"     => Codec::GBK,
-    "gb2312"              => Codec::GBK,
-    "gb_2312"             => Codec::GBK,
-    "gb_2312-80"          => Codec::GBK,
-    "gbk"                 => Codec::GBK,
-    "iso-ir-58"           => Codec::GBK,
-    "x-gbk"               => Codec::GBK,
-    "gb18030"             => Codec::GB18030,
-    "big5"                => Codec::Big5,
-    "big5-hkscs"          => Codec::Big5,
-    "cn-big5"             => Codec::Big5,
-    "csbig5"              => Codec::Big5,
-    "x-x-big5"            => Codec::Big5,
-    "cseucpkdfmtjapanese" => Codec::EUCJP,
-    "euc-jp"              => Codec::EUCJP,
-    "x-euc-jp"            => Codec::EUCJP,
-    "csiso2022jp"         => Codec::ISO2022JP,
-    "iso-2022-jp"         => Codec::ISO2022JP,
-    "csshiftjis"          => Codec::ShiftJIS,
-    "ms932"               => Codec::ShiftJIS,
-    "ms_kanji"            => Codec::ShiftJIS,
-    "shift-jis"           => Codec::ShiftJIS,
-    "shift_jis"           => Codec::ShiftJIS,
-    "sjis"                => Codec::ShiftJIS,
-    "windows-31j"         => Codec::ShiftJIS,
-    "x-sjis"              => Codec::ShiftJIS,
-    "cseuckr"             => Codec::EUCKR,
-    "csksc56011987"       => Codec::EUCKR,
-    "euc-kr"              => Codec::EUCKR,
-    "iso-ir-149"          => Codec::EUCKR,
-    "korean"              => Codec::EUCKR,
-    "ks_c_5601-1987"      => Codec::EUCKR,
-    "ks_c_5601-1989"      => Codec::EUCKR,
-    "ksc5601"             => Codec::EUCKR,
-    "ksc_5601"            => Codec::EUCKR,
-    "windows-949"         => Codec::EUCKR,
-    "csiso2022kr"         => Codec::Replacement,
-    "hz-gb-2312"          => Codec::Replacement,
-    "iso-2022-cn"         => Codec::Replacement,
-    "iso-2022-cn-ext"     => Codec::Replacement,
-    "iso-2022-kr"         => Codec::Replacement,
-    "replacement"         => Codec::Replacement,
-    "unicodefffe"         => Codec::UTF16BE,
-    "utf-16be"            => Codec::UTF16BE,
-    "csunicode"           => Codec::UTF16LE,
-    "iso-10646-ucs-2"     => Codec::UTF16LE,
-    "ucs-2"               => Codec::UTF16LE,
-    "unicode"             => Codec::UTF16LE,
-    "unicodefeff"         => Codec::UTF16LE,
-    "utf-16"              => Codec::UTF16LE,
-    "utf-16le"            => Codec::UTF16LE,
-    "x-user-defined"      => Codec::XUserDefined,
-  }
+  # The number of labels the Encoding Standard lists.
+  WEB_LABEL_COUNT = 228
+
+  # Returns the encoding of *key*, a label already trimmed and
+  # ASCII-lowercased, or nil.
+  def self.web_label(key : String) : Codec?
+    case key.bytesize
+    when 2
+      case key
+      when "l2" then Codec::ISO8859_2
+      when "l3" then Codec::ISO8859_3
+      when "l4" then Codec::ISO8859_4
+      when "l6" then Codec::ISO8859_10
+      when "l9" then Codec::ISO8859_15
+      when "l1" then Codec::Windows1252
+      when "l5" then Codec::Windows1254
+      end
+    when 3
+      case key
+      when "866" then Codec::IBM866
+      when "koi" then Codec::KOI8_R
+      when "mac" then Codec::Macintosh
+      when "gbk" then Codec::GBK
+      end
+    when 4
+      case key
+      when "utf8" then Codec::UTF8
+      when "koi8" then Codec::KOI8_R
+      when "big5" then Codec::Big5
+      when "sjis" then Codec::ShiftJIS
+      end
+    when 5
+      case key
+      when "utf-8"          then Codec::UTF8
+      when "cp866"          then Codec::IBM866
+      when "greek"          then Codec::ISO8859_7
+      when "ascii", "cp819" then Codec::Windows1252
+      when "x-gbk"          then Codec::GBK
+      when "ms932"          then Codec::ShiftJIS
+      when "ucs-2"          then Codec::UTF16LE
+      end
+    when 6
+      case key
+      when "ibm866"                     then Codec::IBM866
+      when "latin2"                     then Codec::ISO8859_2
+      when "latin3"                     then Codec::ISO8859_3
+      when "latin4"                     then Codec::ISO8859_4
+      when "arabic"                     then Codec::ISO8859_6
+      when "greek8"                     then Codec::ISO8859_7
+      when "hebrew", "visual"           then Codec::ISO8859_8
+      when "latin6"                     then Codec::ISO8859_10
+      when "koi8-r", "koi8_r"           then Codec::KOI8_R
+      when "koi8-u"                     then Codec::KOI8_U
+      when "cp1250"                     then Codec::Windows1250
+      when "cp1251"                     then Codec::Windows1251
+      when "cp1252", "ibm819", "latin1" then Codec::Windows1252
+      when "cp1253"                     then Codec::Windows1253
+      when "cp1254", "latin5"           then Codec::Windows1254
+      when "cp1255"                     then Codec::Windows1255
+      when "cp1256"                     then Codec::Windows1256
+      when "cp1257"                     then Codec::Windows1257
+      when "cp1258"                     then Codec::Windows1258
+      when "gb2312"                     then Codec::GBK
+      when "csbig5"                     then Codec::Big5
+      when "euc-jp"                     then Codec::EUCJP
+      when "x-sjis"                     then Codec::ShiftJIS
+      when "euc-kr", "korean"           then Codec::EUCKR
+      when "utf-16"                     then Codec::UTF16LE
+      end
+    when 7
+      case key
+      when "logical"            then Codec::ISO8859_8_I
+      when "cskoi8r"            then Codec::KOI8_R
+      when "koi8-ru"            then Codec::KOI8_U
+      when "dos-874", "tis-620" then Codec::Windows874
+      when "chinese", "gb_2312" then Codec::GBK
+      when "gb18030"            then Codec::GB18030
+      when "cn-big5"            then Codec::Big5
+      when "cseuckr", "ksc5601" then Codec::EUCKR
+      when "unicode"            then Codec::UTF16LE
+      end
+    when 8
+      case key
+      when "csibm866"                         then Codec::IBM866
+      when "iso88592"                         then Codec::ISO8859_2
+      when "iso88593"                         then Codec::ISO8859_3
+      when "iso88594"                         then Codec::ISO8859_4
+      when "cyrillic", "iso88595"             then Codec::ISO8859_5
+      when "asmo-708", "ecma-114", "iso88596" then Codec::ISO8859_6
+      when "ecma-118", "elot_928", "iso88597" then Codec::ISO8859_7
+      when "iso88598"                         then Codec::ISO8859_8
+      when "x-cp1250"                         then Codec::Windows1250
+      when "x-cp1251"                         then Codec::Windows1251
+      when "iso88591", "us-ascii", "x-cp1252" then Codec::Windows1252
+      when "x-cp1253"                         then Codec::Windows1253
+      when "iso88599", "x-cp1254"             then Codec::Windows1254
+      when "x-cp1255"                         then Codec::Windows1255
+      when "x-cp1256"                         then Codec::Windows1256
+      when "x-cp1257"                         then Codec::Windows1257
+      when "x-cp1258"                         then Codec::Windows1258
+      when "csgb2312"                         then Codec::GBK
+      when "x-x-big5"                         then Codec::Big5
+      when "x-euc-jp"                         then Codec::EUCJP
+      when "ms_kanji"                         then Codec::ShiftJIS
+      when "ksc_5601"                         then Codec::EUCKR
+      when "utf-16be"                         then Codec::UTF16BE
+      when "utf-16le"                         then Codec::UTF16LE
+      end
+    when 9
+      case key
+      when "iso8859-2"              then Codec::ISO8859_2
+      when "iso8859-3"              then Codec::ISO8859_3
+      when "iso8859-4"              then Codec::ISO8859_4
+      when "iso8859-5"              then Codec::ISO8859_5
+      when "iso8859-6"              then Codec::ISO8859_6
+      when "iso8859-7"              then Codec::ISO8859_7
+      when "iso8859-8"              then Codec::ISO8859_8
+      when "iso885910"              then Codec::ISO8859_10
+      when "iso885913"              then Codec::ISO8859_13
+      when "iso885914"              then Codec::ISO8859_14
+      when "iso885915"              then Codec::ISO8859_15
+      when "macintosh"              then Codec::Macintosh
+      when "iso885911"              then Codec::Windows874
+      when "iso8859-1"              then Codec::Windows1252
+      when "iso8859-9"              then Codec::Windows1254
+      when "iso-ir-58"              then Codec::GBK
+      when "shift-jis", "shift_jis" then Codec::ShiftJIS
+      when "csunicode"              then Codec::UTF16LE
+      end
+    when 10
+      case key
+      when "iso-8859-2", "iso-ir-101", "iso_8859-2" then Codec::ISO8859_2
+      when "iso-8859-3", "iso-ir-109", "iso_8859-3" then Codec::ISO8859_3
+      when "iso-8859-4", "iso-ir-110", "iso_8859-4" then Codec::ISO8859_4
+      when "iso-8859-5", "iso-ir-144", "iso_8859-5" then Codec::ISO8859_5
+      when "iso-8859-6", "iso-ir-127", "iso_8859-6" then Codec::ISO8859_6
+      when "iso-8859-7", "iso-ir-126", "iso_8859-7" then Codec::ISO8859_7
+      when "iso-8859-8", "iso-ir-138", "iso_8859-8" then Codec::ISO8859_8
+      when "iso-ir-157", "iso8859-10"               then Codec::ISO8859_10
+      when "iso8859-13"                             then Codec::ISO8859_13
+      when "iso8859-14"                             then Codec::ISO8859_14
+      when "iso8859-15"                             then Codec::ISO8859_15
+      when "iso8859-11"                             then Codec::Windows874
+      when "iso-8859-1", "iso-ir-100", "iso_8859-1" then Codec::Windows1252
+      when "iso-8859-9", "iso-ir-148", "iso_8859-9" then Codec::Windows1254
+      when "gb_2312-80"                             then Codec::GBK
+      when "big5-hkscs"                             then Codec::Big5
+      when "csshiftjis"                             then Codec::ShiftJIS
+      when "iso-ir-149"                             then Codec::EUCKR
+      when "hz-gb-2312"                             then Codec::Replacement
+      end
+    when 11
+      case key
+      when "csisolatin2"                                              then Codec::ISO8859_2
+      when "csisolatin3"                                              then Codec::ISO8859_3
+      when "csisolatin4"                                              then Codec::ISO8859_4
+      when "csiso88596e", "csiso88596i"                               then Codec::ISO8859_6
+      when "csiso88598e"                                              then Codec::ISO8859_8
+      when "csiso88598i"                                              then Codec::ISO8859_8_I
+      when "csisolatin6", "iso-8859-10"                               then Codec::ISO8859_10
+      when "iso-8859-13"                                              then Codec::ISO8859_13
+      when "iso-8859-14"                                              then Codec::ISO8859_14
+      when "csisolatin9", "iso-8859-15", "iso_8859-15"                then Codec::ISO8859_15
+      when "iso-8859-16"                                              then Codec::ISO8859_16
+      when "csmacintosh", "x-mac-roman"                               then Codec::Macintosh
+      when "iso-8859-11", "windows-874"                               then Codec::Windows874
+      when "csisolatin1"                                              then Codec::Windows1252
+      when "csisolatin5"                                              then Codec::Windows1254
+      when "csiso2022jp", "iso-2022-jp"                               then Codec::ISO2022JP
+      when "windows-31j"                                              then Codec::ShiftJIS
+      when "windows-949"                                              then Codec::EUCKR
+      when "csiso2022kr", "iso-2022-cn", "iso-2022-kr", "replacement" then Codec::Replacement
+      when "unicodefffe"                                              then Codec::UTF16BE
+      when "unicodefeff"                                              then Codec::UTF16LE
+      end
+    when 12
+      case key
+      when "iso-8859-6-e", "iso-8859-6-i" then Codec::ISO8859_6
+      when "sun_eu_greek"                 then Codec::ISO8859_7
+      when "iso-8859-8-e"                 then Codec::ISO8859_8
+      when "iso-8859-8-i"                 then Codec::ISO8859_8_I
+      when "windows-1250"                 then Codec::Windows1250
+      when "windows-1251"                 then Codec::Windows1251
+      when "windows-1252"                 then Codec::Windows1252
+      when "windows-1253"                 then Codec::Windows1253
+      when "windows-1254"                 then Codec::Windows1254
+      when "windows-1255"                 then Codec::Windows1255
+      when "windows-1256"                 then Codec::Windows1256
+      when "windows-1257"                 then Codec::Windows1257
+      when "windows-1258"                 then Codec::Windows1258
+      end
+    when 13
+      case key
+      when "unicode11utf8", "unicode20utf8" then Codec::UTF8
+      when "csksc56011987"                  then Codec::EUCKR
+      end
+    when 14
+      case key
+      when "ansi_x3.4-1968"                   then Codec::Windows1252
+      when "x-mac-cyrillic"                   then Codec::XMacCyrillic
+      when "ks_c_5601-1987", "ks_c_5601-1989" then Codec::EUCKR
+      when "x-user-defined"                   then Codec::XUserDefined
+      end
+    when 15
+      case key
+      when "x-unicode20utf8"                    then Codec::UTF8
+      when "iso_8859-2:1987"                    then Codec::ISO8859_2
+      when "iso_8859-3:1988"                    then Codec::ISO8859_3
+      when "iso_8859-4:1988"                    then Codec::ISO8859_4
+      when "iso_8859-5:1988"                    then Codec::ISO8859_5
+      when "iso_8859-6:1987"                    then Codec::ISO8859_6
+      when "csisolatingreek", "iso_8859-7:1987" then Codec::ISO8859_7
+      when "iso_8859-8:1988"                    then Codec::ISO8859_8
+      when "iso_8859-1:1987"                    then Codec::Windows1252
+      when "iso_8859-9:1989"                    then Codec::Windows1254
+      when "x-mac-ukrainian"                    then Codec::XMacCyrillic
+      when "csiso58gb231280"                    then Codec::GBK
+      when "iso-2022-cn-ext"                    then Codec::Replacement
+      when "iso-10646-ucs-2"                    then Codec::UTF16LE
+      end
+    when 16
+      case key
+      when "csisolatinarabic" then Codec::ISO8859_6
+      when "csisolatinhebrew" then Codec::ISO8859_8
+      end
+    when 17
+      case key
+      when "unicode-1-1-utf-8" then Codec::UTF8
+      end
+    when 18
+      case key
+      when "csisolatincyrillic" then Codec::ISO8859_5
+      end
+    when 19
+      case key
+      when "cseucpkdfmtjapanese" then Codec::EUCJP
+      end
+    end
+  end
 end

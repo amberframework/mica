@@ -402,14 +402,29 @@ module Mica::Encoding
     include EncoderLoop
 
     # Private Use code points the GB18030-2005 two-byte mapping keeps
-    # (the Encoding Standard's side table), with their bytes.
-    PRIVATE_USE = {
-      0xE78D => {0xA6, 0xD9}, 0xE78E => {0xA6, 0xDA}, 0xE78F => {0xA6, 0xDB}, 0xE790 => {0xA6, 0xDC},
-      0xE791 => {0xA6, 0xDD}, 0xE792 => {0xA6, 0xDE}, 0xE793 => {0xA6, 0xDF}, 0xE794 => {0xA6, 0xEC},
-      0xE795 => {0xA6, 0xED}, 0xE796 => {0xA6, 0xF3}, 0xE81E => {0xFE, 0x59}, 0xE826 => {0xFE, 0x61},
-      0xE82B => {0xFE, 0x66}, 0xE82C => {0xFE, 0x67}, 0xE832 => {0xFE, 0x6D}, 0xE843 => {0xFE, 0x7E},
-      0xE854 => {0xFE, 0x90}, 0xE864 => {0xFE, 0xA0},
-    }
+    # (the Encoding Standard's side table): their two bytes, or nil.
+    def self.private_use_bytes(code_point : Int32) : {UInt8, UInt8}?
+      case code_point
+      when 0xE78D then {0xA6_u8, 0xD9_u8}
+      when 0xE78E then {0xA6_u8, 0xDA_u8}
+      when 0xE78F then {0xA6_u8, 0xDB_u8}
+      when 0xE790 then {0xA6_u8, 0xDC_u8}
+      when 0xE791 then {0xA6_u8, 0xDD_u8}
+      when 0xE792 then {0xA6_u8, 0xDE_u8}
+      when 0xE793 then {0xA6_u8, 0xDF_u8}
+      when 0xE794 then {0xA6_u8, 0xEC_u8}
+      when 0xE795 then {0xA6_u8, 0xED_u8}
+      when 0xE796 then {0xA6_u8, 0xF3_u8}
+      when 0xE81E then {0xFE_u8, 0x59_u8}
+      when 0xE826 then {0xFE_u8, 0x61_u8}
+      when 0xE82B then {0xFE_u8, 0x66_u8}
+      when 0xE82C then {0xFE_u8, 0x67_u8}
+      when 0xE832 then {0xFE_u8, 0x6D_u8}
+      when 0xE843 then {0xFE_u8, 0x7E_u8}
+      when 0xE854 then {0xFE_u8, 0x90_u8}
+      when 0xE864 then {0xFE_u8, 0xA0_u8}
+      end
+    end
 
     private def encode_code_point(code_point : Int32, output : Bytes, written : Int32) : Int32
       if code_point < 0x80
@@ -425,9 +440,9 @@ module Mica::Encoding
         output[written] = 0x80_u8
         return written + 1
       end
-      if code_point >= 0xE78D && code_point <= 0xE864 && (bytes = PRIVATE_USE[code_point]?)
-        output[written] = bytes[0].to_u8
-        output[written + 1] = bytes[1].to_u8
+      if code_point >= 0xE78D && code_point <= 0xE864 && (bytes = GB18030Encoder.private_use_bytes(code_point))
+        output[written] = bytes[0]
+        output[written + 1] = bytes[1]
         return written + 2
       end
       pointer = Tables.gb18030_encode(code_point)

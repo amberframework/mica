@@ -100,18 +100,35 @@ FileUtils.mkdir_p(OUTPUT)
 
 # --- Labels ---------------------------------------------------------------
 groups = JSON.parse(verified('encodings.json'))
-label_lines = []
+labels = []
 groups.each do |group|
   group['encodings'].each do |encoding|
     codec = CODEC_FOR_NAME.fetch(encoding['name']) { abort "no codec for #{encoding['name']}" }
-    encoding['labels'].each { |label| label_lines << "    #{label.inspect} => Codec::#{codec}," }
+    encoding['labels'].each { |label| labels << [label, codec] }
   end
 end
+# A `case` on the label's length, then on the label: no allocation and no
+# hash (the standard library vendors this file, and its constants
+# initialize before the hash seed does).
 write('labels.cr', build do |io|
   header(io, ['encodings.json'], 'Every label of the Encoding Standard and its encoding.')
   io << "module Mica::Encoding::Tables\n"
-  io << "  # #{label_lines.size} labels, already trimmed and ASCII-lowercased.\n"
-  io << "  WEB_LABELS = {\n#{label_lines.join("\n")}\n  }\n"
+  io << "  # The number of labels the Encoding Standard lists.\n"
+  io << "  WEB_LABEL_COUNT = #{labels.size}\n\n"
+  io << "  # Returns the encoding of *key*, a label already trimmed and\n"
+  io << "  # ASCII-lowercased, or nil.\n"
+  io << "  def self.web_label(key : String) : Codec?\n"
+  io << "    case key.bytesize\n"
+  labels.group_by { |label, _| label.bytesize }.sort.each do |size, entries|
+    io << "    when #{size}\n"
+    io << "      case key\n"
+    entries.group_by(&:last).each do |codec, group|
+      io << "      when " << group.map { |label, _| label.inspect }.join(", ") << " then Codec::#{codec}\n"
+    end
+    io << "      end\n"
+  end
+  io << "    end\n"
+  io << "  end\n"
   io << "end\n"
 end)
 

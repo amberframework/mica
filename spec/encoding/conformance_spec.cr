@@ -57,7 +57,7 @@ describe "Mica::Encoding conformance" do
         end
       end
     end
-    checked.should eq(Mica::Encoding::Tables::WEB_LABELS.size)
+    checked.should eq(Mica::Encoding::Tables::WEB_LABEL_COUNT)
     checked.should eq(228)
     Mica::Encoding.lookup("utf-7").should be_nil
     Mica::Encoding.lookup("").should be_nil
@@ -149,18 +149,20 @@ describe "Mica::Encoding conformance" do
       trailing = pointer % 190
       Bytes[(pointer // 190 + 0x81).to_u8, (trailing + (trailing < 0x3F ? 0x40 : 0x41)).to_u8]
     end
-    private_use = Mica::Encoding::GB18030Encoder::PRIVATE_USE
+    private_use = {0xE78D, 0xE78E, 0xE78F, 0xE790, 0xE791, 0xE792, 0xE793, 0xE794, 0xE795, 0xE796, 0xE81E, 0xE826, 0xE82B, 0xE82C, 0xE832, 0xE843, 0xE854, 0xE864}
     entries.each do |pointer, code_point|
       code_points(decode_fatal(two_byte.call(pointer), Codec::GB18030)).should eq([code_point])
       code_points(decode_fatal(two_byte.call(pointer), Codec::GBK)).should eq([code_point])
-      next if code_point == 0xE5E5 || private_use.has_key?(code_point)
+      next if code_point == 0xE5E5 || private_use.includes?(code_point)
       expected = two_byte.call(firsts[code_point])
       Mica::Encoding.encode(code_point.chr.to_s, Codec::GB18030).should eq(expected)
       Mica::Encoding.encode(code_point.chr.to_s, Codec::GBK).should eq(expected) unless code_point == 0x20AC
     end
     entries.size.should eq(23_940)
-    private_use.each do |code_point, bytes|
+    private_use.each do |code_point|
+      bytes = Mica::Encoding::GB18030Encoder.private_use_bytes(code_point) || fail "no bytes for #{code_point}"
       Mica::Encoding.encode(code_point.chr.to_s, Codec::GB18030).should eq(Bytes[bytes[0], bytes[1]])
+      code_points(decode_fatal(Bytes[bytes[0], bytes[1]], Codec::GB18030)).should_not eq([code_point]) # asymmetric by design
     end
     expect_raises(Mica::Encoding::ConversionError, /U\+E5E5/) { Mica::Encoding.encode("\u{E5E5}", Codec::GB18030) }
     Mica::Encoding.encode("€", Codec::GBK).should eq(Bytes[0x80])

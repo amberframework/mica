@@ -88,26 +88,33 @@ module Mica::Encoding::Tables
     code_point == 0 ? -1 : code_point
   end
 
-  # Reverse lookups, each built from its forward index on first use.
-  # Index pointer: the first pointer for a code point.
-  JIS0208_ENCODE = ReverseTable.new(JIS0208)
-  # Index Shift_JIS pointer: the first pointer outside 8272 to 8835.
-  SHIFT_JIS_ENCODE = ReverseTable.new(JIS0208, excluded: 8272..8835)
-  EUC_KR_ENCODE    = ReverseTable.new(EUC_KR)
-  GB18030_ENCODE   = ReverseTable.new(GB18030)
-  # Index Big5 pointer: pointers below (0xA1 - 0x81) * 157 excluded, and the
-  # last pointer for six code points.
-  BIG5_ENCODE = ReverseTable.new(BIG5, first_pointer: (0xA1 - 0x81) * 157).prefer_last(BIG5, {0x2550, 0x255E, 0x2561, 0x256A, 0x5341, 0x5345}, (0xA1 - 0x81) * 157)
-  # BIG5-HKSCS (iconv-compatible): the Big5 pointer where there is one,
-  # otherwise the first pointer anywhere in the index.
-  BIG5_HKSCS_ENCODE = ReverseTable.new(BIG5, first_pointer: (0xA1 - 0x81) * 157).prefer_last(BIG5, {0x2550, 0x255E, 0x2561, 0x256A, 0x5341, 0x5345}, (0xA1 - 0x81) * 157).fill_from(BIG5)
+  # Reverse lookups, each built from its forward index on first use and
+  # kept in a class variable (a constant would be built at program start).
+  # Two fibers on different threads may both build one the first time; each
+  # builds the same table, and the reference is published whole.
+  {% for spec in [
+                   {"jis0208", "ReverseTable.new(JIS0208)"},
+                   {"shift_jis", "ReverseTable.new(JIS0208, excluded: 8272..8835)"},
+                   {"euc_kr", "ReverseTable.new(EUC_KR)"},
+                   {"gb18030", "ReverseTable.new(GB18030)"},
+                   {"big5", "ReverseTable.new(BIG5, first_pointer: BIG5_FIRST_POINTER).prefer_last(BIG5, BIG5_LAST_POINTER_CODE_POINTS, BIG5_FIRST_POINTER)"},
+                   {"big5_hkscs", "ReverseTable.new(BIG5, first_pointer: BIG5_FIRST_POINTER).prefer_last(BIG5, BIG5_LAST_POINTER_CODE_POINTS, BIG5_FIRST_POINTER).fill_from(BIG5)"},
+                 ] %}
+    @@{{ spec[0].id }}_reverse : ReverseTable? = nil
 
-  {% for name in %w(JIS0208_ENCODE SHIFT_JIS_ENCODE EUC_KR_ENCODE GB18030_ENCODE BIG5_ENCODE BIG5_HKSCS_ENCODE) %}
-    # Returns the pointer for *code_point* in this reverse table, or -1.
-    def self.{{ name.downcase.id }}(code_point : Int32) : Int32
-      {{ name.id }}.pointer_for(code_point)
+    # Returns the pointer for *code_point* (see the comments above), or -1.
+    def self.{{ spec[0].id }}_encode(code_point : Int32) : Int32
+      table = @@{{ spec[0].id }}_reverse ||= {{ spec[1].id }}
+      table.pointer_for(code_point)
     end
   {% end %}
+
+  # Index Big5 pointer: pointers below (0xA1 - 0x81) * 157 are excluded
+  # (HKSCS is not written back), and six code points take their last
+  # pointer. BIG5-HKSCS (iconv-compatible) falls back to the first pointer
+  # anywhere in the index.
+  BIG5_FIRST_POINTER            = (0xA1 - 0x81) * 157
+  BIG5_LAST_POINTER_CODE_POINTS = {0x2550, 0x255E, 0x2561, 0x256A, 0x5341, 0x5345}
 
   # Returns the code point for a four-byte gb18030 *pointer* (the
   # Encoding Standard's "index gb18030 ranges code point"), or -1.
@@ -147,7 +154,7 @@ module Mica::Encoding::Tables
   end
 
   {% for member in %w(IBM866 ISO8859_2 ISO8859_3 ISO8859_4 ISO8859_5 ISO8859_6 ISO8859_7 ISO8859_8 ISO8859_10 ISO8859_13 ISO8859_14 ISO8859_15 ISO8859_16 KOI8_R KOI8_U Macintosh Windows874 Windows1250 Windows1251 Windows1252 Windows1253 Windows1254 Windows1255 Windows1256 Windows1257 Windows1258 XMacCyrillic) %}
-    {{ member.upcase.id }}_ENCODE = ReverseTable.new({{ member.upcase.id }})
+    @@{{ member.downcase.id }}_reverse : ReverseTable? = nil
   {% end %}
 
   # The reverse lookup for a table-driven single-byte *codec* (a pointer is
@@ -157,20 +164,20 @@ module Mica::Encoding::Tables
     {% begin %}
       case codec
       {% for member in %w(IBM866 ISO8859_2 ISO8859_3 ISO8859_4 ISO8859_5 ISO8859_6 ISO8859_7 ISO8859_8 ISO8859_10 ISO8859_13 ISO8859_14 ISO8859_15 ISO8859_16 KOI8_R KOI8_U Macintosh Windows874 Windows1250 Windows1251 Windows1252 Windows1253 Windows1254 Windows1255 Windows1256 Windows1257 Windows1258 XMacCyrillic) %}
-        when Codec::{{ member.id }} then {{ member.upcase.id }}_ENCODE
+        when Codec::{{ member.id }} then @@{{ member.downcase.id }}_reverse ||= ReverseTable.new({{ member.upcase.id }})
       {% end %}
-      when Codec::ISO8859_8_I then ISO8859_8_ENCODE
+      when Codec::ISO8859_8_I then @@iso8859_8_reverse ||= ReverseTable.new(ISO8859_8)
       else                         nil
       end
     {% end %}
   end
 
   # Exact ISO-8859-1: byte n is U+00nn.
-  LATIN1 = Slice(UInt16).new(128) { |offset| (0x80 + offset).to_u16 }
+  LATIN1 = {% begin %}Slice(UInt16).literal({{ (0x80..0xFF).to_a.map(&.id).join(", ").id }}){% end %}
 
   # x-user-defined: bytes 0x80 to 0xFF are U+F780 to U+F7FF.
-  X_USER_DEFINED = Slice(UInt16).new(128) { |offset| (0xF780 + offset).to_u16 }
+  X_USER_DEFINED = {% begin %}Slice(UInt16).literal({{ (0xF780..0xF7FF).to_a.map(&.id).join(", ").id }}){% end %}
 
   # US-ASCII: no byte above 0x7F has a code point.
-  ASCII_ONLY = Slice(UInt16).new(128, 0_u16)
+  ASCII_ONLY = {% begin %}Slice(UInt16).literal({{ (0...128).to_a.map { 0 }.join(", ").id }}){% end %}
 end
