@@ -42,6 +42,24 @@ describe "scripts/vendor_into.rb" do
     end
   end
 
+  it "copies the compression component, Brotli's dictionary byte for byte" do
+    destination = File.join(Dir.tempdir, "mica-vendor-into-#{Random::Secure.hex(8)}")
+    begin
+      exit_code, output = run_vendor_script("--commit", "HEAD", "--component", "compression", "--namespace", "Carrier",
+        "--destination", destination)
+      fail "vendor_into.rb failed: #{output}" unless exit_code == 0
+      File.read(File.join(destination, "mica", "brotli.cr")).should contain("module Carrier::Mica::Brotli")
+      File.read(File.join(destination, "mica", "brotli", "dictionary.bin")).to_slice
+        .should eq(File.read(File.join(REPOSITORY_ROOT, "src", "mica", "brotli", "dictionary.bin")).to_slice)
+      File.read(File.join(destination, "MICA_VENDORED.json")).should contain(%("component": "compression"))
+      exit_code, output = run_vendor_script("--check", "--destination", destination)
+      output.should contain("files match")
+      exit_code.should eq(0)
+    ensure
+      FileUtils.rm_rf(destination)
+    end
+  end
+
   it "fails the check when a pinned file is edited" do
     with_a_vendored_copy do |destination|
       File.write(File.join(destination, "mica", "gzip.cr"), "# edited\n", mode: "a")
