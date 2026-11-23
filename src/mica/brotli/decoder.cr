@@ -1081,6 +1081,10 @@ module Mica::Brotli
       @block_left[1] = command_left
       @block_left[2] = distance_left
       @distances = last_distances
+      @meta_remaining = meta_left
+      @copy_length = copy_length
+      @implicit_distance = implicit
+      @command_tree = command_tree
     end
 
     private macro fast_load
@@ -1093,6 +1097,9 @@ module Mica::Brotli
       command_left = @block_left[1]
       distance_left = @block_left[2]
       last_distances = @distances
+      meta_left = @meta_remaining
+      command_tree = @command_tree
+      out_end = @out_end
     end
 
     # Executes whole commands with the bit buffer, the input position and
@@ -1115,19 +1122,26 @@ module Mica::Brotli
       command_left = 0
       distance_left = 0
       last_distances = @distances
+      # Likewise the metablock's bytes left, the command being run and the
+      # output stop.
+      meta_left = 0
+      copy_length = 0
+      implicit = false
+      command_tree = 0
+      out_end = 0
       table = @table.to_unsafe
       ring = @ring.to_unsafe
       fast_load
-      while @meta_remaining > 0 && in_pos <= in_limit
+      while meta_left > 0 && in_pos <= in_limit
         if command_left == 0
           fast_switch(1)
           command_left = @block_left[1]
-          @command_tree = @command_trees.unsafe_fetch(@block_type[1])
+          command_tree = @command_trees.unsafe_fetch(@block_type[1])
         end
         command_left &-= 1
         fast_refill
         symbol = 0
-        fast_symbol(@command_tree, symbol)
+        fast_symbol(command_tree, symbol)
         cell = symbol >> 6
         insert_code = CELL_INSERT[cell] + ((symbol >> 3) & 7)
         copy_code = CELL_COPY[cell] + (symbol & 7)
@@ -1144,13 +1158,12 @@ module Mica::Brotli
           fast_bits(width, extra)
           copy_length &+= extra
         end
-        @implicit_distance = symbol < 128
-        @copy_length = copy_length
-        if insert > @meta_remaining
+        implicit = symbol < 128
+        if insert > meta_left
           fast_save
           malformed("Insert length runs past the metablock")
         end
-        if pos &+ insert > @out_end
+        if pos &+ insert > out_end
           fast_save
           @insert_left = insert
           @stage = Stage::Insert
@@ -1204,9 +1217,9 @@ module Mica::Brotli
             left &-= 1
           end
           @block_left[0] = block_left
-          @meta_remaining &-= insert
+          meta_left &-= insert
         end
-        if @meta_remaining == 0
+        if meta_left == 0
           fast_save
           @stage = Stage::Command
           return
@@ -1214,7 +1227,7 @@ module Mica::Brotli
 
         code = 0
         distance = last_distances[0]
-        unless @implicit_distance
+        unless implicit
           if distance_left == 0
             fast_switch(2)
             distance_left = @block_left[2]
@@ -1255,12 +1268,12 @@ module Mica::Brotli
         if code != 0
           last_distances = StaticArray[distance, last_distances[0], last_distances[1], last_distances[2]]
         end
-        if copy_length > @meta_remaining
+        if copy_length > meta_left
           fast_save
           malformed("Copy length runs past the metablock")
         end
         source = pos - distance
-        if source < 0 || pos + copy_length > @out_end
+        if source < 0 || pos &+ copy_length > out_end
           fast_save
           @copy_left = copy_length
           @copy_distance = distance
@@ -1275,13 +1288,16 @@ module Mica::Brotli
             (ring + (pos &+ at)).as(UInt64*).value = (ring + (source &+ at)).as(UInt64*).value
             at &+= 8
           end
+        elsif distance == 1
+          # A run of one byte.
+          Slice.new(ring + pos, copy_length).fill(ring[source])
         else
           copy_length.times do |index|
             ring[pos &+ index] = ring[source &+ index]
           end
         end
         pos &+= copy_length
-        @meta_remaining &-= copy_length
+        meta_left &-= copy_length
       end
       fast_save
       @stage = Stage::Command
