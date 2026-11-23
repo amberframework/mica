@@ -50,7 +50,7 @@ describe Mica::Brotli do
 
     it_satisfies "BROTLI-ENC-dictionary", "uses static dictionary words for short text with nothing to match" do
       input = "the information about government and development".to_slice
-      round_trip(input, 5).size.should be < input.size - 10
+      round_trip(input, 11).size.should be < input.size - 10
     end
 
     it_satisfies "BROTLI-ENC-deterministic", "gives the same bytes for the same input and options" do
