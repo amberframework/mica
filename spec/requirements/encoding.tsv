@@ -1,0 +1,19 @@
+# Requirements for Mica::Encoding (milestones I1 and I3 of the iconv plan): the
+# WHATWG Encoding Standard (https://encoding.spec.whatwg.org/, pinned at commit
+# 7d2e3e08e1), Unicode chapter 3's maximal-subpart rule, the iconv-compatible
+# names Crystal programs use, and the conversion limits.
+ENC-LABELS	WHATWG 4.2	Every label resolves to its encoding after ASCII whitespace trimming and ASCII case folding; anything else resolves to nothing
+ENC-LABEL-LIMIT	limits	A label longer than 64 bytes is refused before lookup
+ENC-ICONV-NAMES	iconv rule	The iconv-compatible rule keeps iconv's meanings (exact ISO-8859-1, UTF-16 and UTF-32 with byte order marks, UCS-2, BIG5-HKSCS) and refuses the replacement encoding's labels
+ENC-INDEX-DECODE	WHATWG 5	Every entry of every index decodes from its bytes to its code point
+ENC-INDEX-ENCODE	WHATWG 5	Every code point with an index pointer encodes to the bytes of the pointer the standard's encoder chooses
+ENC-UTF8-SUBPART	Unicode 3.9	Ill-formed UTF-8 is replaced per maximal subpart (Table 3-8)
+ENC-UTF16	WHATWG 14.2	UTF-16BE and UTF-16LE decode surrogate pairs and replace unpaired surrogates and a trailing odd byte
+ENC-SINGLE-BYTE	WHATWG 9	Every single-byte encoding decodes and encodes through its index
+ENC-CJK	WHATWG 10-13	gb18030, GBK, Big5, EUC-JP, ISO-2022-JP, Shift_JIS and EUC-KR decode and encode as the standard's algorithms do
+ENC-ERROR-MODES	WHATWG 4.1	Fatal stops with the problem's kind and offset, replacement writes U+FFFD or a character reference, skip drops
+ENC-FATAL-RESET	WHATWG 2026-11-20	After a fatal error the converter returns to its initial state
+ENC-STREAMING	streaming	Output is the same for every split of the input into chunks and every output buffer size, in every error mode
+ENC-OUTPUT-BOUND	limits	Output never exceeds the encoding's documented worst-case growth
+ENC-NO-ALLOCATION	limits	Converting into a caller's buffers allocates nothing per call beyond the result
+ENC-VECTORS-PINNED	vectors	Every vector file is verified against its pinned sha256 before use, and a mismatch names the file
