@@ -1092,7 +1092,9 @@ module Mica::Brotli
         if distance > max_distance
           fast_save
           start_dictionary_word(distance, max_distance)
-          return
+          return unless @stage.command?
+          fast_load
+          next
         end
         if code != 0
           @distances[3] = @distances[2]
@@ -1252,25 +1254,30 @@ module Mica::Brotli
       transform_id = word_id >> size_bits
       malformed("Dictionary transform #{transform_id} does not exist") if transform_id >= Tables::TRANSFORMS.size
       offset = Dictionary::OFFSETS_BY_LENGTH[length] + word_index * length
-      word = Dictionary::DATA[offset, length]
       transform = Tables::TRANSFORMS.unsafe_fetch(transform_id)
-      @word_left = apply_transform(transform, word)
+      size = apply_transform(transform, Dictionary::DATA.to_unsafe + offset, length)
+      malformed("Dictionary word runs past the metablock") if size > @meta_remaining
+      if @pos + size <= @out_end
+        # Room before the next stop: write the word straight out.
+        (@ring.to_unsafe + @pos).copy_from(@word.to_unsafe, size)
+        @pos += size
+        @meta_remaining -= size
+        @stage = Stage::Command
+        return
+      end
+      @word_left = size
       @word_at = 0
-      malformed("Dictionary word runs past the metablock") if @word_left > @meta_remaining
       @stage = Stage::Word
     end
 
     # Writes the transformed *word* into `@word`; returns its length.
-    private def apply_transform(transform : Tables::Transform, word : Bytes) : Int32
+    private def apply_transform(transform : Tables::Transform, word : UInt8*, length : Int32) : Int32
       buffer = @word
-      size = 0
-      transform.prefix.each do |byte|
-        buffer[size] = byte
-        size += 1
-      end
+      prefix = transform.prefix
+      buffer.to_unsafe.copy_from(prefix.to_unsafe, prefix.size)
+      size = prefix.size
       kind = transform.kind.to_i32
       start = 0
-      length = word.size
       if 1 <= kind <= 9
         length = Math.max(length - kind, 0)
       elsif kind >= 12
@@ -1278,10 +1285,8 @@ module Mica::Brotli
         length -= start
       end
       word_start = size
-      length.times do |index|
-        buffer[size] = word[start + index]
-        size += 1
-      end
+      (buffer.to_unsafe + size).copy_from(word + start, length)
+      size += length
       # Uppercasing may touch up to two bytes past the word; those bytes
       # are then overwritten by the suffix or ignored.
       buffer[size] = 0_u8
@@ -1297,11 +1302,9 @@ module Mica::Brotli
           left -= step
         end
       end
-      transform.suffix.each do |byte|
-        buffer[size] = byte
-        size += 1
-      end
-      size
+      suffix = transform.suffix
+      (buffer.to_unsafe + size).copy_from(suffix.to_unsafe, suffix.size)
+      size + suffix.size
     end
 
     # RFC 7932, section 8: uppercases the character at *at*; returns its
