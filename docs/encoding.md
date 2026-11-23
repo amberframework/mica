@@ -122,7 +122,7 @@ The groups and their reasons:
 Run on m4-mini-01 (macOS 26, the system libiconv), seed 20261122, 3,000
 random byte strings and 750 random texts per name, 34 names: 34,403
 divergent cases in 80 kinds. The CI job runs the same against glibc
-(Ubuntu 24.04). Every kind on either platform falls under one of seven reasons;
+(Ubuntu 24.04): 18,566 cases in 43 kinds. Every kind on either platform falls under one of seven reasons;
 none is a Mica departure from the Encoding Standard (the WPT suite and the
 reference-codec differential above check that independently). The full
 report is `bin/iconv_differential 20261122 3000 report.tsv`; the glibc report
@@ -145,4 +145,35 @@ reads a backslash, which is what every browser shows for the same bytes.
 
 ## Speed
 
-BENCHMARK_TABLE
+`bench/encoding/bench.cr` against macOS libiconv on m4-mini-01 (Apple M4,
+the job holding all 10 cores), built with crystal-alpha `--release`. Each
+case runs iconv then Mica, ten rounds, at least 40 ms per run; the table
+gives the median MB/s of input and Mica's ratio. iconv reuses one
+converter for the streaming rows, as `IO::Decoder` does; the per-call rows
+go through the standard library, which opens a converter per call.
+
+| Conversion | 64 B | 1 KiB | 1 MiB |
+|---|---|---|---|
+| decode UTF-16LE | 4.65× as fast | 3.93× as fast | 3.42× as fast |
+| decode windows-1252 | 18.78× as fast | 22.17× as fast | 10.62× as fast |
+| decode UTF-8 (validation) | 9.9× as fast | 9.67× as fast | 5.49× as fast |
+| encode UTF-16LE | 3.48× as fast | 3.33× as fast | 2.92× as fast |
+| encode windows-1252 | 10.3× as fast | 10.07× as fast | 6.8× as fast |
+| decode / encode Shift_JIS | 5.59× / 7.01× | 6.6× / 7.01× | 4.76× / 6.36× |
+| decode / encode EUC-JP | 5.66× / 6.1× | 7.15× / 6.05× | 4.73× / 5.66× |
+| decode / encode gb18030 | 8.35× / 13.11× | 8.99× / 13.0× | 7.25× / 10.55× |
+| decode / encode Big5 | 9.04× / 7.24× | 10.81× / 6.78× | 5.85× / 6.47× |
+| decode / encode EUC-KR | 6.88× / 7.24× | 9.04× / 7.65× | 6.18× / 5.77× |
+| decode / encode ISO-2022-JP | 9.0× / 6.18× | not timed / 5.63× | not timed / 5.61× |
+| decode KOI8-R | 26.38× as fast | 31.23× as fast | 16.42× as fast |
+
+| Per call, 100 bytes | Mica vs iconv |
+|---|---|
+| `String#encode("UTF-16LE")` / `String.new(bytes, "UTF-16LE")` | 4.16× / 5.47× as fast |
+| `String#encode("WINDOWS-1252")` / `String.new(bytes, "WINDOWS-1252")` | 9.02× / 14.36× as fast |
+| `String#encode("SHIFT_JIS")` / `String.new(bytes, "SHIFT_JIS")` | 7.51× / 6.47× as fast |
+
+Mica is faster on every row (2.92× to 31.23×). The two ISO-2022-JP decode
+rows are not timed because macOS libiconv decodes that text differently
+(the bench times only conversions both sides agree on). Mica has no
+SIMD fast paths yet.

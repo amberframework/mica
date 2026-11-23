@@ -1,7 +1,7 @@
 # Throughput of Mica::Encoding against the platform's iconv, interleaved.
 #
 #   crystal-alpha build --release bench/encoding/bench.cr -o bench/bin/encoding_bench
-#   bench/bin/encoding_bench [ROUNDS] [report.tsv]
+#   bench/bin/encoding_bench [ROUNDS] [report.tsv] [only cases whose label contains this]
 #
 # Build it with a compiler whose standard library uses iconv (stock Crystal,
 # or crystal-alpha with -Duse_iconv once Mica is its default): the iconv
@@ -68,6 +68,7 @@ record Case, label : String, name : String, decode : Bool, size : Int32, per_cal
 
 rounds = (ARGV[0]? || "10").to_i
 report = ARGV[1]?
+only = ARGV[2]?
 
 names = [{"UTF-16LE", true}, {"WINDOWS-1252", true}, {"UTF-8", true}, {"UTF-16LE", false}, {"WINDOWS-1252", false},
          {"SHIFT_JIS", true}, {"SHIFT_JIS", false}, {"EUC-JP", true}, {"EUC-JP", false}, {"GB18030", true}, {"GB18030", false},
@@ -87,6 +88,7 @@ end
 rows = [] of String
 puts "host #{System.hostname}, #{rounds} rounds ABAB, median MB/s of input"
 cases.each do |entry|
+  next if only && !entry.label.includes?(only)
   codec = Mica::Encoding.lookup!(entry.name, Mica::Encoding::LabelRule::IconvCompatible)
   text = corpus(codec, entry.size)
   utf8 = text.to_slice
@@ -98,7 +100,11 @@ cases.each do |entry|
   encoder = codec.encoder(Mica::Encoding::ErrorMode::Fatal)
   # Both sides must produce the same bytes before anything is timed.
   check = entry.decode ? Mica::Encoding.decode(input, codec, Mica::Encoding::ErrorMode::Fatal).to_slice : encoded
-  iconv_check = entry.decode ? String.new(input, entry.name).to_slice : text.encode(entry.name)
+  iconv_check = begin
+    entry.decode ? String.new(input, entry.name).to_slice : text.encode(entry.name)
+  rescue ArgumentError
+    Bytes.empty
+  end
   unless check == iconv_check
     puts "#{entry.label}\tnot timed: iconv and Mica write different bytes for this text"
     next
