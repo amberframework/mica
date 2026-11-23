@@ -11,3 +11,4 @@ tmp/
 conformance/yaml-test-suite/
 docs/brand/fonts/
 docs/brand/source/textpath
+conformance/brotli-testdata/
