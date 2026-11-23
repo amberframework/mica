@@ -37,15 +37,18 @@ describe "Mica::Encoding iconv-compatible names" do
     Mica::Encoding.decode(Bytes[186, 195, 255, 202, 199], iconv("EUC-JP"), ErrorMode::Skip).should eq("挫頁")
   end
 
-  it_satisfies "ENC-ICONV-NAMES", "reads and writes byte order marks for UTF-16 and UTF-32, and none for the rest" do
-    Mica::Encoding.encode("aé", Codec::UTF16).should eq(Bytes[0xFE, 0xFF, 0, 0x61, 0, 0xE9])
-    Mica::Encoding.encode("a", Codec::UTF32).should eq(Bytes[0, 0, 0xFE, 0xFF, 0, 0, 0, 0x61])
+  it_satisfies "ENC-ICONV-NAMES", "reads and writes byte order marks for UTF-16 and UTF-32 (little-endian, as glibc), and none for the rest" do
+    Mica::Encoding.encode("aé", Codec::UTF16).should eq(Bytes[0xFF, 0xFE, 0x61, 0, 0xE9, 0])
+    Mica::Encoding.encode("a", Codec::UTF32).should eq(Bytes[0xFF, 0xFE, 0, 0, 0x61, 0, 0, 0])
     Mica::Encoding.decode(Bytes[0xFF, 0xFE, 0x61, 0], Codec::UTF16).should eq("a")
-    Mica::Encoding.decode(Bytes[0, 0x61], Codec::UTF16).should eq("a")
+    Mica::Encoding.decode(Bytes[0xFE, 0xFF, 0, 0x61], Codec::UTF16).should eq("a")
+    Mica::Encoding.decode(Bytes[0x61, 0], Codec::UTF16).should eq("a")
     Mica::Encoding.decode(Bytes[0xFF, 0xFE, 0, 0, 0x61, 0, 0, 0], Codec::UTF32).should eq("a")
+    Mica::Encoding.decode(Bytes[0, 0, 0xFE, 0xFF, 0, 0, 0, 0x61], Codec::UTF32).should eq("a")
+    Mica::Encoding.decode(Bytes[0x61, 0, 0, 0], Codec::UTF32).should eq("a")
     Mica::Encoding.decode(Bytes[0xFF, 0xFE, 0x61, 0], Codec::UTF16LE).should eq("\u{FEFF}a")
     Mica::Encoding.encode("\u{FEFF}a", Codec::UTF16LE).should eq(Bytes[0xFF, 0xFE, 0x61, 0])
-    Mica::Encoding.encode("aé", Codec::UCS2).should eq(Bytes[0, 0x61, 0, 0xE9])
+    Mica::Encoding.encode("aé", Codec::UCS2).should eq(Bytes[0x61, 0, 0xE9, 0])
     expect_raises(Mica::Encoding::ConversionError, /U\+1F600/) { Mica::Encoding.encode("😀", Codec::UCS2) }
     Mica::Encoding.decode(Bytes[0x3D, 0xD8, 0x00, 0xDE], Codec::UCS2LE).should eq("\u{FFFD}\u{FFFD}")
     Mica::Encoding.decode(Bytes[0, 0x11, 0, 0], Codec::UTF32BE).should eq("\u{FFFD}")
