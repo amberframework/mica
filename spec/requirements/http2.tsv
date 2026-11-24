@@ -1,0 +1,27 @@
+# Requirements for Mica::HTTP2's frame codec (milestone H2.1): the frame
+# layer of RFC 9113 sections 3.4, 4, 6 and 7 (with the SETTINGS of RFC 8441
+# and RFC 9218), and the plan's limits. Stream states and flow-control
+# windows are H2.3. Format: id<TAB>section<TAB>summary.
+H2-9113-3.4-preface	RFC 9113 3.4	A server parser accepts the 24-byte client preface in any chunking and rejects a mismatch at its first differing byte (PROTOCOL_ERROR, connection)
+H2-9113-4.1-frame-header	RFC 9113 4.1	The 9-byte header carries a 24-bit length, the type, the flags and a 31-bit stream identifier; the reserved bit is ignored on receipt and cleared on send
+H2-9113-4.1-unknown-type	RFC 9113 4.1, 5.5	Frames of unknown types are skipped
+H2-9113-4.1-unknown-flags	RFC 9113 4.1	Flags a frame type does not define are ignored and never sent
+H2-9113-4.2-frame-size	RFC 9113 4.2	A frame longer than the advertised SETTINGS_MAX_FRAME_SIZE raises FRAME_SIZE_ERROR as soon as its header arrives; a frame is never serialized over the peer's maximum
+H2-9113-6.1-data	RFC 9113 6.1	DATA carries data and END_STREAM; on stream 0 it is a PROTOCOL_ERROR
+H2-9113-6.1-padding	RFC 9113 6.1, 6.2, 6.6	Padding as long as the payload or longer is a PROTOCOL_ERROR; a padded frame too short for its pad length is a FRAME_SIZE_ERROR
+H2-9113-6.2-headers	RFC 9113 6.2	HEADERS carries a field block, END_STREAM, END_HEADERS, priority fields and padding; on stream 0 it is a PROTOCOL_ERROR; a self-dependency is a stream PROTOCOL_ERROR that still returns the frame
+H2-9113-6.3-priority	RFC 9113 6.3	PRIORITY is 5 bytes (otherwise a stream FRAME_SIZE_ERROR), not on stream 0, and not a self-dependency
+H2-9113-6.4-rst-stream	RFC 9113 6.4	RST_STREAM is 4 bytes (otherwise a connection FRAME_SIZE_ERROR) and not on stream 0; unknown codes are kept
+H2-9113-6.5-settings	RFC 9113 6.5	SETTINGS is on stream 0, a multiple of 6 bytes, empty when ACK is set (otherwise FRAME_SIZE_ERROR); unknown parameters are ignored
+H2-9113-6.5.2-settings-values	RFC 9113 6.5.2, RFC 8441 3, RFC 9218 2.1	ENABLE_PUSH, ENABLE_CONNECT_PROTOCOL and NO_RFC7540_PRIORITIES are 0 or 1 and MAX_FRAME_SIZE is 16,384 to 16,777,215 (otherwise PROTOCOL_ERROR); INITIAL_WINDOW_SIZE over 2^31-1 is a FLOW_CONTROL_ERROR
+H2-9113-6.6-push-promise	RFC 9113 6.6	PUSH_PROMISE carries a promised stream identifier (reserved bit ignored), a field block and padding, and is not on stream 0
+H2-9113-6.7-ping	RFC 9113 6.7	PING is 8 bytes on stream 0 with ACK
+H2-9113-6.8-goaway	RFC 9113 6.8	GOAWAY is on stream 0, at least 8 bytes, with a last stream identifier, a code and debug data
+H2-9113-6.9-window-update	RFC 9113 6.9	WINDOW_UPDATE is 4 bytes (otherwise a connection FRAME_SIZE_ERROR); a zero increment is a stream PROTOCOL_ERROR on a stream and a connection error on stream 0
+H2-9113-6.10-continuation	RFC 9113 6.10	A header block continues only with CONTINUATION frames on its stream; any other frame, or a CONTINUATION outside a block, is a connection PROTOCOL_ERROR
+H2-9113-7-error-codes	RFC 9113 7	All 14 error codes, and every FrameError carries its code and whether it is a connection or stream error
+H2-LIMIT-header-block	plan 2.4, 2.5	A header block passing max_header_block_bytes or max_continuation_frames raises FrameLimitError (ENHANCE_YOUR_CALM) when the frame that passes it arrives
+H2-API-round-trip	plan 2.6	Parsing a serialized frame gives the same frame, for random frames of every type
+H2-API-trickle	plan 2.6	Bytes fed one at a time, or in random chunks, give the same frames and errors as the same bytes fed at once
+H2-API-errors	RFC 9113 5.4	A connection error sticks; after a stream error the parser goes on with the next frame
+H2-FUZZ	plan 2.6	Random and mutated frame streams only raise Mica errors and the parser holds at most one frame plus the last chunk

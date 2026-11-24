@@ -11,5 +11,6 @@ tmp/
 conformance/yaml-test-suite/
 docs/brand/fonts/
 docs/brand/source/textpath
+conformance/hpack-test-case/
 conformance/encoding-vectors/
 conformance/brotli-testdata/

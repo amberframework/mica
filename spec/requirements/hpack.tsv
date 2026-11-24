@@ -1,0 +1,31 @@
+# Requirements for Mica::HPACK (milestone H2.2): the decoder and encoder
+# requirements of RFC 7541, the limits of the plan's section 2.5, and the
+# conformance corpora. Format: id<TAB>section<TAB>summary.
+HPACK-7541-2.3.1-static-table	RFC 7541 2.3.1, Appendix A	The 61 static entries answer indices 1 to 61, and the encoder refers to them by full match or by name
+HPACK-7541-2.3.3-index-space	RFC 7541 2.3.3	Dynamic entries follow the static table, newest first at index 62; index 0 and an index past both tables are decoding errors
+HPACK-7541-4.1-entry-size	RFC 7541 4.1	An entry's size is its name and value bytes plus 32
+HPACK-7541-4.2-size-update-bound	RFC 7541 4.2, 6.3	A dynamic table size update over the advertised maximum is a decoding error
+HPACK-7541-4.2-size-update-required	RFC 7541 4.2	After the advertised maximum drops below the table's size, the next block must start with a size update; the encoder sends the smallest size first when the maximum went down and up again
+HPACK-7541-4.3-eviction-on-resize	RFC 7541 4.3	Lowering the table size evicts the oldest entries until the table fits
+HPACK-7541-4.4-eviction-on-add	RFC 7541 4.4	Adding an entry evicts the oldest entries first; an entry larger than the maximum empties the table and is not added
+HPACK-7541-5.1-integer	RFC 7541 5.1, C.1	Integers with 5- to 8-bit prefixes encode and decode, including the C.1 examples
+HPACK-7541-5.1-integer-overflow	RFC 7541 5.1, plan 2.5	An integer with more than 5 continuation octets or a value over 2^31-1 raises IntegerOverflowError
+HPACK-7541-5.2-string-literal	RFC 7541 5.2	String literals decode raw and Huffman-coded; the encoder Huffman-codes a string only when that is shorter
+HPACK-7541-5.2-huffman-eos	RFC 7541 5.2	A Huffman string that contains the EOS symbol raises HuffmanError
+HPACK-7541-5.2-huffman-padding	RFC 7541 5.2	Padding longer than 7 bits, or padding that is not the most significant bits of EOS (all ones), raises HuffmanError
+HPACK-7541-appendix-b-huffman	RFC 7541 Appendix B	Every one of the 256 octets Huffman-codes and decodes back, alone and in random strings
+HPACK-7541-6.1-indexed	RFC 7541 6.1	An indexed field reproduces the table entry
+HPACK-7541-6.2.1-incremental-indexing	RFC 7541 6.2.1	A literal with incremental indexing, with an indexed or a new name, is emitted and added to the dynamic table
+HPACK-7541-6.2.2-without-indexing	RFC 7541 6.2.2	A literal without indexing is emitted and leaves the table unchanged
+HPACK-7541-6.2.3-never-indexed	RFC 7541 6.2.3, 7.1	A never-indexed literal is emitted marked never_indexed and leaves the table unchanged; the encoder sends cookie, set-cookie, authorization, proxy-authorization and fields marked never_indexed this way
+HPACK-7541-6.3-size-update-position	RFC 7541 4.2, 6.3	A dynamic table size update after the first field of a block is a decoding error
+HPACK-7541-appendix-c	RFC 7541 Appendix C	Every example of C.2 to C.6 decodes to its headers and table, and the encoder reproduces its bytes
+HPACK-TEST-CASE	http2jp/hpack-test-case 8a1406e	Every story in every implementation directory decodes, case by case in one context, to the expected headers; the archive's sha256 is checked
+HPACK-ENCODER-ROUND-TRIP	RFC 7541 2.2	The encoder's blocks for every raw-data story, and for random header lists with table size changes, decode to the lists given (nghttp2 decodes them too: fuzz/hpack_nghttp2)
+HPACK-ENCODER-DETERMINISTIC	plan 2.6	The same header lists in the same order give the same bytes
+HPACK-LIMIT-header-list	plan 2.4, 2.5	A block whose decoded list passes max_header_list_bytes (an HPACK bomb) yields only fields within the limit, raises DecodeLimitError, and leaves the table usable
+HPACK-LIMIT-header-block	plan 2.5	A block over max_header_block_bytes raises DecodeLimitError before it is read
+HPACK-LIMIT-work	plan 2.5	Decoding is charged to a Core::WorkBudget and raises WorkBudgetExceededError past it
+HPACK-API-truncated	RFC 7541 5.1, 5.2	A block cut inside an integer or a string raises TruncatedBlockError
+HPACK-API-failed-decoder	RFC 9113 4.3	After a decoding error the decoder refuses later blocks
+HPACK-FUZZ	plan 2.6	Random and mutated blocks only raise Mica errors and allocate in proportion to the block

@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+Adds the HTTP/2 frame codec, `Mica::HTTP2` (milestone H2.1), and HPACK,
+`Mica::HPACK` (H2.2), without I/O (docs/http2.md):
+
+- `FrameParser` checks the client preface and parses the 10 RFC 9113
+  frame types from chunks of any size, with every frame-level rule raising
+  a `FrameError` that carries its RFC 9113 error code and whether the
+  connection or the stream must close; frames serialize back to the same
+  bytes. Required `FrameLimits` cap the frame size and each header block
+  (bytes and CONTINUATION frames).
+- `HPACK::Decoder` takes required `DecodeLimits` (decoded list, encoded
+  block, table size, work); an HPACK bomb stops at the list limit with the
+  table intact. `HPACK::Encoder` is deterministic and sends cookies and
+  credentials as never-indexed literals.
+- All 16 RFC 7541 Appendix C examples in both directions and all 446
+  hpack-test-case stories (47,142 blocks) pass. Against nghttp2 1.71.0:
+  1,000,000 Mica-encoded lists decode in nghttp2, 1,000,000
+  nghttp2-encoded lists decode in Mica, and 2,000,000 random and mutated
+  blocks get the same verdict from both, with 0 disagreements; 2,000,000
+  fuzzed frame streams and header blocks raised only Mica errors.
+- HPACK decoding over the whole hpack-test-case corpus (548,382 fields,
+  8,436,756 block bytes) is 1.37× as fast as nghttp2 1.71.0 on an Apple M4
+  Mac mini (m4-mini-01; median of 10 interleaved rounds, bootstrap 95%
+  interval 1.34× to 1.44×): 368.4 MB/s against 268.5 MB/s.
+
 Speeds up Inflate (milestone Z3). Against system zlib 1.2.12 over 93
 cases, one-shot decoding goes from 1.02× to 1.09× as fast and streaming
 from 1.08× to 1.12× as fast (geometric means; per case in
