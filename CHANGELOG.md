@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+Speeds up Brotli decoding. Against libbrotlidec 1.2.1 over 36 cases on an
+Apple M4 Mac mini (m4-mini-01, 10 interleaved rounds), one-shot decoding
+goes from 1.04× slower to 1.06× as fast and streaming from 1.06× slower to
+1.04× as fast (geometric means; tables in `docs/brotli.md`):
+
+- The output ring is allocated without zeroing, sized exactly for the last
+  metablock when streaming too, and kept (up to 4 MiB) by a released
+  streaming decoder, so a large-enough ring grows in place.
+- Prefix code tables fill only `1 << max_length` root entries and repeat
+  them; complex codes count their symbols in locals.
+- Dictionary words with a plain transform go straight into the ring.
+- The fast command loop keeps block counts, the last four distances, the
+  metablock length left, the command tree and the output stop in locals,
+  and decodes runs of literals of a one-tree block without per-literal
+  checks; which block types use one tree is worked out once per header.
+- Still slower: 13 one-shot and 15 streaming cases, all at quality 11 but
+  one (`html_1m` at quality 5), the slowest 1.08× slower one-shot and
+  1.14× slower streaming (alice29); run-to-run spread is a few percent per
+  case. Context-modeled literal decoding is where the time goes.
+
 Adds the HTTP/2 frame codec, `Mica::HTTP2` (milestone H2.1), and HPACK,
 `Mica::HPACK` (H2.2), without I/O (docs/http2.md):
 
