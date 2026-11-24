@@ -61,6 +61,7 @@ describe Mica::Brotli::Writer do
     writer = Mica::Brotli::Writer.new(io, quality: 6)
     writer.write(input)
     writer.close
+    io.to_slice.should eq(Mica::Brotli.encode(input, quality: 6))
     BrotliEncoderInputs.decode(io.to_slice).should eq(input)
   end
 
