@@ -1,6 +1,35 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 (2026-11-24)
+
+Adds YAML, DEFLATE (Inflate and the encoders), Brotli, the WHATWG Encoding
+Standard, and the HTTP/2 frame codec with HPACK, all in pure Crystal. A
+program that uses them links no libyaml, libz, libbrotli or libiconv.
+`Mica::Regex` and `Mica::XML` carry over from 0.2.0.
+
+- `Mica::YAML` reads and writes YAML 1.2 and the libyaml dialect (#20).
+- `Mica::Deflate`, `Mica::Zlib` and `Mica::Gzip` decode (#18, #23, #29) and
+  encode (#22); the readers can stop at the end of the stream and the raw
+  reader and writer take a preset dictionary (#38), which crystal-alpha's
+  `Compress` needs to run on Mica.
+- `Mica::Brotli` decodes (#31, #35) and encodes at qualities 0 to 11 (#32),
+  writing the same bytes as libbrotlienc 1.2.1 at qualities 5 to 11 (#36,
+  #37); a writer closed before its first metablock sizes its tables to the
+  body (#34).
+- `Mica::Encoding` implements the WHATWG Encoding Standard, CJK included,
+  plus the iconv names `String#encode` and `IO#set_encoding` use (#33).
+- `Mica::HTTP2` parses and writes the RFC 9113 frames and `Mica::HPACK`
+  encodes and decodes header blocks, both without I/O (#30).
+- `scripts/vendor_into.rb` places a pinned copy of one component in another
+  project (#24); `scripts/check_regex_literals.cr` finds patterns a
+  Mica-default compiler refuses (#25).
+- Fixes: streaming encoders no longer leak through a finalization cycle
+  (#26); CRC-32 builds on Apple silicon with the stock compiler (#27); an
+  unclosed writer's tables are freed on x86_64 (#28).
+- `Mica::VERSION` reads 0.3.0.
+
+The entries below give each change with its measurements.
+
 
 Speeds up Brotli decoding. Against libbrotlidec 1.2.1 over 36 cases on an
 Apple M4 Mac mini (m4-mini-01, 10 interleaved rounds), one-shot decoding

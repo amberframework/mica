@@ -24,7 +24,7 @@ def badges(palette)
     ['NO PCRE2 · NO LIBZ · NO LIBXML2', palette[:text]],
     ['LINEAR-TIME SEARCH', palette[:accent]],
     ['WORK BUDGETS + DEADLINES', palette[:text]],
-    ['v0.2.0', palette[:accent]],
+    ['v0.3.0', palette[:accent]],
     ['MIT', palette[:muted]]
   ]
   gap = 10
@@ -42,7 +42,7 @@ def badges(palette)
     cursor += width + gap
   end
   svg_open(total.ceil, height, 'Mica at a glance',
-           'Pure Crystal. No PCRE2, no libz, no libxml2. Linear-time search. Work budgets and deadlines. Version 0.2.0. MIT license.') +
+           'Pure Crystal. No PCRE2, no libz, no libxml2. Linear-time search. Work budgets and deadlines. Version 0.3.0. MIT license.') +
     parts.join("\n") + '</svg>'
 end
 

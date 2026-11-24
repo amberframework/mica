@@ -8,7 +8,7 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/brand/badges-dark.svg">
-    <img src="docs/brand/badges-light.svg" width="860" alt="Pure Crystal · No PCRE2, no libz, no libxml2 · Linear-time search · Work budgets and deadlines · v0.2.0 · MIT">
+    <img src="docs/brand/badges-light.svg" width="860" alt="Pure Crystal · No PCRE2, no libz, no libxml2 · Linear-time search · Work budgets and deadlines · v0.3.0 · MIT">
   </picture>
 </p>
 
@@ -25,7 +25,7 @@
 dependencies:
   mica:
     github: amberframework/mica
-    version: 0.2.0
+    version: 0.3.0
 ```
 
 ```crystal
@@ -33,7 +33,7 @@ require "mica"
 ```
 
 > [!NOTE]
-> 0.2.0 has `Mica::Regex` and `Mica::XML`. Inflate (`Mica::Gzip`, `Mica::Zlib`, `Mica::Deflate`) is on `main` and ships in the next release. To use it now, pin the merge commit: `commit: 25b528051464b7ce795478a3519f729eec10b590`.
+> 0.3.0 has `Mica::Regex`, `Mica::XML`, `Mica::YAML`, DEFLATE (`Mica::Deflate`, `Mica::Zlib`, `Mica::Gzip`), `Mica::Brotli`, `Mica::Encoding`, and the HTTP/2 frame codec and HPACK (`Mica::HTTP2`, `Mica::HPACK`).
 
 ## Two ways to use it
 
