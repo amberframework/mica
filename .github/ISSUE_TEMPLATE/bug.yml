@@ -35,7 +35,7 @@ body:
     id: version
     attributes:
       label: Mica version or commit
-      placeholder: 0.2.0, or the commit from shard.lock
+      placeholder: 0.3.0, or the commit from shard.lock
     validations:
       required: true
   - type: dropdown

@@ -5,7 +5,7 @@
 # input. No format needs a C library, and none reads the network or file
 # system while parsing.
 module Mica
-  VERSION = "0.2.0"
+  VERSION = "0.3.0"
 end
 
 require "./mica/core"
