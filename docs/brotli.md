@@ -1,7 +1,7 @@
-# Brotli (milestone Z4)
+# Brotli (milestones Z4 and Z6)
 
-`Mica::Brotli` decodes Brotli streams (RFC 7932) in pure Crystal. A
-program that uses it links no libbrotlidec.
+`Mica::Brotli` decodes and encodes Brotli streams (RFC 7932) in pure
+Crystal. A program that uses it links no libbrotlidec and no libbrotlienc.
 
 ## Decoding
 
@@ -23,6 +23,54 @@ IO.copy(reader, destination)
 A stream must be complete: it ends with its last metablock and zero
 padding bits, and no byte may follow it. The Reader reads ahead from its
 source, so give it an IO that holds only the compressed stream.
+
+## Encoding
+
+```crystal
+# One-shot.
+compressed = Mica::Brotli.encode(body, quality: 5, window_bits: 22)
+
+# Streaming: an IO that encodes as it is written.
+writer = Mica::Brotli::Writer.new(response_io, quality: 5)
+writer.write(chunk)
+writer.flush # everything so far is decodable from the bytes written
+writer.close # the last metablock
+```
+
+`quality` is 0 to 11 (default 5) and `window_bits` 10 to 24 (default 22;
+matches reach (1 << window_bits) - 16 bytes back). Anything else raises
+`ArgumentError`. The same input and options always give the same bytes.
+
+| Quality | Matching | Modeling |
+|---|---|---|
+| 0, 1 | one candidate per hash, greedy | one prefix code per category |
+| 2, 3 | hash chains of 4 and 8, last-distance check | same |
+| 4 | chains of 16, lazy matching, four-entry distance cache, static dictionary | same |
+| 5 to 9 | libbrotlienc 1.2.1's hashers: buckets of the last 16 positions with a tag byte each (5, 6), or of the last 64 to 256 (7 to 9), 4-byte hashes (5-byte from a 1 MiB input); 4, 10 or 16 cached distances, lazy matching, static dictionary | libbrotlienc's greedy metablock: static literal context maps (1, 2, 3 or 13 contexts, chosen from UTF-8 byte-class statistics) and greedy block splitting of literals, commands and distances. On the benchmark corpus at window 22, `Brotli.encode` writes the same bytes as libbrotlienc 1.2.1 |
+| 10, 11 | libbrotlienc 1.2.1's binary tree of positions (every match length, up to 128 matches per position), 16 cached distances, static dictionary; a shortest-path (optimal) parse by estimated bits, which 11 repeats with a cost model taken from its first pass | libbrotlienc's full metablock: the distance code parameters (NPOSTFIX, NDIRECT) that cost the fewest bits, block splitting of literals, commands and distances by entropy, then clustering of the literal (64 contexts per block type, UTF-8 or signed context model) and distance histograms into at most 256 each. On the benchmark corpus at window 22, `Brotli.encode` writes the same bytes as libbrotlienc 1.2.1 |
+
+Every quality writes complex prefix codes with the run-length code
+length alphabet (codes 16 and 17), simple codes for 1 to 4 symbols, code
+lengths limited to 15 bits, the short distance codes 0 to 15 and the
+insert-and-copy cells that reuse the last distance. A metablock that would
+not be smaller than its bytes is stored uncompressed.
+
+`Writer#flush` encodes what is buffered, then writes an empty metadata
+metablock and pads to a byte boundary (what libbrotlienc's
+`BROTLI_OPERATION_FLUSH` does). A flush with nothing written since the
+last one writes no bytes.
+
+### Memory
+
+| What | Bound |
+|---|---|
+| Hash heads (0 to 4) | 4 B × 2^14 (quality 0) to 2^17, fewer for inputs under 64 KiB |
+| Hash chain (2 to 4) | 4 B × min(window, input, 2^20): at most 4 MiB |
+| Hash table (5 to 9) | 2^14 buckets × 16 slots × 5 B (5: 1.3 MiB) up to 2^15 × 256 × 4 B (9: 32 MiB), outside the garbage collector; only the pages an input touches are faulted in |
+| Metablock | 256 KiB of input below quality 5; from 5, blocks of 64 KiB (256 KiB at 9) gather into a metablock of up to 2^(window + 1) bytes, with commands and per-metablock scratch outside the garbage collector |
+| Binary tree (10, 11) | 2^17 heads × 4 B (512 KiB) and two links of 4 B per position of min(window, input): 32 MiB at the default window, outside the garbage collector |
+| Optimal parse (10, 11) | per input block of 256 KiB (64 KiB at window 16 or less): 20 B per position, its literal costs, and at 11 every match found |
+| `Writer` buffer | grows to 2 × window + one metablock (9 MiB at the default window), and drops whole windows of history |
 
 ## Limits
 
@@ -76,6 +124,14 @@ Every error carries the byte offset in the compressed input.
 - Decoders are pooled, so a small body costs no table allocation.
 
 ## Testing and measurement
+
+- `spec/brotli/encoder_spec.cr` and `writer_spec.cr` round-trip every
+  quality, windows 10 to 24, the input shapes a server sends and the
+  test files; `fuzz/brotli_encode_campaign.cr` decodes encoder output in
+  libbrotlidec 1.2.1 and in Mica (random quality, window, input family,
+  size, and streaming with random writes and flushes).
+- `bench/brotli/encode_ab.rb` and `encode_report.rb` compare encode size
+  and speed with libbrotlienc 1.2.1 the same way the decode benchmark does.
 
 - `conformance/brotli/fetch_testdata.rb` fetches google/brotli's 69 test
   files at v1.2.1, each checked against `conformance/brotli/MANIFEST.tsv`,

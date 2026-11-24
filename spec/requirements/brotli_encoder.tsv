@@ -1,0 +1,19 @@
+# Requirements for the Mica::Brotli encoder (milestone Z6, the pure-Crystal
+# Brotli encoder): what RFC 7932 requires of a compliant compressor, the
+# public API and the properties the encoder keeps. google/brotli 1.2.1 is the
+# reference: fuzz/brotli_encode_campaign.cr decodes every stream Mica writes
+# in libbrotlidec and in Mica. Format: id<TAB>section<TAB>summary.
+BROTLI-ENC-roundtrip-qualities	round trip	Empty, one byte, all-zero, random, text, JSON and HTML inputs decode to the original at every quality from 0 to 11
+BROTLI-ENC-roundtrip-windows	RFC 7932 9.1	Every window from 10 to 24 bits is written in the stream header and no match reaches past (1 << WBITS) - 16 bytes
+BROTLI-ENC-reference-files	round trip	google/brotli v1.2.1's test files decode to the original at every quality
+BROTLI-ENC-metablocks	RFC 7932 9.2	Input larger than a metablock is split into several, each at most 2^24 bytes, with matches reaching back across them
+BROTLI-ENC-uncompressed	RFC 7932 9.2	A metablock that does not compress is stored uncompressed (never as the last metablock), so the output grows by a few bytes at most
+BROTLI-ENC-dictionary	RFC 7932 8	Static dictionary references (whole words and words with their last bytes omitted) are used where no backward match exists
+BROTLI-ENC-deterministic	API	The same input and options give the same bytes
+BROTLI-ENC-quality-ladder	API	Higher qualities compress text smaller
+BROTLI-ENC-arguments	API	A quality outside 0 to 11 or a window outside 10 to 24 raises ArgumentError; Writer#read raises IO::Error
+BROTLI-ENC-writer-chunks	streaming	Writer output decodes to the input for any sequence of write sizes and flushes
+BROTLI-ENC-writer-window-slide	streaming	Writer memory is bounded: it drops history older than the window and keeps matching
+BROTLI-ENC-writer-flush	RFC 7932 9.2	flush ends on a byte boundary with an empty metadata metablock, so the bytes so far decode everything written before it; an idle flush adds no bytes
+BROTLI-ENC-writer-empty	RFC 7932 9.2	A Writer closed with nothing written produces a valid empty stream
+BROTLI-ENC-writer-matches-encode	streaming	A Writer fed one piece decodes like Brotli.encode output

@@ -87,3 +87,4 @@ DEFLATE-LIMIT-deadline	limits	A decode that runs past its timeout raises Mica::D
 DEFLATE-LIMIT-bounded-memory	limits	A decompression bomb allocates at most about twice max_output_bytes one-shot, and a fixed 224 KiB of buffers streaming, before its limit error
 DEFLATE-LIMIT-empty-blocks	limits	Long runs of empty stored or dynamic blocks are charged per block, so the work budget and the deadline stop them
 DEFLATE-LIMIT-differential	limits	Across generated, encoder-made and mutated streams, Mica and system zlib agree: the same output, or both reject
+DEFLATE-API-stop-at-end	API	With stop_at_end, a Deflate or Zlib Reader takes from its source only the bytes of the stream (through peek when the source has it, one byte per read otherwise), so what follows the stream stays in the source
