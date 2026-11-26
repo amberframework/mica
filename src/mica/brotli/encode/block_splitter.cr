@@ -63,7 +63,7 @@ module Mica::Brotli::Encode
     private def self.add_vector(set : HistogramSet, index : Int32, data : T*, length : Int32) : Nil forall T
       histogram = set[index]
       length.times { |i| histogram[data[i]] &+= 1 }
-      set.totals[index] &+= length
+      set.totals.to_unsafe[index] &+= length
     end
 
     private def self.split_byte_vector(data : T*, length : Int32, data_size : Int32, symbols_per_histogram : Int32,
@@ -125,7 +125,8 @@ module Mica::Brotli::Encode
           switch_signal, block_ids)
         num_histograms = remap_block_ids(block_ids, length, new_id, num_histograms)
         num_histograms.times { |i| histograms.clear(i) }
-        length.times { |i| histograms.add(block_ids[i], data[i]) }
+        ids = block_ids.to_unsafe
+        length.times { |i| histograms.add(ids[i], data[i]) }
       end
       cluster_blocks(data, length, num_blocks, block_ids, data_size)
     end
@@ -151,44 +152,58 @@ module Mica::Brotli::Encode
       end
       cost.fill(0.0)
       switch_signal[0, length * bitmap_len].fill(0_u8)
+      # Pointers held in locals: the stores below cannot then force reloads.
       costs = cost.to_unsafe
       inserts = insert_cost.to_unsafe
-      length.times do |byte_ix|
-        ix = byte_ix * bitmap_len
-        insert_cost_ix = data[byte_ix].to_i32 * num_histograms
+      signals = switch_signal.to_unsafe
+      ids = block_id.to_unsafe
+      byte_ix = 0
+      while byte_ix < length
+        ix = byte_ix &* bitmap_len
+        row = inserts + data[byte_ix].to_i32! &* num_histograms
         min_cost = 1e99
+        best = -1
         switch_cost = block_switch_bitcost
-        num_histograms.times do |k|
-          costs[k] += inserts[insert_cost_ix + k]
-          if costs[k] < min_cost
-            min_cost = costs[k]
-            block_id[byte_ix] = k.to_u8
+        k = 0
+        while k < num_histograms
+          value = costs[k] + row[k]
+          costs[k] = value
+          if value < min_cost
+            min_cost = value
+            best = k
           end
+          k &+= 1
         end
+        ids[byte_ix] = best.to_u8! if best >= 0
         switch_cost *= 0.77 + (0.07 / 2000) * byte_ix if byte_ix < 2000
-        num_histograms.times do |k|
-          costs[k] -= min_cost
-          if costs[k] >= switch_cost
+        k = 0
+        while k < num_histograms
+          value = costs[k] - min_cost
+          if value >= switch_cost
             costs[k] = switch_cost
-            switch_signal[ix + (k >> 3)] |= (1 << (k & 7)).to_u8
+            signals[ix &+ (k >> 3)] |= (1 << (k & 7)).to_u8!
+          else
+            costs[k] = value
           end
+          k &+= 1
         end
+        byte_ix &+= 1
       end
       num_blocks = 1
-      byte_ix = length - 1
-      ix = byte_ix * bitmap_len
-      current = block_id[byte_ix]
+      byte_ix = length &- 1
+      ix = byte_ix &* bitmap_len
+      current = ids[byte_ix]
       while byte_ix > 0
-        mask = (1 << (current & 7)).to_u8
-        byte_ix -= 1
-        ix -= bitmap_len
-        if switch_signal[ix + (current >> 3)] & mask != 0
-          if current != block_id[byte_ix]
-            current = block_id[byte_ix]
-            num_blocks += 1
+        mask = (1 << (current & 7)).to_u8!
+        byte_ix &-= 1
+        ix &-= bitmap_len
+        if signals[ix &+ (current >> 3)] & mask != 0
+          if current != ids[byte_ix]
+            current = ids[byte_ix]
+            num_blocks &+= 1
           end
         end
-        block_id[byte_ix] = current
+        ids[byte_ix] = current
       end
       num_blocks
     end
