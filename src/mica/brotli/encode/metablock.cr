@@ -53,7 +53,12 @@ module Mica::Brotli::Encode
     def add_histogram(to : Int, source : HistogramSet, from : Int) : Nil
       target = self[to]
       other = source[from]
-      @data_size.times { |symbol| target[symbol] &+= other[symbol] }
+      size = @data_size
+      symbol = 0
+      while symbol < size
+        target[symbol] &+= other[symbol]
+        symbol &+= 1
+      end
       @totals[to] &+= source.totals[from]
     end
 

@@ -9,15 +9,19 @@ module Mica::Brotli::Encode
     def self.population_cost(set : HistogramSet, index : Int) : Float64
       data_size = set.data_size
       histogram = set[index]
-      total = set.totals[index]
+      total = set.totals.to_unsafe[index]
       return 12.0 if total == 0
       count = 0
-      symbols = StaticArray(Int32, 5).new(0)
-      data_size.times do |i|
-        next unless histogram[i] > 0
-        symbols[count] = i
-        count += 1
-        break if count > 4
+      found = StaticArray(Int32, 5).new(0)
+      symbols = found.to_unsafe
+      i = 0
+      while i < data_size
+        if histogram[i] > 0
+          symbols[count] = i
+          count &+= 1
+          break if count > 4
+        end
+        i &+= 1
       end
       return 12.0 if count == 1
       return 20.0 + total.to_f64 if count == 2
@@ -25,47 +29,49 @@ module Mica::Brotli::Encode
         a = histogram[symbols[0]]
         b = histogram[symbols[1]]
         c = histogram[symbols[2]]
-        return 28.0 + 2.0 * (a.to_u64 + b + c) - Math.max(a, Math.max(b, c))
+        return 28.0 + 2.0 * (a.to_u64 &+ b &+ c) - Math.max(a, Math.max(b, c))
       end
       if count == 4
-        histo = StaticArray(UInt32, 4).new { |i| histogram[symbols[i]] }
-        4.times do |i|
-          (i + 1...4).each do |j|
-            histo[j], histo[i] = histo[i], histo[j] if histo[j] > histo[i]
+        histo = StaticArray(UInt32, 4).new { |k| histogram[symbols[k]] }
+        4.times do |k|
+          (k &+ 1...4).each do |j|
+            histo[j], histo[k] = histo[k], histo[j] if histo[j] > histo[k]
           end
         end
-        h23 = histo[2].to_u64 + histo[3]
-        return 37.0 + 3.0 * h23 + 2.0 * (histo[0].to_u64 + histo[1]) - Math.max(h23, histo[0].to_u64)
+        h23 = histo[2].to_u64 &+ histo[3]
+        return 37.0 + 3.0 * h23 + 2.0 * (histo[0].to_u64 &+ histo[1]) - Math.max(h23, histo[0].to_u64)
       end
       bits = 0.0
       max_depth = 1
-      depth_histogram = StaticArray(UInt32, 18).new(0_u32)
+      depths = StaticArray(UInt32, 18).new(0_u32)
+      depth_histogram = depths.to_unsafe
       log2total = Encode.fast_log2(total)
       i = 0
       while i < data_size
-        if histogram[i] > 0
-          log2p = log2total - Encode.fast_log2(histogram[i])
-          depth = (log2p + 0.5).to_i32
-          bits += histogram[i] * log2p
+        value = histogram[i]
+        if value > 0
+          log2p = log2total - Encode.fast_log2(value)
+          depth = (log2p + 0.5).to_i32!
+          bits += value * log2p
           depth = 15 if depth > 15
           max_depth = depth if depth > max_depth
-          depth_histogram[depth] += 1
-          i += 1
+          depth_histogram[depth] &+= 1
+          i &+= 1
         else
           reps = 1_u32
-          k = i + 1
+          k = i &+ 1
           while k < data_size && histogram[k] == 0
-            reps += 1
-            k += 1
+            reps &+= 1
+            k &+= 1
           end
-          i += reps
+          i = k
           break if i == data_size
           if reps < 3
-            depth_histogram[0] += reps
+            depth_histogram[0] &+= reps
           else
-            reps -= 2
+            reps &-= 2
             while reps > 0
-              depth_histogram[REPEAT_ZERO_LENGTH] += 1
+              depth_histogram[REPEAT_ZERO_LENGTH] &+= 1
               bits += 3
               reps >>= 3
             end
@@ -73,7 +79,7 @@ module Mica::Brotli::Encode
         end
       end
       bits += 18 + 2 * max_depth
-      bits + Encode.bits_entropy(depth_histogram.to_unsafe, CODE_LENGTH_CODES)
+      bits + Encode.bits_entropy(depth_histogram, CODE_LENGTH_CODES)
     end
 
     @[AlwaysInline]
@@ -96,19 +102,21 @@ module Mica::Brotli::Encode
                                       pairs : Slice(Pair), num_pairs : Int32) : Int32
       return num_pairs if idx1 == idx2
       idx1, idx2 = idx2, idx1 if idx2 < idx1
-      cost_diff = 0.5 * cluster_cost_diff(cluster_size[idx1], cluster_size[idx2])
-      cost_diff -= set.bit_costs[idx1]
-      cost_diff -= set.bit_costs[idx2]
+      bit_costs = set.bit_costs.to_unsafe
+      totals = set.totals.to_unsafe
+      cost_diff = 0.5 * cluster_cost_diff(cluster_size.to_unsafe[idx1], cluster_size.to_unsafe[idx2])
+      cost_diff -= bit_costs[idx1]
+      cost_diff -= bit_costs[idx2]
       good = false
       cost_combo = 0.0
-      if set.totals[idx1] == 0
-        cost_combo = set.bit_costs[idx2]
+      if totals[idx1] == 0
+        cost_combo = bit_costs[idx2]
         good = true
-      elsif set.totals[idx2] == 0
-        cost_combo = set.bit_costs[idx1]
+      elsif totals[idx2] == 0
+        cost_combo = bit_costs[idx1]
         good = true
       else
-        threshold = num_pairs == 0 ? 1e99 : Math.max(0.0, pairs[0].cost_diff)
+        threshold = num_pairs == 0 ? 1e99 : Math.max(0.0, pairs.to_unsafe[0].cost_diff)
         tmp.copy(0, set, idx1)
         tmp.add_histogram(0, set, idx2)
         combo = population_cost(tmp, 0)
@@ -119,15 +127,16 @@ module Mica::Brotli::Encode
       end
       return num_pairs unless good
       pair = Pair.new(idx1, idx2, cost_combo, cost_diff + cost_combo)
-      if num_pairs > 0 && less?(pairs[0], pair)
+      queue = pairs.to_unsafe
+      if num_pairs > 0 && less?(queue[0], pair)
         if num_pairs < max_num_pairs
-          pairs[num_pairs] = pairs[0]
-          num_pairs += 1
+          queue[num_pairs] = queue[0]
+          num_pairs &+= 1
         end
-        pairs[0] = pair
+        queue[0] = pair
       elsif num_pairs < max_num_pairs
-        pairs[num_pairs] = pair
-        num_pairs += 1
+        queue[num_pairs] = pair
+        num_pairs &+= 1
       end
       num_pairs
     end
@@ -167,17 +176,20 @@ module Mica::Brotli::Encode
         end
         num_clusters -= 1
         copy_to = 0
-        num_pairs.times do |i|
-          p = pairs[i]
+        queue = pairs.to_unsafe
+        i = 0
+        while i < num_pairs
+          p = queue[i]
+          i &+= 1
           next if p.first == best_idx1 || p.second == best_idx1 || p.first == best_idx2 || p.second == best_idx2
-          if less?(pairs[0], p)
-            front = pairs[0]
-            pairs[0] = p
-            pairs[copy_to] = front
+          if less?(queue[0], p)
+            front = queue[0]
+            queue[0] = p
+            queue[copy_to] = front
           else
-            pairs[copy_to] = p
+            queue[copy_to] = p
           end
-          copy_to += 1
+          copy_to &+= 1
         end
         num_pairs = copy_to
         num_clusters.times do |i|
