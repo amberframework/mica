@@ -293,8 +293,10 @@ module Mica::Brotli::Encode
     def self.write_huffman_tree(depth : UInt8*, length : Int32, tree : UInt8*, extra : UInt8*) : Int32
       previous = INITIAL_REPEATED_LENGTH.to_u8!
       new_length = length
-      length.times do |i|
-        break unless depth[length &- i &- 1] == 0
+      while new_length >= 8 && Encode.load64(depth + (new_length &- 8)) == 0
+        new_length &-= 8
+      end
+      while new_length > 0 && depth[new_length &- 1] == 0
         new_length &-= 1
       end
       use_rle_for_non_zero = false
@@ -480,14 +482,21 @@ module Mica::Brotli::Encode
                              depth : UInt8*, bits : UInt16*, writer : BitWriter) : Nil
       count = 0
       s4 = StaticArray(Int32, 4).new(0)
-      length.times do |i|
-        next if histogram[i] == 0
-        if count < 4
-          s4[count] = i
-        elsif count > 4
-          break
+      i = 0
+      while i < length
+        if i &+ 2 <= length && (histogram + i).as(UInt64*).value == 0
+          i &+= 2
+          next
         end
-        count &+= 1
+        if histogram[i] != 0
+          if count < 4
+            s4[count] = i
+          elsif count > 4
+            break
+          end
+          count &+= 1
+        end
+        i &+= 1
       end
       max_bits = 0
       counter = alphabet_size &- 1
