@@ -48,6 +48,11 @@ module Mica::Encoding
             @pending_offsets[index] = @pending_offsets[index + 1]
           end
         elsif read < size
+          if fast_path? && idle?
+            started = read
+            read, written = decode_fast_run(input, read, output, written, limit)
+            next if read != started
+          end
           byte = input.unsafe_fetch(read).to_i32
           @current_offset = @position + read
           read += 1
@@ -129,6 +134,253 @@ module Mica::Encoding
     private def ascii_passthrough? : Bool
       idle?
     end
+
+    # True when `decode_fast_run` may run while no sequence is open.
+    # Decoders with shift states (ISO-2022-JP) or no characters at all
+    # (replacement) override it.
+    @[AlwaysInline]
+    private def fast_path? : Bool
+      true
+    end
+
+    # Returns the UTF-8 of the two-byte character *leading*, *trailing*,
+    # packed as `LegacyUTF8Index` packs it, when both bytes form a valid
+    # character that `step` would decode the same way with no error and no
+    # second code point; otherwise 0, and the bytes go through `step`.
+    # *index* is the decoder's `utf8_index`.
+    @[AlwaysInline]
+    private def pair_utf8(index : Slice(UInt32), leading : Int32, trailing : Int32) : UInt32
+      0_u32
+    end
+
+    # Returns the entry of *index* at *pointer* when *valid*, otherwise 0.
+    # It reads entry 0 instead of branching, so the fast path can decode a
+    # character without first asking whether it is ASCII; *pointer* need
+    # only be in range when *valid*.
+    @[AlwaysInline]
+    private def entry(index : Slice(UInt32), valid : Bool, pointer : Int32) : UInt32
+      packed = index.unsafe_fetch(valid ? pointer : 0)
+      valid ? packed : 0_u32
+    end
+
+    # The packed UTF-8 index `pair_utf8` reads.
+    @[AlwaysInline]
+    private def utf8_index : Slice(UInt32)
+      Slice(UInt32).empty
+    end
+
+    # Returns true when *low* <= *value* <= *high*, in one comparison.
+    @[AlwaysInline]
+    private def between?(value : Int32, low : Int32, high : Int32) : Bool
+      (value &- low).to_u32! <= (high &- low).to_u32!
+    end
+
+    # The high bit of each of eight bytes.
+    HIGH_BITS = 0x8080808080808080_u64
+
+    # Input the block walk in `decode_fast_run` reads: sixty-four bytes
+    # and the trail byte of a character that starts on the last of them.
+    BLOCK_INPUT = 65
+
+    # Output room the block walk needs: at most three bytes for each two
+    # input bytes and one for each ASCII byte (at most 98 for 65 bytes),
+    # the four bytes the last store touches, and some to spare.
+    BLOCK_OUTPUT = 112
+
+    # Returns the lead bytes among the non-ASCII bytes *wide* marks (bit i
+    # for byte i): in each run of non-ASCII bytes the first, third, fifth
+    # and so on lead, each with the byte after it as its trail, whatever
+    # that byte is. Adding the run starts at even positions to *wide*
+    # carries through exactly those runs, which tells them from the runs
+    # that start at odd positions without walking the bytes in turn.
+    @[AlwaysInline]
+    private def lead_bytes(wide : UInt64) : UInt64
+      starts = wide & ~(wide << 1)
+      even_runs = wide & ~(wide &+ (starts & EVEN_BITS))
+      odd_runs = wide ^ even_runs
+      (even_runs & EVEN_BITS) | (odd_runs & ~EVEN_BITS)
+    end
+
+    # The even bit positions of a word.
+    EVEN_BITS = 0x5555555555555555_u64
+
+    # Returns a bit for each byte of *word* (as loaded in little-endian
+    # order) whose high bit is set, byte i at bit i. The multiplication
+    # gathers bit 0 of each byte into the top byte; no two of its partial
+    # products overlap, so nothing carries.
+    @[AlwaysInline]
+    private def gather_high_bits(word : UInt64) : UInt64
+      (((word & HIGH_BITS) >> 7) &* 0x0102040810204080_u64) >> 56
+    end
+
+    # Decodes from *read*, while no sequence is open and nothing is
+    # pending, ASCII bytes and the two-byte characters
+    # `pair_utf8` knows, and stops at the first byte it cannot handle so
+    # that `step` sees it. Like the byte loop it takes a step only while
+    # *written* is at most *limit*, so a call stops at the same place
+    # either way. Returns the new read and written counts.
+    @[AlwaysInline]
+    private def decode_fast_run(input : Bytes, read : Int32, output : Bytes, written : Int32, limit : Int32) : {Int32, Int32}
+      # Wrapping arithmetic throughout: 0 <= read <= size and
+      # 0 <= written <= limit + 1 bound every sum, and *limit* leaves eight
+      # bytes of room after *written*.
+      source = input.to_unsafe
+      target = output.to_unsafe
+      size = input.size
+      index = utf8_index
+      # Sixty-four bytes at a time while there is room. Eight loads tell
+      # which bytes are ASCII and which lead a pair, and then each
+      # character is decoded without a branch on its kind: the next one
+      # starts where that mask says, never waiting on a table read.
+      while size &- read >= BLOCK_INPUT && limit &- written >= BLOCK_OUTPUT
+        block = source + read
+        # Bit i set: byte i of the block is not ASCII.
+        wide = 0_u64
+        8.times do |part|
+          word = uninitialized UInt64
+          pointerof(word).as(UInt8*).copy_from(block + part * 8, 8)
+          word = word.byte_swap if IO::ByteFormat::SystemEndian == IO::ByteFormat::BigEndian
+          wide |= gather_high_bits(word) << (part * 8)
+        end
+        if wide == 0
+          (target + written).copy_from(block, 64)
+          read &+= 64
+          written &+= 64
+          next
+        end
+        leads = lead_bytes(wide)
+        # Every byte that is not a trail byte starts a character.
+        starts = ~(leads << 1)
+        while starts != 0
+          position = starts.trailing_zeros_count.to_i32!
+          starts &= starts &- 1
+          leading = block[position].to_i32
+          pair = pair_utf8(index, leading, block[position &+ 1].to_i32)
+          packed = leads.unsafe_shr(position) & 1 == 0 ? leading.to_u32! | 0x01000000_u32 : pair
+          return {read &+ position, written} if packed == 0
+          written = write_packed(target, written, packed)
+        end
+        # A character that starts on the last byte ends past the block.
+        read &+= 64 &+ (leads >> 63).to_i32!
+      end
+      loop do
+        # No step writes more than two bytes per input byte, so before
+        # *stop* every step starts with *written* at most *limit*, and a
+        # lead byte always has its trail byte in the input.
+        stop = Math.min(size &- 1, read &+ ((limit &- written &+ 1) >> 1))
+        break if read >= stop
+        while read < stop
+          byte = source[read].to_i32
+          if byte < 0x80
+            if size &- read >= 8
+              read, written = copy_ascii(source, read, target, written, limit)
+            else
+              target[written] = byte.to_u8!
+              read &+= 1
+              written &+= 1
+            end
+            next
+          end
+          packed = pair_utf8(index, byte, source[read &+ 1].to_i32)
+          return {read, written} if packed == 0
+          written = write_packed(target, written, packed)
+          read &+= 2
+        end
+      end
+      # The last input byte, or the last steps before *limit*.
+      while read < size && written <= limit
+        byte = source[read].to_i32
+        if byte < 0x80
+          target[written] = byte.to_u8!
+          read &+= 1
+          written &+= 1
+          next
+        end
+        break if size &- read < 2
+        packed = pair_utf8(index, byte, source[read &+ 1].to_i32)
+        break if packed == 0
+        written = write_packed(target, written, packed)
+        read &+= 2
+      end
+      {read, written}
+    end
+
+    # Copies the ASCII bytes at *read* (at least eight remain, the first
+    # is ASCII) eight at a time: it stores all eight, which always fit,
+    # and counts only the leading ASCII ones, no more than the byte loop
+    # would write before passing *limit*.
+    @[AlwaysInline]
+    private def copy_ascii(source : UInt8*, read : Int32, target : UInt8*, written : Int32, limit : Int32) : {Int32, Int32}
+      word = uninitialized UInt64
+      pointerof(word).as(UInt8*).copy_from(source + read, 8)
+      (target + written).copy_from(pointerof(word).as(UInt8*), 8)
+      high_bits = word & HIGH_BITS
+      high_bits = high_bits.byte_swap if IO::ByteFormat::SystemEndian == IO::ByteFormat::BigEndian
+      count = high_bits == 0 ? 8 : high_bits.trailing_zeros_count.to_i32! >> 3
+      room = limit &- written &+ 1
+      count = room if room < count
+      {read &+ count, written &+ count}
+    end
+
+    # Writes the UTF-8 in *packed* at *offset* (four bytes are stored; the
+    # count says how many belong) and returns the offset after it.
+    @[AlwaysInline]
+    private def write_packed(target : UInt8*, offset : Int32, packed : UInt32) : Int32
+      bytes = IO::ByteFormat::SystemEndian == IO::ByteFormat::BigEndian ? packed.byte_swap : packed
+      (target + offset).copy_from(pointerof(bytes).as(UInt8*), 4)
+      offset &+ (packed >> 24).to_i32!
+    end
+  end
+
+  # The two-byte indexes with each entry already encoded as UTF-8, for
+  # the decoders' fast path (`LegacyByteLoop#pair_utf8`). An entry holds
+  # the UTF-8 bytes in its low three bytes, the first lowest, and their
+  # count in its top byte; 0 stands for an empty pointer and for an astral
+  # code point (Big5 HKSCS), which go through `step`. Each is built on
+  # first use from its index in `Tables`, and covers every pointer its
+  # decoders can compute, so a lookup needs no bounds check.
+  module LegacyUTF8Index
+    @@gb18030 : Slice(UInt32)? = nil
+    @@big5 : Slice(UInt32)? = nil
+    @@jis0208 : Slice(UInt32)? = nil
+    @@euc_kr : Slice(UInt32)? = nil
+
+    # Pointers (lead - 0x81) * 190 + trail offset, below 126 * 190.
+    def self.gb18030 : Slice(UInt32)
+      @@gb18030 ||= build(126 * 190) { |pointer| Tables.code_point(Tables::GB18030, pointer) }
+    end
+
+    # Pointers (lead - 0x81) * 157 + trail offset, below 126 * 157.
+    def self.big5 : Slice(UInt32)
+      @@big5 ||= build(126 * 157) { |pointer| Tables.code_point(Tables::BIG5, pointer) }
+    end
+
+    # Shift_JIS pointers, below 60 * 188, with the end-user-defined area
+    # (8836 to 10715) mapped to the Private Use Area as Shift_JIS decodes
+    # it. EUC-JP pointers are below 94 * 94, where the two agree.
+    def self.jis0208 : Slice(UInt32)
+      @@jis0208 ||= build(60 * 188) do |pointer|
+        pointer >= 8836 && pointer <= 10715 ? 0xE000 - 8836 + pointer : Tables.code_point(Tables::JIS0208, pointer)
+      end
+    end
+
+    # Pointers (lead - 0x81) * 190 + trail - 0x41, below 126 * 190.
+    def self.euc_kr : Slice(UInt32)
+      @@euc_kr ||= build(126 * 190) { |pointer| Tables.code_point(Tables::EUC_KR, pointer) }
+    end
+
+    private def self.build(size : Int32, & : Int32 -> Int32) : Slice(UInt32)
+      bytes = Bytes.new(4)
+      Slice(UInt32).new(size) do |pointer|
+        code_point = yield pointer
+        if code_point < 0 || code_point > 0xFFFF
+          0_u32
+        else
+          count = Encoding.put_utf8(bytes, 0, code_point)
+          bytes[0].to_u32 | (count > 1 ? bytes[1].to_u32 << 8 : 0_u32) | (count > 2 ? bytes[2].to_u32 << 16 : 0_u32) | (count.to_u32 << 24)
+        end
+      end
+    end
   end
 
   # gb18030 and GBK (they share the decoder).
@@ -141,6 +393,19 @@ module Mica::Encoding
 
     private def idle? : Bool
       @first == 0
+    end
+
+    # Two-byte characters only; four-byte sequences go through `step`.
+    # Every pointer is below 126 * 190, the size of the index.
+    @[AlwaysInline]
+    private def pair_utf8(index : Slice(UInt32), leading : Int32, trailing : Int32) : UInt32
+      valid = between?(leading, 0x81, 0xFE) & between?(trailing, 0x40, 0xFE) & (trailing != 0x7F)
+      entry(index, valid, (leading &- 0x81) &* 190 &+ trailing &- (trailing < 0x7F ? 0x40 : 0x41))
+    end
+
+    @[AlwaysInline]
+    private def utf8_index : Slice(UInt32)
+      LegacyUTF8Index.gb18030
     end
 
     private def clear_state : Nil
@@ -213,6 +478,20 @@ module Mica::Encoding
       @leading == 0
     end
 
+    # The four pointers that decode to two code points (1133, 1135, 1164,
+    # 1166) are empty in the index, so they go through `step`. Every
+    # pointer is below 126 * 157, the size of the index.
+    @[AlwaysInline]
+    private def pair_utf8(index : Slice(UInt32), leading : Int32, trailing : Int32) : UInt32
+      valid = between?(leading, 0x81, 0xFE) & (between?(trailing, 0x40, 0x7E) | between?(trailing, 0xA1, 0xFE))
+      entry(index, valid, (leading &- 0x81) &* 157 &+ trailing &- (trailing < 0x7F ? 0x40 : 0x62))
+    end
+
+    @[AlwaysInline]
+    private def utf8_index : Slice(UInt32)
+      LegacyUTF8Index.big5
+    end
+
     private def clear_state : Nil
       @leading = 0
     end
@@ -269,6 +548,19 @@ module Mica::Encoding
       @leading == 0
     end
 
+    # JIS X 0208 only; 0x8E (halfwidth katakana) and 0x8F (JIS X 0212)
+    # go through `step`. Every pointer is below 94 * 94, inside the index.
+    @[AlwaysInline]
+    private def pair_utf8(index : Slice(UInt32), leading : Int32, trailing : Int32) : UInt32
+      valid = between?(leading, 0xA1, 0xFE) & between?(trailing, 0xA1, 0xFE)
+      entry(index, valid, (leading &- 0xA1) &* 94 &+ trailing &- 0xA1)
+    end
+
+    @[AlwaysInline]
+    private def utf8_index : Slice(UInt32)
+      LegacyUTF8Index.jis0208
+    end
+
     private def clear_state : Nil
       @leading = 0
       @jis0212 = false
@@ -277,7 +569,9 @@ module Mica::Encoding
     private def step(byte : Int32) : Int32
       if byte == END_OF_QUEUE
         return FINISHED if @leading == 0
-        @leading = 0
+        # Also forgets a JIS X 0212 lead (0x8F), so a decoder used again
+        # after the end of its input starts clean.
+        clear_state
         return ERROR
       end
       if @leading == 0x8E && byte >= 0xA1 && byte <= 0xDF
@@ -333,6 +627,10 @@ module Mica::Encoding
 
     private def idle? : Bool
       @state.ascii? || @state.roman? || @state.katakana? || @state.lead_byte?
+    end
+
+    private def fast_path? : Bool
+      false
     end
 
     private def ascii_passthrough? : Bool
@@ -445,6 +743,19 @@ module Mica::Encoding
       @leading == 0
     end
 
+    # Two-byte characters only; single bytes (0x80, halfwidth katakana) go
+    # through `step`.
+    @[AlwaysInline]
+    private def pair_utf8(index : Slice(UInt32), leading : Int32, trailing : Int32) : UInt32
+      valid = (between?(leading, 0x81, 0x9F) | between?(leading, 0xE0, 0xFC)) & between?(trailing, 0x40, 0xFC) & (trailing != 0x7F)
+      entry(index, valid, (leading &- (leading < 0xA0 ? 0x81 : 0xC1)) &* 188 &+ trailing &- (trailing < 0x7F ? 0x40 : 0x41))
+    end
+
+    @[AlwaysInline]
+    private def utf8_index : Slice(UInt32)
+      LegacyUTF8Index.jis0208
+    end
+
     private def clear_state : Nil
       @leading = 0
     end
@@ -489,6 +800,17 @@ module Mica::Encoding
       @leading == 0
     end
 
+    @[AlwaysInline]
+    private def pair_utf8(index : Slice(UInt32), leading : Int32, trailing : Int32) : UInt32
+      valid = between?(leading, 0x81, 0xFE) & between?(trailing, 0x41, 0xFE)
+      entry(index, valid, (leading &- 0x81) &* 190 &+ trailing &- 0x41)
+    end
+
+    @[AlwaysInline]
+    private def utf8_index : Slice(UInt32)
+      LegacyUTF8Index.euc_kr
+    end
+
     private def clear_state : Nil
       @leading = 0
     end
@@ -526,6 +848,10 @@ module Mica::Encoding
 
     private def idle? : Bool
       true
+    end
+
+    private def fast_path? : Bool
+      false
     end
 
     private def ascii_passthrough? : Bool
