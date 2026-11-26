@@ -83,7 +83,7 @@ module Mica::Brotli
     {% end %}
 
     # The transforms' prefixes and suffixes as whole words for
-    # `write_plain_word`: 16 bytes per transform ID, the prefix (at most
+    # `write_plain_word` and `apply_transform`: 16 bytes per transform ID, the prefix (at most
     # 5 bytes) in the first 8 and the suffix (at most 8) in the last 8,
     # zero padded.
     PLAIN_AFFIXES = begin
@@ -1576,23 +1576,18 @@ module Mica::Brotli
       offset = Dictionary::OFFSETS_BY_LENGTH[length] + word_index * length
       transform = Tables::TRANSFORMS.unsafe_fetch(transform_id)
       return if write_plain_word(transform, transform_id, offset, length)
-      size = apply_transform(transform, Dictionary::DATA.to_unsafe + offset, length)
+      size = transformed_size(transform, length)
       malformed("Dictionary word runs past the metablock") if size > @meta_remaining
       if @pos + size <= @out_end
-        # Room before the next stop: write the word straight out, in whole
-        # 8-byte words (the ring has slack past its end).
-        source = @word.to_unsafe
-        destination = @ring.to_unsafe + @pos
-        at = 0
-        while at < size
-          (destination + at).as(UInt64*).value = (source + at).as(UInt64*).value
-          at &+= 8
-        end
+        # Room before the next stop: transform the word straight into the
+        # ring (see `apply_transform` for the bytes it writes past it).
+        apply_transform(transform, transform_id, offset, length, @ring.to_unsafe + @pos)
         @pos += size
         @meta_remaining -= size
         @stage = Stage::Command
         return
       end
+      apply_transform(transform, transform_id, offset, length, @word.to_unsafe)
       @word_left = size
       @word_at = 0
       @stage = Stage::Word
@@ -1634,15 +1629,29 @@ module Mica::Brotli
       true
     end
 
-    # Writes the transformed *word* into `@word`; returns its length.
-    private def apply_transform(transform : Tables::Transform, word : UInt8*, length : Int32) : Int32
-      buffer = @word.to_unsafe
-      prefix = transform.prefix
-      size = 0
-      while size < prefix.size
-        buffer[size] = prefix.unsafe_fetch(size)
-        size &+= 1
+    # The length of a dictionary word of *length* bytes under *transform*.
+    private def transformed_size(transform : Tables::Transform, length : Int32) : Int32
+      kind = transform.kind.to_i32
+      if 1 <= kind <= 9
+        length = Math.max(length - kind, 0)
+      elsif kind >= 12
+        length -= Math.min(kind - 11, length)
       end
+      transform.prefix.size + length + transform.suffix.size
+    end
+
+    # Writes dictionary word *offset* (*length* bytes) under transform
+    # *transform_id* to *buffer*, `transformed_size` bytes. Every part is
+    # written as whole 8-byte words, so the bytes are never stored one at
+    # a time and then loaded as a word (a store-forwarding stall); the
+    # writes reach at most 8 bytes past the word: into the ring's slack or
+    # the 16 oldest bytes of history, which no back reference can reach,
+    # or into the slack of `@word`.
+    private def apply_transform(transform : Tables::Transform, transform_id : Int32, offset : Int32,
+                                length : Int32, buffer : UInt8*) : Nil
+      affixes = PLAIN_AFFIXES.to_unsafe + (transform_id << 4)
+      # The prefix (at most 5 bytes); the body overwrites its padding.
+      buffer.as(UInt64*).value = affixes.as(UInt64*).value
       kind = transform.kind.to_i32
       start = 0
       if 1 <= kind <= 9
@@ -1651,17 +1660,23 @@ module Mica::Brotli
         start = Math.min(kind - 11, length)
         length -= start
       end
-      word_start = size
-      index = 0
-      while index < length
-        buffer[size &+ index] = word[start &+ index]
-        index &+= 1
+      word_start = transform.prefix.size
+      body = buffer + word_start
+      data = Dictionary::DATA
+      source = data.to_unsafe + offset + start
+      if offset + start + length + 8 <= data.size
+        at = 0
+        while at < length
+          (body + at).as(UInt64*).value = (source + at).as(UInt64*).value
+          at &+= 8
+        end
+      else
+        length.times { |index| body[index] = source[index] }
       end
-      size &+= length
       # Uppercasing may touch up to two bytes past the word; those bytes
       # are then overwritten by the suffix or ignored.
-      buffer[size] = 0_u8
-      buffer[size + 1] = 0_u8
+      body[length] = 0_u8
+      body[length + 1] = 0_u8
       if kind == 10
         uppercase(buffer, word_start) if length > 0
       elsif kind == 11
@@ -1673,13 +1688,8 @@ module Mica::Brotli
           left -= step
         end
       end
-      suffix = transform.suffix
-      index = 0
-      while index < suffix.size
-        buffer[size &+ index] = suffix.unsafe_fetch(index)
-        index &+= 1
-      end
-      size &+ suffix.size
+      # The suffix (at most 8 bytes) as one word.
+      (body + length).as(UInt64*).value = (affixes + 8).as(UInt64*).value
     end
 
     # RFC 7932, section 8: uppercases the character at *at*; returns its
