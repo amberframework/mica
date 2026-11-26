@@ -1,3 +1,5 @@
+require "./words"
+
 module Mica::Encoding
   # Turns UTF-8 into bytes of one encoding, streaming.
   #
@@ -286,6 +288,181 @@ module Mica::Encoding
       @big_endian = codec.utf16_be? || codec.ucs2_be?
       @ucs2 = codec.ucs2? || codec.ucs2_be? || codec.ucs2_le?
       @bom_pending = codec.utf16?
+    end
+
+    # `EncoderLoop#convert` with a fast path: while no UTF-8 sequence or
+    # byte order mark is pending, `encode_units` takes every complete,
+    # valid sequence it can; the per-byte loop below (the shared one,
+    # unchanged) handles the rest, so results, offsets and error modes
+    # stay the same.
+    def convert(input : Bytes, output : Bytes, last : Bool) : Result
+      check_output(output)
+      read = 0
+      written = 0
+      size = input.size
+      limit = output.size - STEP_ROOM
+      while read < size
+        return finish_call(Status::OutputFull, read, written) if written > limit
+        if @needed == 0 && !@bom_pending
+          before = read
+          read, written = encode_units(input, read, output, written)
+          next if read != before
+        end
+        byte = input.unsafe_fetch(read).to_i32
+        code_point = -1
+        if @needed == 0
+          @sequence_start = @position + read
+          read += 1
+          if byte < 0x80
+            code_point = byte
+          elsif byte >= 0xC2 && byte <= 0xDF
+            @needed = 1
+            @code_point = byte & 0x1F
+          elsif byte >= 0xE0 && byte <= 0xEF
+            @lower = 0xA0 if byte == 0xE0
+            @upper = 0x9F if byte == 0xED
+            @needed = 2
+            @code_point = byte & 0xF
+          elsif byte >= 0xF0 && byte <= 0xF4
+            @lower = 0x90 if byte == 0xF0
+            @upper = 0x8F if byte == 0xF4
+            @needed = 3
+            @code_point = byte & 0x7
+          else
+            code_point = -2
+          end
+        elsif byte < @lower || byte > @upper
+          # Not consumed: the byte may begin the next sequence.
+          clear_utf8
+          code_point = -2
+        else
+          read += 1
+          @lower = 0x80
+          @upper = 0xBF
+          @code_point = (@code_point << 6) | (byte & 0x3F)
+          @seen += 1
+          if @seen == @needed
+            code_point = @code_point
+            clear_utf8
+          end
+        end
+        if code_point == -2
+          return fail(Problem::InvalidSequence, -1, read, written) if @error_mode.fatal?
+          next unless @error_mode.replacement?
+          code_point = 0xFFFD
+        end
+        next if code_point < 0
+        written = encode_code_point(code_point, output, written)
+        if (unmappable = @unmappable) >= 0
+          @unmappable = -1
+          return fail(Problem::Unmappable, unmappable, read, written) if @error_mode.fatal?
+          written = write_reference(output, written, unmappable) if @error_mode.replacement?
+        end
+      end
+      if last
+        return finish_call(Status::OutputFull, read, written) if written > limit
+        if @needed != 0
+          clear_utf8
+          return fail(Problem::IncompleteSequence, -1, read, written) if @error_mode.fatal?
+          if @error_mode.replacement?
+            written = encode_code_point(0xFFFD, output, written)
+            if (unmappable = @unmappable) >= 0
+              @unmappable = -1
+              written = write_reference(output, written, unmappable)
+            end
+          end
+        end
+        written = flush(output, written)
+      end
+      finish_call(Status::InputEmpty, read, written)
+    end
+
+    # Encodes complete, valid UTF-8 sequences from *input* at *read* into
+    # *output* at *written* and returns where both stopped. Eight ASCII
+    # bytes become 16 output bytes per step. It stops before a sequence
+    # that is ill-formed, cut off by the end of the input, or above U+FFFF
+    # in UCS-2, and when fewer than 4 bytes of output room remain, leaving
+    # that sequence to the per-byte loop in `convert`.
+    private def encode_units(input : Bytes, read : Int32, output : Bytes, written : Int32) : {Int32, Int32}
+      big_endian = @big_endian
+      ucs2 = @ucs2
+      size = input.size
+      room = output.size - 4
+      wide_room = output.size - 16
+      source = input.to_unsafe
+      target = output.to_unsafe
+      while read < size && written <= room
+        if read + 8 <= size && written <= wide_room
+          word = Encoding.load_u64_le(source + read)
+          low = Encoding.widen_to_units(word)
+          high = Encoding.widen_to_units(word >> 32)
+          if big_endian
+            low <<= 8
+            high <<= 8
+          end
+          # All 16 bytes are stored; only the ASCII prefix is kept, and
+          # the bytes after it are written again by the next step.
+          Encoding.store_u64_le(target + written, low)
+          Encoding.store_u64_le(target + written + 8, high)
+          non_ascii = word & 0x8080808080808080_u64
+          if non_ascii == 0
+            read += 8
+            written += 16
+            next
+          end
+          ascii_bytes = non_ascii.trailing_zeros_count.to_i32! // 8
+          read += ascii_bytes
+          written += 2 * ascii_bytes
+          break if written > room
+        end
+        byte = source[read].to_i32
+        if byte < 0x80
+          unit = byte
+          read += 1
+        elsif byte >= 0xC2 && byte <= 0xDF
+          break if read + 2 > size
+          second = source[read + 1].to_i32
+          break unless second >= 0x80 && second <= 0xBF
+          unit = ((byte & 0x1F) << 6) | (second & 0x3F)
+          read += 2
+        elsif byte >= 0xE0 && byte <= 0xEF
+          break if read + 3 > size
+          second = source[read + 1].to_i32
+          lower = byte == 0xE0 ? 0xA0 : 0x80
+          upper = byte == 0xED ? 0x9F : 0xBF
+          break unless second >= lower && second <= upper
+          third = source[read + 2].to_i32
+          break unless third >= 0x80 && third <= 0xBF
+          unit = ((byte & 0xF) << 12) | ((second & 0x3F) << 6) | (third & 0x3F)
+          read += 3
+        elsif byte >= 0xF0 && byte <= 0xF4
+          break if ucs2 || read + 4 > size
+          second = source[read + 1].to_i32
+          lower = byte == 0xF0 ? 0x90 : 0x80
+          upper = byte == 0xF4 ? 0x8F : 0xBF
+          break unless second >= lower && second <= upper
+          third = source[read + 2].to_i32
+          fourth = source[read + 3].to_i32
+          break unless third >= 0x80 && third <= 0xBF && fourth >= 0x80 && fourth <= 0xBF
+          offset = (((byte & 0x7) << 18) | ((second & 0x3F) << 12) | ((third & 0x3F) << 6) | (fourth & 0x3F)) - 0x10000
+          written = store_unit(target, written, 0xD800 | (offset >> 10), big_endian)
+          unit = 0xDC00 | (offset & 0x3FF)
+          read += 4
+        else
+          break
+        end
+        written = store_unit(target, written, unit, big_endian)
+      end
+      {read, written}
+    end
+
+    @[AlwaysInline]
+    private def store_unit(target : UInt8*, written : Int32, unit : Int32, big_endian : Bool) : Int32
+      high = (unit >> 8).to_u8!
+      low = unit.to_u8!
+      target[written] = big_endian ? high : low
+      target[written + 1] = big_endian ? low : high
+      written + 2
     end
 
     private def ascii_direct? : Bool

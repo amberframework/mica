@@ -1,3 +1,5 @@
+require "../words"
+
 module Mica::Encoding
   abstract class Decoder
     # Ends a call: counts the consumed bytes into `position`.
@@ -174,6 +176,11 @@ module Mica::Encoding
       limit = output.size - 8
       while read < size
         return finish_call(Status::OutputFull, read, written) if written > limit
+        if @lead_byte < 0 && @lead_surrogate < 0 && !@detect_bom && !@bom_pending
+          before = read
+          read, written = decode_units(input, read, output, written)
+          next if read != before
+        end
         byte = input.unsafe_fetch(read).to_i32
         if @lead_byte < 0
           @sequence_start = @position + read if @lead_surrogate < 0
@@ -215,9 +222,12 @@ module Mica::Encoding
             if read >= 2
               read -= 2
             else
-              # Its first byte came in an earlier call: keep it pending.
+              # Its first byte came in an earlier call: keep it pending,
+              # starting a sequence at that byte (the last one consumed
+              # before this call), as when the unit is read again whole.
               read -= 1
               @lead_byte = lead_byte
+              @sequence_start = @position - 1
             end
             return finish_with_problem(Problem::InvalidSequence, offset, read, written)
           end
@@ -239,6 +249,83 @@ module Mica::Encoding
         handle_problem(Problem::IncompleteSequence, @sequence_start)
       end
       finish_call(Status::InputEmpty, read, written)
+    end
+
+    # Decodes whole code units from *input* at *read* into *output* at
+    # *written* while nothing is pending, and returns where both stopped.
+    # Four ASCII units are narrowed per step. It stops before any unit it
+    # cannot finish on its own (a surrogate that is lone, split by the end
+    # of the input, or in UCS-2) and when fewer than 4 bytes of output room
+    # remain, leaving that unit to the per-byte loop in `convert`.
+    private def decode_units(input : Bytes, read : Int32, output : Bytes, written : Int32) : {Int32, Int32}
+      big_endian = @big_endian
+      ucs2 = @ucs2
+      size = input.size
+      room = output.size - 4
+      # Four units write at most 12 bytes, and the last store 3 more.
+      word_room = output.size - 16
+      source = input.to_unsafe
+      target = output.to_unsafe
+      while read &+ 2 <= size && written <= room
+        if read &+ 8 <= size && written <= word_room
+          word = Encoding.load_u64_le(source + read)
+          word = Encoding.swap_bytes_in_units(word) if big_endian
+          # Eight ASCII units at a time. Mixed text seldom passes this
+          # test, so the branch stays predictable either way.
+          if read &+ 16 <= size
+            next_word = Encoding.load_u64_le(source + read + 8)
+            next_word = Encoding.swap_bytes_in_units(next_word) if big_endian
+            if (word | next_word) & 0xFF80FF80FF80FF80_u64 == 0
+              Encoding.store_u32_le(target + written, Encoding.narrow_units(word))
+              Encoding.store_u32_le(target + written + 4, Encoding.narrow_units(next_word))
+              read &+= 16
+              written &+= 8
+              next
+            end
+          elsif word & 0xFF80FF80FF80FF80_u64 == 0
+            Encoding.store_u32_le(target + written, Encoding.narrow_units(word))
+            read &+= 8
+            written &+= 4
+            next
+          end
+          # Mixed text: the ASCII units before the first other one (at
+          # most three) are narrowed together, then that unit is written
+          # without branching on its UTF-8 length. Nothing here branches
+          # on the text except a surrogate, which the per-unit step below
+          # takes.
+          non_ascii = word & 0xFF80FF80FF80FF80_u64
+          ascii_units = Math.min(non_ascii.trailing_zeros_count.to_i32! // 16, 3)
+          Encoding.store_u32_le(target + written, Encoding.narrow_units(word))
+          read &+= ascii_units &* 2
+          written &+= ascii_units
+          unit = (word.unsafe_shr(ascii_units &* 16) & 0xFFFF).to_i32!
+          unless unit & 0xF800 == 0xD800
+            written = Encoding.put_bmp_utf8(target, written, unit)
+            read &+= 2
+            next
+          end
+        end
+        first = source[read].to_i32
+        second = source[read + 1].to_i32
+        unit = big_endian ? (first << 8) | second : (second << 8) | first
+        if unit < 0x80
+          target[written] = unit.to_u8!
+          written &+= 1
+          read &+= 2
+        elsif unit < 0xD800 || unit > 0xDFFF
+          written = Encoding.put_utf8(output, written, unit)
+          read &+= 2
+        else
+          break if ucs2 || unit > 0xDBFF || read &+ 4 > size
+          first = source[read + 2].to_i32
+          second = source[read + 3].to_i32
+          trail = big_endian ? (first << 8) | second : (second << 8) | first
+          break unless trail >= 0xDC00 && trail <= 0xDFFF
+          written = Encoding.put_utf8(output, written, 0x10000 + ((unit - 0xD800) << 10) + (trail - 0xDC00))
+          read &+= 4
+        end
+      end
+      {read, written}
     end
 
     @[AlwaysInline]
