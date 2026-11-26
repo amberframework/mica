@@ -180,10 +180,37 @@ module Mica::Brotli
       length - ROOT_BITS
     end
 
-    # Reverses the low *width* (at most 15) bits of *code*.
-    @[AlwaysInline]
-    def self.reverse(code : Int32, width : Int32) : Int32
-      (code.to_u32.bit_reverse >> (32 - width)).to_i32
-    end
+    {% if flag?(:x86_64) %}
+      # Each byte with its bits reversed. x86-64 has no bit-reverse
+      # instruction (`bit_reverse` expands to about 20 instructions), so
+      # `reverse` looks bytes up here instead.
+      REVERSED_BYTE = {% begin %}
+        StaticArray[
+          {% for byte in 0...256 %}
+            {% reversed = 0 %}
+            {% for bit in 0...8 %}
+              {% if (byte // (1 << bit)) % 2 == 1 %}{% reversed = reversed + (1 << (7 - bit)) %}{% end %}
+            {% end %}
+            {{ reversed }}_u8,
+          {% end %}
+        ]
+      {% end %}
+
+      # Reverses the low *width* (1 to 15) bits of *code*, which is below
+      # `1 << width`.
+      @[AlwaysInline]
+      def self.reverse(code : Int32, width : Int32) : Int32
+        low = REVERSED_BYTE.unsafe_fetch(code & 0xFF).to_i32!
+        return low.unsafe_shr(8 &- width) if width <= 8
+        ((low << 8) | REVERSED_BYTE.unsafe_fetch((code >> 8) & 0xFF).to_i32!).unsafe_shr(16 &- width)
+      end
+    {% else %}
+      # Reverses the low *width* (1 to 15) bits of *code*, which is below
+      # `1 << width`.
+      @[AlwaysInline]
+      def self.reverse(code : Int32, width : Int32) : Int32
+        (code.to_u32.bit_reverse >> (32 - width)).to_i32
+      end
+    {% end %}
   end
 end

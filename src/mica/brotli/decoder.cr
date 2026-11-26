@@ -63,7 +63,9 @@ module Mica::Brotli
     COPY_EXTRA = StaticArray[0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 7, 8, 9, 10, 24]
     # Each insert-and-copy symbol unpacked (RFC 7932, section 5): bits 0-15
     # hold the insert length base, 16-23 its extra bit count, 24-39 the
-    # copy length base and 40-47 its extra bit count.
+    # copy length base, 40-47 its extra bit count and 48-49 the distance
+    # context (RFC 7932, section 7.2; copy lengths 2 to 4 have no extra
+    # bits, so the code alone decides it).
     COMMAND_LUT = {% begin %}
       {% insert_base = [0, 1, 2, 3, 4, 5, 6, 8, 10, 14, 18, 26, 34, 50, 66, 98, 130, 194, 322, 578, 1090, 2114, 6210, 22594] %}
       {% insert_extra = [0, 0, 0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 7, 8, 9, 10, 12, 14, 24] %}
@@ -75,7 +77,7 @@ module Mica::Brotli
         {% for symbol in 0...704 %}
           {% insert_code = cell_insert[symbol // 64] + (symbol // 8) % 8 %}
           {% copy_code = cell_copy[symbol // 64] + symbol % 8 %}
-          {{ 1_i64 * insert_base[insert_code] + 65_536_i64 * insert_extra[insert_code] + 16_777_216_i64 * copy_base[copy_code] + 1_099_511_627_776_i64 * copy_extra[copy_code] }},
+          {{ 1_i64 * insert_base[insert_code] + 65_536_i64 * insert_extra[insert_code] + 16_777_216_i64 * copy_base[copy_code] + 1_099_511_627_776_i64 * copy_extra[copy_code] + 281_474_976_710_656_i64 * (copy_code < 3 ? copy_code : 3) }},
         {% end %}
       ]
     {% end %}
@@ -1214,7 +1216,7 @@ module Mica::Brotli
           command_tree = @command_trees.unsafe_fetch(@block_type[1])
         end
         command_left &-= 1
-        fast_refill
+        fast_refill if nbits < 15
         symbol = 0
         fast_symbol(command_tree, symbol)
         # A command symbol is below COMMAND_CODES (704). Both lengths'
@@ -1332,9 +1334,8 @@ module Mica::Brotli
             @distance_map_offset = @block_type[2] << 2
           end
           distance_left &-= 1
-          context = copy_length > 4 ? 3 : copy_length &- 2
-          tree = distance_tree_map[@distance_map_offset &+ context]
-          fast_refill
+          tree = distance_tree_map[@distance_map_offset &+ (command >> 48).to_i32!]
+          fast_refill if nbits < 15
           fast_symbol(tree, code)
           if code < 16
             distance = last_distances.unsafe_fetch(SHORT_DISTANCE_INDEX.unsafe_fetch(code)) &+ SHORT_DISTANCE_DELTA.unsafe_fetch(code)
