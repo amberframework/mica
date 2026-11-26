@@ -138,23 +138,24 @@ module Mica::Brotli::Encode
       count = 0
       best_length = 1
       short_match_max_backward = quality != 11 ? 16 : 64
-      stop = position - short_match_max_backward
+      stop = position &- short_match_max_backward
       stop = 0 if position < short_match_max_backward
       current = data + position
-      i = position - 1
+      first_two = (current.as(UInt16*)).value
+      i = position &- 1
       while i > stop && best_length <= 2
-        backward = position - i
+        backward = position &- i
         break if backward > max_backward
         previous = data + i
-        if current[0] == previous[0] && current[1] == previous[1]
+        if previous.as(UInt16*).value == first_two
           length = Encode.match_length(previous, current, max_length)
           if length > best_length
             best_length = length
-            matches[count] = BackwardMatch.new(backward.to_u32, (length << 5).to_u32)
-            count += 1
+            matches[count] = BackwardMatch.new(backward.to_u32!, (length << 5).to_u32!)
+            count &+= 1
           end
         end
-        i -= 1
+        i &-= 1
       end
       if best_length < max_length
         best_length, count = store_and_find_matches(data, position, max_length, max_backward, best_length, matches, count)
@@ -399,12 +400,12 @@ module Mica::Brotli::Encode
       length = 2
       next_length_bucket = 4
       next_length_offset = 10
-      while pos + length <= num_bytes && nodes[pos + length].cost <= min_cost
-        length += 1
+      while pos &+ length <= num_bytes && nodes[pos &+ length].cost <= min_cost
+        length &+= 1
         if length == next_length_offset
           min_cost += 1_f32
-          next_length_offset += next_length_bucket
-          next_length_bucket *= 2
+          next_length_offset &+= next_length_bucket
+          next_length_bucket &*= 2
         end
       end
       length
@@ -413,33 +414,34 @@ module Mica::Brotli::Encode
     private def self.compute_distance_shortcut(block_start : Int64, pos : Int32, max_backward_limit : Int32,
                                                nodes : Node*) : UInt32
       node = nodes[pos]
-      c_len = node.copy_length.to_i64
-      i_len = node.insert_length.to_i64
-      dist = node.distance.to_i64
+      c_len = node.copy_length.to_i64!
+      i_len = node.insert_length.to_i64!
+      dist = node.distance.to_i64!
       if pos == 0
         0_u32
-      elsif dist + c_len <= block_start + pos && dist <= max_backward_limit && node.distance_code > 0
-        pos.to_u32
+      elsif dist &+ c_len <= block_start &+ pos && dist <= max_backward_limit && node.distance_code > 0
+        pos.to_u32!
       else
-        nodes[pos - c_len - i_len].link
+        nodes[pos.to_i64! &- c_len &- i_len].link
       end
     end
 
     private def self.compute_distance_cache(pos : Int32, starting_cache : Int32*, nodes : Node*) : StaticArray(Int32, 4)
       cache = StaticArray(Int32, 4).new(0)
+      slots = cache.to_unsafe
       index = 0
-      p = nodes[pos].link.to_i32
+      p = nodes[pos].link.to_i32!
       while index < 4 && p > 0
         node = nodes[p]
-        cache[index] = node.distance.to_i32!
-        index += 1
-        p = nodes[p - node.copy_length.to_i32 - node.insert_length.to_i32].link.to_i32
+        slots[index] = node.distance.to_i32!
+        index &+= 1
+        p = nodes[p &- node.copy_length.to_i32! &- node.insert_length.to_i32!].link.to_i32!
       end
       start = 0
       while index < 4
-        cache[index] = starting_cache[start]
-        start += 1
-        index += 1
+        slots[index] = starting_cache[start]
+        start &+= 1
+        index &+= 1
       end
       cache
     end
