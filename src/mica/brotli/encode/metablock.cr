@@ -146,6 +146,48 @@ module Mica::Brotli::Encode
       finish_block(false) if @block_size == @target_block_size
     end
 
+    # Adds `symbols[0, count]` with no context: `add` for each, with the
+    # histogram held in a local between block ends.
+    def add_run(symbols : UInt8*, count : Int32) : Nil
+      while count > 0
+        chunk = Math.min(count, @target_block_size &- @block_size)
+        histogram = @histograms[@current]
+        chunk.times { |k| histogram[symbols[k]] &+= 1 }
+        @histograms.totals.to_unsafe[@current] &+= chunk
+        @block_size &+= chunk
+        symbols += chunk
+        count &-= chunk
+        finish_block(false) if @block_size == @target_block_size
+      end
+    end
+
+    # Adds the *count* literals at `data[position]`, each with the static
+    # context of the two bytes before it (from *context_map* over *lut*);
+    # returns those two bytes after the last literal.
+    def add_context_run(data : UInt8*, position : Int32, count : Int32, previous_byte : UInt8, previous_byte2 : UInt8,
+                        context_map : UInt32*, lut : UInt8*) : {UInt8, UInt8}
+      totals = @histograms.totals.to_unsafe
+      data_size = @histograms.data_size
+      while count > 0
+        chunk = Math.min(count, @target_block_size &- @block_size)
+        current = @current
+        base = @histograms[current]
+        chunk.times do
+          byte = data[position]
+          context = context_map[lut[previous_byte] | lut[256 &+ previous_byte2]].to_i32!
+          base[context &* data_size &+ byte] &+= 1
+          totals[current &+ context] &+= 1
+          previous_byte2 = previous_byte
+          previous_byte = byte
+          position &+= 1
+        end
+        @block_size &+= chunk
+        count &-= chunk
+        finish_block(false) if @block_size == @target_block_size
+      end
+      {previous_byte, previous_byte2}
+    end
+
     def finish_block(is_final : Bool) : Nil
       split = @split
       contexts = @num_contexts
@@ -351,20 +393,14 @@ module Mica::Brotli::Encode
       commands.size.times do |i|
         entry = commands[i]
         command.add(entry.command_prefix)
+        inserted = entry.insert_length.to_i32!
         if num_contexts == 1
-          entry.insert_length.times do
-            literal.add(data[position])
-            position &+= 1
-          end
+          literal.add_run(data + position, inserted)
         else
-          entry.insert_length.times do
-            byte = data[position]
-            literal.add(byte, static_context_map[lut[previous_byte] | lut[256 &+ previous_byte2]])
-            previous_byte2 = previous_byte
-            previous_byte = byte
-            position &+= 1
-          end
+          previous_byte, previous_byte2 = literal.add_context_run(data, position, inserted, previous_byte,
+            previous_byte2, static_context_map, lut)
         end
+        position &+= inserted
         copy = entry.copy_length.to_i32!
         position &+= copy
         if copy != 0
