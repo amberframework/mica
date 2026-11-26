@@ -141,9 +141,10 @@ module Mica::Brotli
 
     private def grow(needed : Int32) : Nil
       capacity = Math.max(needed, @capacity * 2)
-      grown = LibC.realloc(@buffer.as(Void*), LibC::SizeT.new(capacity))
-      raise RuntimeError.new("Brotli encoder could not allocate #{capacity} bytes") if grown.null?
-      @buffer = grown.as(UInt8*)
+      grown = Encode.table(UInt8, capacity)
+      grown.copy_from(@buffer, @capacity) unless @buffer.null?
+      Encode.free_table(@buffer)
+      @buffer = grown
       @capacity = capacity
     end
   end

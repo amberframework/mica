@@ -102,21 +102,82 @@ module Mica::Brotli::Encode
     cache[15] = next_last &+ 3
   end
 
-  # Raw memory for hash tables, outside the garbage collector (they hold
-  # no references, and megabytes of collected memory per encode would set
-  # off a collection each time): not cleared, since the hashers track
-  # which slots hold positions. Hand it back with `free_table`.
-  @[AlwaysInline]
+  # Raw memory for hash tables and other scratch, outside the garbage
+  # collector (they hold no references, and megabytes of collected memory
+  # per encode would set off a collection each time): not cleared, since
+  # the hashers track which slots hold positions. Each block starts with
+  # a header holding its size, and large blocks handed back go to
+  # `TablePool` for the next encode. Hand it back with `free_table`.
   def self.table(type : T.class, count : Int32) : Pointer(T) forall T
-    bytes = LibC::SizeT.new(Math.max(count, 1)) * sizeof(T)
-    memory = LibC.malloc(bytes)
-    raise RuntimeError.new("Brotli encoder could not allocate #{bytes} bytes") if memory.null?
-    memory.as(Pointer(T))
+    bytes = Math.max(count, 1).to_i64 * sizeof(T)
+    if bytes >= TablePool::MIN_BYTES && (block = TablePool.take(bytes))
+      return (block + TablePool::HEADER_BYTES).as(Pointer(T))
+    end
+    block = LibC.malloc(LibC::SizeT.new(bytes + TablePool::HEADER_BYTES)).as(UInt8*)
+    raise RuntimeError.new("Brotli encoder could not allocate #{bytes} bytes") if block.null?
+    block.as(Int64*).value = bytes
+    (block + TablePool::HEADER_BYTES).as(Pointer(T))
   end
 
   def self.free_table(table : Pointer(T)) : Pointer(T) forall T
-    LibC.free(table.as(Void*)) unless table.null?
+    unless table.null?
+      block = table.as(UInt8*) - TablePool::HEADER_BYTES
+      LibC.free(block.as(Void*)) unless TablePool.keep?(block, block.as(Int64*).value)
+    end
     Pointer(T).null
+  end
+
+  # Large scratch blocks that encodes hand back, kept (up to `SLOTS`
+  # blocks and `MAX_BYTES` in all, across threads) for the next encode
+  # whose request they fit. Freeing them instead let glibc return the
+  # heap's free top to the kernel once it passed the trim threshold, so
+  # every encode faulted the pages of its tables in again: 385 page
+  # faults per one-shot encode of a 74 KB body at quality 5 on Linux.
+  module TablePool
+    HEADER_BYTES = 16
+    MIN_BYTES    = 32_i64 << 10
+    MAX_BYTES    = 32_i64 << 20
+    SLOTS        = 16
+
+    @@mutex = Mutex.new(:unchecked)
+    @@blocks = StaticArray(Pointer(UInt8), SLOTS).new(Pointer(UInt8).null)
+    @@count = 0
+    @@bytes = 0_i64
+
+    # The smallest kept block of *bytes* to twice that, taken out of the
+    # pool, or nil.
+    def self.take(bytes : Int64) : Pointer(UInt8)?
+      @@mutex.synchronize do
+        best = -1
+        best_size = Int64::MAX
+        @@count.times do |slot|
+          size = @@blocks[slot].as(Int64*).value
+          if size >= bytes && size <= bytes &* 2 && size < best_size
+            best = slot
+            best_size = size
+          end
+        end
+        return nil if best < 0
+        block = @@blocks[best]
+        @@count &-= 1
+        @@blocks[best] = @@blocks[@@count]
+        @@bytes &-= best_size
+        block
+      end
+    end
+
+    # Keeps *block* of *size* bytes when it is large and the pool has
+    # room; returns whether it did.
+    def self.keep?(block : Pointer(UInt8), size : Int64) : Bool
+      return false if size < MIN_BYTES
+      @@mutex.synchronize do
+        return false if @@count >= SLOTS || @@bytes &+ size > MAX_BYTES
+        @@blocks[@@count] = block
+        @@count &+= 1
+        @@bytes &+= size
+        true
+      end
+    end
   end
 
   # Matches against the RFC 7932 static dictionary through a hash of each
