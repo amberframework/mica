@@ -352,15 +352,15 @@ module Mica::Brotli
     private def refill : Nil
       if @in_end - @in_pos >= 8
         word = (@input.to_unsafe + @in_pos).as(UInt64*).value
-        @bits |= word << @bit_count
-        count = (63 - @bit_count) >> 3
-        @in_pos += count
-        @bit_count += count << 3
+        @bits |= word.unsafe_shl(@bit_count)
+        count = (63 &- @bit_count) >> 3
+        @in_pos &+= count
+        @bit_count &+= count << 3
         return
       end
       while @bit_count <= 56
         if @in_pos < @in_end
-          @bits |= @input.unsafe_fetch(@in_pos).to_u64 << @bit_count
+          @bits |= @input.unsafe_fetch(@in_pos).to_u64.unsafe_shl(@bit_count)
           @in_pos += 1
           @bit_count += 8
         else
@@ -376,9 +376,9 @@ module Mica::Brotli
         refill
         truncated if @bit_count < count
       end
-      value = (@bits & ((1_u64 << count) - 1)).to_i32
-      @bits >>= count
-      @bit_count -= count
+      value = (@bits & (1_u64.unsafe_shl(count) &- 1)).to_i32!
+      @bits = @bits.unsafe_shr(count)
+      @bit_count &-= count
       value
     end
 
@@ -391,14 +391,14 @@ module Mica::Brotli
       width = (entry & 0xFF).to_i32
       if width > PrefixCode::ROOT_BITS
         sub_width = width - PrefixCode::ROOT_BITS
-        index = ((@bits >> PrefixCode::ROOT_BITS) & ((1_u64 << sub_width) - 1)).to_i32
+        index = ((@bits >> PrefixCode::ROOT_BITS) & (1_u64.unsafe_shl(sub_width) &- 1)).to_i32!
         entry = table[tree + (entry >> 8).to_i32 + index]
         width = (entry & 0xFF).to_i32 + PrefixCode::ROOT_BITS
       end
       truncated if width > @bit_count
-      @bits >>= width
-      @bit_count -= width
-      (entry >> 8).to_i32
+      @bits = @bits.unsafe_shr(width)
+      @bit_count &-= width
+      (entry >> 8).to_i32!
     end
 
     # Skips to the next byte boundary; the skipped bits must be zero.
@@ -1019,7 +1019,7 @@ module Mica::Brotli
     # Refills the local bit buffer of `fast_commands` from 8 input bytes.
     private macro fast_refill
       %word = (input + in_pos).as(UInt64*).value
-      bits |= %word << nbits
+      bits |= %word.unsafe_shl(nbits)
       %count = (63 &- nbits) >> 3
       in_pos &+= %count
       nbits &+= %count << 3
@@ -1031,10 +1031,10 @@ module Mica::Brotli
       %width = (%entry & 0xFF).to_i32!
       if %width > PrefixCode::ROOT_BITS
         %sub = %width &- PrefixCode::ROOT_BITS
-        %entry = table[{{tree}} &+ (%entry >> 8).to_i32! &+ ((bits >> PrefixCode::ROOT_BITS) & ((1_u64 << %sub) &- 1)).to_i32!]
+        %entry = table[{{tree}} &+ (%entry >> 8).to_i32! &+ ((bits >> PrefixCode::ROOT_BITS) & (1_u64.unsafe_shl(%sub) &- 1)).to_i32!]
         %width = (%entry & 0xFF).to_i32! &+ PrefixCode::ROOT_BITS
       end
-      bits >>= %width
+      bits = bits.unsafe_shr(%width)
       nbits &-= %width
       {{into}} = (%entry >> 8).to_i32!
     end
@@ -1042,8 +1042,8 @@ module Mica::Brotli
     # Reads *count* (at most 24) bits in `fast_commands`.
     private macro fast_bits(count, into)
       fast_refill if nbits < {{count}}
-      {{into}} = (bits & ((1_u64 << {{count}}) &- 1)).to_i32!
-      bits >>= {{count}}
+      {{into}} = (bits & (1_u64.unsafe_shl({{count}}) &- 1)).to_i32!
+      bits = bits.unsafe_shr({{count}})
       nbits &-= {{count}}
     end
 
@@ -1131,6 +1131,15 @@ module Mica::Brotli
       out_end = 0
       table = @table.to_unsafe
       ring = @ring.to_unsafe
+      # The metablock's distance parameters and the ring's history, fixed
+      # while this runs, in locals: a ring store may alias any field.
+      direct_codes = @direct_codes
+      postfix_bits = @postfix_bits
+      postfix_mask = @postfix_mask
+      distance_trees = @distance_trees.to_unsafe
+      distance_map = @distance_map.to_unsafe
+      written_before = @ring_base
+      max_backward = @max_backward
       fast_load
       while meta_left > 0 && in_pos <= in_limit
         if command_left == 0
@@ -1142,18 +1151,20 @@ module Mica::Brotli
         fast_refill
         symbol = 0
         fast_symbol(command_tree, symbol)
+        # A command symbol is below COMMAND_CODES (704), so its cell is
+        # below 11 and both codes are below 24.
         cell = symbol >> 6
-        insert_code = CELL_INSERT[cell] + ((symbol >> 3) & 7)
-        copy_code = CELL_COPY[cell] + (symbol & 7)
+        insert_code = CELL_INSERT.unsafe_fetch(cell) &+ ((symbol >> 3) & 7)
+        copy_code = CELL_COPY.unsafe_fetch(cell) &+ (symbol & 7)
         extra = 0
-        insert = INSERT_BASE[insert_code]
-        width = INSERT_EXTRA[insert_code]
+        insert = INSERT_BASE.unsafe_fetch(insert_code)
+        width = INSERT_EXTRA.unsafe_fetch(insert_code)
         if width > 0
           fast_bits(width, extra)
           insert &+= extra
         end
-        copy_length = COPY_BASE[copy_code]
-        width = COPY_EXTRA[copy_code]
+        copy_length = COPY_BASE.unsafe_fetch(copy_code)
+        width = COPY_EXTRA.unsafe_fetch(copy_code)
         if width > 0
           fast_bits(width, extra)
           copy_length &+= extra
@@ -1202,42 +1213,59 @@ module Mica::Brotli
               map_row = @literal_map.to_unsafe + @literal_map_offset
               next
             end
+            # A run of literals inside one block that the input margin
+            # covers (a literal takes at most 15 bits, so two bytes),
+            # decoded without per-literal block or input checks.
+            run = left < block_left ? left : block_left
+            room = (in_limit &- in_pos) >> 1
+            run = room if room < run
+            run = 1 if run < 1
+            block_left &-= run
+            left &-= run
             if fixed_tree >= 0
-              # A block with one tree: a run of literals that the input
-              # margin covers (a literal takes at most 15 bits, so two
-              # bytes), decoded without per-literal checks or context.
-              run = left < block_left ? left : block_left
-              room = (in_limit &- in_pos) >> 1
-              run = room if room < run
-              run = 1 if run < 1
-              block_left &-= run
-              left &-= run
-              run.times do
+              # One tree for the whole block: no context. A refill leaves
+              # at least 56 bits, enough for three literals.
+              single = run == 1
+              while run >= 3
+                fast_refill
+                literal = 0
+                fast_symbol(fixed_tree, literal)
+                ring[pos] = literal.to_u8!
+                fast_symbol(fixed_tree, literal)
+                ring[pos &+ 1] = literal.to_u8!
+                fast_symbol(fixed_tree, literal)
+                ring[pos &+ 2] = literal.to_u8!
+                pos &+= 3
+                run &-= 3
+              end
+              while run > 0
                 fast_refill if nbits < 15
                 literal = 0
                 fast_symbol(fixed_tree, literal)
                 ring[pos] = literal.to_u8!
                 pos &+= 1
+                run &-= 1
               end
-              if run >= 2
-                p1 = ring[pos &- 1].to_i32!
-                p2 = ring[pos &- 2].to_i32!
-              else
+              if single
                 p2 = p1
                 p1 = ring[pos &- 1].to_i32!
+              else
+                p1 = ring[pos &- 1].to_i32!
+                p2 = ring[pos &- 2].to_i32!
               end
               next
             end
-            block_left &-= 1
-            tree = trees[map_row[lookup_row[p1] | lookup_row[256 &+ p2]]]
-            fast_refill if nbits < 15
-            literal = 0
-            fast_symbol(tree, literal)
-            ring[pos] = literal.to_u8!
-            pos &+= 1
-            p2 = p1
-            p1 = literal
-            left &-= 1
+            while run > 0
+              tree = trees[map_row[lookup_row[p1] | lookup_row[256 &+ p2]]]
+              fast_refill if nbits < 15
+              literal = 0
+              fast_symbol(tree, literal)
+              ring[pos] = literal.to_u8!
+              pos &+= 1
+              p2 = p1
+              p1 = literal
+              run &-= 1
+            end
           end
           @block_left[0] = block_left
           meta_left &-= insert
@@ -1258,7 +1286,7 @@ module Mica::Brotli
           end
           distance_left &-= 1
           context = copy_length > 4 ? 3 : copy_length &- 2
-          tree = @distance_trees.unsafe_fetch(@distance_map.unsafe_fetch(@distance_map_offset &+ context).to_i32!)
+          tree = distance_trees[distance_map[@distance_map_offset &+ context]]
           fast_refill
           fast_symbol(tree, code)
           if code < 16
@@ -1267,20 +1295,22 @@ module Mica::Brotli
               fast_save
               malformed("Distance code #{code} gives a distance below 1")
             end
-          elsif code < 16 &+ @direct_codes
+          elsif code < 16 &+ direct_codes
             distance = code &- 15
           else
-            offset_code = code &- @direct_codes &- 16
-            width = 1 &+ (offset_code >> (@postfix_bits &+ 1))
-            high = offset_code >> @postfix_bits
-            low = offset_code & @postfix_mask
-            offset = ((2 &+ (high & 1)) << width) &- 4
+            # The distance alphabet bounds offset_code, so width is at
+            # most 24 and the shifts stay inside 32 bits.
+            offset_code = code &- direct_codes &- 16
+            width = 1 &+ offset_code.unsafe_shr(postfix_bits &+ 1)
+            high = offset_code.unsafe_shr(postfix_bits)
+            low = offset_code & postfix_mask
+            offset = (2 &+ (high & 1)).unsafe_shl(width) &- 4
             fast_bits(width, extra)
-            distance = ((offset &+ extra) << @postfix_bits) &+ low &+ @direct_codes &+ 1
+            distance = (offset &+ extra).unsafe_shl(postfix_bits) &+ low &+ direct_codes &+ 1
           end
         end
-        total = @ring_base + pos
-        max_distance = total < @max_backward ? total.to_i32 : @max_backward
+        # The output so far, capped at the window's reach.
+        max_distance = written_before &+ pos < max_backward ? (written_before &+ pos).to_i32! : max_backward
         if distance > max_distance
           fast_save
           start_dictionary_word(distance, max_distance)
@@ -1295,7 +1325,7 @@ module Mica::Brotli
           fast_save
           malformed("Copy length runs past the metablock")
         end
-        source = pos - distance
+        source = pos &- distance
         if source < 0 || pos &+ copy_length > out_end
           fast_save
           @copy_left = copy_length
@@ -1303,20 +1333,47 @@ module Mica::Brotli
           @stage = Stage::Copy
           return
         end
-        if distance >= 8
-          # Whole 8-byte words; up to 7 bytes past the copy land in the
-          # slack or in history no back reference can reach.
+        # Whole words: up to 15 bytes past the copy land in the slack or
+        # in the 16 oldest bytes of history, which no back reference can
+        # reach (the longest distance is the window less 16).
+        destination = ring + pos
+        origin = ring + source
+        if distance >= 16
           at = 0
           while at < copy_length
-            (ring + (pos &+ at)).as(UInt64*).value = (ring + (source &+ at)).as(UInt64*).value
+            low_word = (origin + at).as(UInt64*).value
+            high_word = (origin + (at &+ 8)).as(UInt64*).value
+            (destination + at).as(UInt64*).value = low_word
+            (destination + (at &+ 8)).as(UInt64*).value = high_word
+            at &+= 16
+          end
+        elsif distance >= 8
+          at = 0
+          while at < copy_length
+            (destination + at).as(UInt64*).value = (origin + at).as(UInt64*).value
             at &+= 8
           end
         elsif distance == 1
           # A run of one byte.
-          Slice.new(ring + pos, copy_length).fill(ring[source])
+          Slice.new(destination, copy_length).fill(origin.value)
         else
-          copy_length.times do |index|
-            ring[pos &+ index] = ring[source &+ index]
+          # A short repeating pattern: byte by byte until the copied part
+          # holds the pattern at a period of 8 or more, then whole words
+          # from that period back.
+          period = distance
+          while period < 8
+            period &+= distance
+          end
+          head = period &- distance
+          head = copy_length if head > copy_length
+          at = 0
+          while at < head
+            destination[at] = origin[at]
+            at &+= 1
+          end
+          while at < copy_length
+            (destination + at).as(UInt64*).value = (destination + (at &- period)).as(UInt64*).value
+            at &+= 8
           end
         end
         pos &+= copy_length
