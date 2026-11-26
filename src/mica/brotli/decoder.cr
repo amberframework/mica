@@ -93,6 +93,19 @@ module Mica::Brotli
       affixes
     end
 
+    # BIT_MASK[n] keeps the low n bits (n from 0 to 64). Masks come from
+    # this table, one load, rather than from a variable shift: without
+    # BMI2 (baseline x86-64) a shift-built mask takes four instructions.
+    BIT_MASK = {% begin %}
+      StaticArray[
+        {% for n in 0..64 %}
+          {% digits = ["", "1", "3", "7"][n % 4] %}
+          {% for _ in 0...(n // 4) %}{% digits = digits + "f" %}{% end %}
+          {{ (n == 0 ? "0" : "0x" + digits).id }}_u64,
+        {% end %}
+      ]
+    {% end %}
+
     # Short distance codes 0 to 15 (RFC 7932, section 4): which of the
     # last four distances, and the change to it.
     SHORT_DISTANCE_INDEX = StaticArray[0, 1, 2, 3, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1]
@@ -166,6 +179,12 @@ module Mica::Brotli
     @postfix_bits : Int32 = 0
     @postfix_mask : Int32 = 0
     @direct_codes : Int32 = 0
+    # Per distance code from 16 on, for the current metablock's
+    # postfix bits and direct codes: the distance with zero extra bits
+    # in the low 32 bits and the extra bit count in the high 32
+    # (RFC 7932, section 4). Then a distance is that base plus the extra
+    # bits shifted left by the postfix bits.
+    @distance_lut = Slice(Int64).new(16 + 120 + (48 << 3))
     @context_modes : Bytes = Bytes.new(256)
     @literal_map : Bytes = Bytes.new(64 * 256)
     @distance_map : Bytes = Bytes.new(4 * 256)
@@ -408,7 +427,7 @@ module Mica::Brotli
         refill
         truncated if @bit_count < count
       end
-      value = (@bits & (1_u64.unsafe_shl(count) &- 1)).to_i32!
+      value = (@bits & BIT_MASK.unsafe_fetch(count)).to_i32!
       @bits = @bits.unsafe_shr(count)
       @bit_count &-= count
       value
@@ -423,7 +442,7 @@ module Mica::Brotli
       width = (entry & 0xFF).to_i32
       if width > PrefixCode::ROOT_BITS
         sub_width = width - PrefixCode::ROOT_BITS
-        index = ((@bits >> PrefixCode::ROOT_BITS) & (1_u64.unsafe_shl(sub_width) &- 1)).to_i32!
+        index = ((@bits >> PrefixCode::ROOT_BITS) & BIT_MASK.unsafe_fetch(sub_width)).to_i32!
         entry = table[tree + (entry >> 8).to_i32 + index]
         width = (entry & 0xFF).to_i32 + PrefixCode::ROOT_BITS
       end
@@ -565,6 +584,7 @@ module Mica::Brotli
       @command_trees.clear
       @num_types[1].times { @command_trees << read_prefix_code(COMMAND_CODES, COMMAND_CODES) }
       distance_alphabet = 16 + @direct_codes + (48 << @postfix_bits)
+      fill_distance_lut(distance_alphabet)
       @distance_trees.clear
       distance_trees.times { @distance_trees << read_prefix_code(distance_alphabet, distance_alphabet) }
 
@@ -1078,7 +1098,7 @@ module Mica::Brotli
       %width = (%entry & 0xFF).to_i32!
       if %width > PrefixCode::ROOT_BITS
         %sub = %width &- PrefixCode::ROOT_BITS
-        %entry = table[{{tree}} &+ (%entry >> 8).to_i32! &+ ((bits >> PrefixCode::ROOT_BITS) & (1_u64.unsafe_shl(%sub) &- 1)).to_i32!]
+        %entry = table[{{tree}} &+ (%entry >> 8).to_i32! &+ ((bits >> PrefixCode::ROOT_BITS) & BIT_MASK.unsafe_fetch(%sub)).to_i32!]
         %width = (%entry & 0xFF).to_i32! &+ PrefixCode::ROOT_BITS
       end
       bits = bits.unsafe_shr(%width)
@@ -1089,7 +1109,7 @@ module Mica::Brotli
     # Reads *count* (at most 24) bits in `fast_commands`.
     private macro fast_bits(count, into)
       fast_refill if nbits < {{count}}
-      {{into}} = (bits & (1_u64.unsafe_shl({{count}}) &- 1)).to_i32!
+      {{into}} = (bits & BIT_MASK.unsafe_fetch({{count}})).to_i32!
       bits = bits.unsafe_shr({{count}})
       nbits &-= {{count}}
     end
@@ -1128,7 +1148,7 @@ module Mica::Brotli
       @block_left[1] = command_left
       @block_left[2] = distance_left
       @distances = last_distances
-      @meta_remaining = meta_left
+      @meta_remaining = meta_end &- pos
       @copy_length = copy_length
       @implicit_distance = implicit
       @command_tree = command_tree
@@ -1144,9 +1164,9 @@ module Mica::Brotli
       command_left = @block_left[1]
       distance_left = @block_left[2]
       last_distances = @distances
-      meta_left = @meta_remaining
+      meta_end = pos &+ @meta_remaining
       command_tree = @command_tree
-      out_end = @out_end
+      stop = meta_end < @out_end ? meta_end : @out_end
     end
 
     # Executes whole commands with the bit buffer, the input position and
@@ -1169,25 +1189,25 @@ module Mica::Brotli
       command_left = 0
       distance_left = 0
       last_distances = @distances
-      # Likewise the metablock's bytes left, the command being run and the
-      # output stop.
-      meta_left = 0
+      # Likewise the metablock's end as an output position, the command
+      # being run, and where output must stop: the metablock's end or
+      # `@out_end`, whichever comes first.
+      meta_end = 0
       copy_length = 0
       implicit = false
       command_tree = 0
-      out_end = 0
+      stop = 0
       table = @table.to_unsafe
       ring = @ring.to_unsafe
       # The metablock's distance parameters and the ring's history, fixed
       # while this runs, in locals: a ring store may alias any field.
-      direct_codes = @direct_codes
       postfix_bits = @postfix_bits
-      postfix_mask = @postfix_mask
+      distance_lut = @distance_lut.to_unsafe
       distance_tree_map = @distance_tree_map.to_unsafe
       written_before = @ring_base
       max_backward = @max_backward
       fast_load
-      while meta_left > 0 && in_pos <= in_limit
+      while pos < meta_end && in_pos <= in_limit
         if command_left == 0
           fast_switch(1)
           command_left = @block_left[1]
@@ -1203,19 +1223,16 @@ module Mica::Brotli
         insert_width = (command >> 16).to_i32! & 0xFF
         both_width = insert_width &+ ((command >> 40).to_i32! & 0xFF)
         fast_refill if nbits < both_width
-        length_bits = bits & (1_u64.unsafe_shl(both_width) &- 1)
+        length_bits = bits & BIT_MASK.unsafe_fetch(both_width)
         bits = bits.unsafe_shr(both_width)
         nbits &-= both_width
-        insert = (command.to_i32! & 0xFFFF) &+ (length_bits & (1_u64.unsafe_shl(insert_width) &- 1)).to_i32!
+        insert = (command.to_i32! & 0xFFFF) &+ (length_bits & BIT_MASK.unsafe_fetch(insert_width)).to_i32!
         copy_length = ((command >> 24).to_i32! & 0xFFFF) &+ length_bits.unsafe_shr(insert_width).to_i32!
         extra = 0
         implicit = symbol < 128
-        if insert > meta_left
+        if pos &+ insert > stop
           fast_save
-          malformed("Insert length runs past the metablock")
-        end
-        if pos &+ insert > out_end
-          fast_save
+          malformed("Insert length runs past the metablock") if insert > @meta_remaining
           @insert_left = insert
           @stage = Stage::Insert
           return
@@ -1232,7 +1249,6 @@ module Mica::Brotli
               fast_save
               @block_left[0] = block_left
               @insert_left = left
-              @meta_remaining &-= insert - left
               @stage = Stage::Insert
               return
             end
@@ -1300,9 +1316,8 @@ module Mica::Brotli
             end
           end
           @block_left[0] = block_left
-          meta_left &-= insert
         end
-        if meta_left == 0
+        if pos == meta_end
           fast_save
           @stage = Stage::Command
           return
@@ -1327,18 +1342,13 @@ module Mica::Brotli
               fast_save
               malformed("Distance code #{code} gives a distance below 1")
             end
-          elsif code < 16 &+ direct_codes
-            distance = code &- 15
           else
-            # The distance alphabet bounds offset_code, so width is at
-            # most 24 and the shifts stay inside 32 bits.
-            offset_code = code &- direct_codes &- 16
-            width = 1 &+ offset_code.unsafe_shr(postfix_bits &+ 1)
-            high = offset_code.unsafe_shr(postfix_bits)
-            low = offset_code & postfix_mask
-            offset = (2 &+ (high & 1)).unsafe_shl(width) &- 4
+            # At most 24 extra bits (none for a direct code); the
+            # distance stays inside 32 bits.
+            entry = distance_lut[code]
+            width = (entry >> 32).to_i32!
             fast_bits(width, extra)
-            distance = (offset &+ extra).unsafe_shl(postfix_bits) &+ low &+ direct_codes &+ 1
+            distance = entry.to_i32! &+ extra.unsafe_shl(postfix_bits)
           end
         end
         # The output so far, capped at the window's reach.
@@ -1353,13 +1363,10 @@ module Mica::Brotli
         if code != 0
           last_distances = StaticArray[distance, last_distances[0], last_distances[1], last_distances[2]]
         end
-        if copy_length > meta_left
-          fast_save
-          malformed("Copy length runs past the metablock")
-        end
         source = pos &- distance
-        if source < 0 || pos &+ copy_length > out_end
+        if source < 0 || pos &+ copy_length > stop
           fast_save
+          malformed("Copy length runs past the metablock") if copy_length > @meta_remaining
           @copy_left = copy_length
           @copy_distance = distance
           @stage = Stage::Copy
@@ -1409,7 +1416,6 @@ module Mica::Brotli
           end
         end
         pos &+= copy_length
-        meta_left &-= copy_length
       end
       fast_save
       @stage = Stage::Command
@@ -1507,19 +1513,31 @@ module Mica::Brotli
       @stage = Stage::Copy
     end
 
+    # Fills `@distance_lut` for codes 16 to *alphabet* - 1.
+    private def fill_distance_lut(alphabet : Int32) : Nil
+      lut = @distance_lut.to_unsafe
+      (16...alphabet).each do |code|
+        if code < 16 + @direct_codes
+          lut[code] = (code - 15).to_i64
+          next
+        end
+        offset_code = code - @direct_codes - 16
+        extra_bits = 1 + (offset_code >> (@postfix_bits + 1))
+        high = offset_code >> @postfix_bits
+        low = offset_code & @postfix_mask
+        offset = ((2 + (high & 1)) << extra_bits) - 4
+        lut[code] = ((offset << @postfix_bits) + low + @direct_codes + 1).to_i64 | (extra_bits.to_i64 << 32)
+      end
+    end
+
     private def translate_distance(code : Int32) : Int32
       if code < 16
         distance = @distances[SHORT_DISTANCE_INDEX[code]] + SHORT_DISTANCE_DELTA[code]
         malformed("Distance code #{code} gives a distance below 1") if distance <= 0
         return distance
       end
-      return code - 15 if code < 16 + @direct_codes
-      offset_code = code - @direct_codes - 16
-      extra_bits = 1 + (offset_code >> (@postfix_bits + 1))
-      high = offset_code >> @postfix_bits
-      low = offset_code & @postfix_mask
-      offset = ((2 + (high & 1)) << extra_bits) - 4
-      ((offset + read_bits(extra_bits)) << @postfix_bits) + low + @direct_codes + 1
+      entry = @distance_lut.unsafe_fetch(code)
+      entry.to_i32! + (read_bits((entry >> 32).to_i32!) << @postfix_bits)
     end
 
     private def start_dictionary_word(distance : Int32, max_distance : Int32) : Nil
