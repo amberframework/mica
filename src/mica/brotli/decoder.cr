@@ -1379,7 +1379,10 @@ module Mica::Brotli
         destination = ring + pos
         origin = ring + source
         if distance >= 16
-          at = 0
+          # A copy is at least 2 bytes: the first 16 always move.
+          (destination.as(UInt64*)).value = origin.as(UInt64*).value
+          (destination + 8).as(UInt64*).value = (origin + 8).as(UInt64*).value
+          at = 16
           while at < copy_length
             low_word = (origin + at).as(UInt64*).value
             high_word = (origin + (at &+ 8)).as(UInt64*).value
