@@ -1,7 +1,52 @@
 module Mica::Brotli::Encode
+  # The part of a `BlockEncoder` the store loop touches per symbol, as a
+  # value the loop keeps in locals: the code tables, the symbols left in
+  # the current block and the current block type's first code.
+  struct SymbolStream
+    getter block_length : UInt32
+    getter entropy_index : Int32
+
+    def initialize(@depths : Pointer(UInt8), @bits : Pointer(UInt16), @block_length : UInt32, @entropy_index : Int32)
+    end
+
+    # Writes *symbol* with the code of the current block type, switching
+    # blocks first through *encoder* when the current one is used up.
+    @[AlwaysInline]
+    def store(symbol : Int, encoder : BlockEncoder, cursor : BitWriter::Cursor, writer : BitWriter) : BitWriter::Cursor
+      if @block_length == 0
+        @block_length, @entropy_index, cursor = encoder.next_block(cursor, writer, nil)
+      end
+      @block_length &-= 1
+      index = @entropy_index &+ symbol
+      cursor.write(@depths[index], @bits[index])
+      cursor
+    end
+
+    # `store` with the code of the histogram *context_map* picks for the
+    # block type and *context*.
+    @[AlwaysInline]
+    def store(symbol : Int, context : Int, context_map : UInt32*, context_bits : Int32, histogram_length : Int32,
+              encoder : BlockEncoder, cursor : BitWriter::Cursor, writer : BitWriter) : BitWriter::Cursor
+      if @block_length == 0
+        @block_length, @entropy_index, cursor = encoder.next_block(cursor, writer, context_bits)
+      end
+      @block_length &-= 1
+      index = context_map[@entropy_index &+ context].to_i32! &* histogram_length &+ symbol
+      cursor.write(@depths[index], @bits[index])
+      cursor
+    end
+  end
+
   # Writes one category's block switches and symbols with the prefix
   # code of the current block type (google/brotli's BlockEncoder).
   class BlockEncoder
+    # Room a cursor keeps for one command: its codes and extra bits and
+    # those of a block switch for each of the three categories.
+    STORE_ROOM_BYTES = 64
+    # The most bytes one literal can take: a 15-bit code and a block
+    # switch (type code, length code, 24 extra bits).
+    LITERAL_ROOM_BYTES = 11
+
     # Code tables, all from the metablock arena.
     @type_depths : Pointer(UInt8)
     @type_bits : Pointer(UInt16)
@@ -86,22 +131,20 @@ module Mica::Brotli::Encode
       store_block_switch(length, type, false, writer)
     end
 
-    @[AlwaysInline]
-    def store_symbol(symbol : Int, writer : BitWriter) : Nil
-      switch_block(writer, nil) if @block_length == 0
-      @block_length &-= 1
-      index = @entropy_index &+ symbol
-      writer.write(@depths[index], @bits[index])
+    getter histogram_length : Int32
+
+    # The per-symbol state for the store loop, once the codes are built.
+    def stream : SymbolStream
+      SymbolStream.new(@depths, @bits, @block_length, @entropy_index)
     end
 
-    @[AlwaysInline]
-    def store_symbol_with_context(symbol : Int, context : Int, context_map : UInt32*, context_bits : Int32,
-                                  writer : BitWriter) : Nil
-      switch_block(writer, context_bits) if @block_length == 0
-      @block_length &-= 1
-      histogram = context_map[@entropy_index &+ context].to_i32!
-      index = histogram &* @histogram_length &+ symbol
-      writer.write(@depths[index], @bits[index])
+    # Writes the switch to the next block for a `SymbolStream` whose
+    # block ran out; returns the new block's length and first code index
+    # and a fresh cursor.
+    def next_block(cursor : BitWriter::Cursor, writer : BitWriter, context_bits : Int32?) : {UInt32, Int32, BitWriter::Cursor}
+      writer.commit(cursor)
+      switch_block(writer, context_bits)
+      {@block_length, @entropy_index, writer.cursor(STORE_ROOM_BYTES)}
     end
   end
 
@@ -309,20 +352,32 @@ module Mica::Brotli::Encode
       position = start
       literal_map_pointer = literal_map.to_unsafe
       distance_map_pointer = distance_map.to_unsafe
+      literal_stream = literal_encoder.stream
+      command_stream = command_encoder.stream
+      distance_stream = distance_encoder.stream
+      distance_histogram_length = distance_encoder.histogram_length
+      cursor = writer.cursor(BlockEncoder::STORE_ROOM_BYTES)
       commands.size.times do |i|
         entry = commands[i]
-        command_encoder.store_symbol(entry.command_prefix, writer)
-        store_command_extra(entry, writer)
+        inserted = entry.insert_length.to_i32!
+        room = inserted &* BlockEncoder::LITERAL_ROOM_BYTES &+ BlockEncoder::STORE_ROOM_BYTES
+        unless cursor.room?(room)
+          writer.commit(cursor)
+          cursor = writer.cursor(room)
+        end
+        cursor = command_stream.store(entry.command_prefix, command_encoder, cursor, writer)
+        cursor = store_command_extra(entry, cursor)
         if literal_map.empty?
-          entry.insert_length.times do
-            literal_encoder.store_symbol(data[position], writer)
+          inserted.times do
+            cursor = literal_stream.store(data[position], literal_encoder, cursor, writer)
             position &+= 1
           end
         else
-          entry.insert_length.times do
+          inserted.times do
             literal = data[position]
             context = lut[previous_byte] | lut[256 &+ previous_byte2]
-            literal_encoder.store_symbol_with_context(literal, context, literal_map_pointer, LITERAL_CONTEXT_BITS, writer)
+            cursor = literal_stream.store(literal, context, literal_map_pointer, LITERAL_CONTEXT_BITS,
+              NUM_LITERAL_SYMBOLS, literal_encoder, cursor, writer)
             previous_byte2 = previous_byte
             previous_byte = literal
             position &+= 1
@@ -336,27 +391,29 @@ module Mica::Brotli::Encode
           if entry.command_prefix >= 128
             code = entry.distance_prefix & 0x3FF
             if distance_map.empty?
-              distance_encoder.store_symbol(code, writer)
+              cursor = distance_stream.store(code, distance_encoder, cursor, writer)
             else
-              distance_encoder.store_symbol_with_context(code, entry.distance_context, distance_map_pointer,
-                DISTANCE_CONTEXT_BITS, writer)
+              cursor = distance_stream.store(code, entry.distance_context, distance_map_pointer,
+                DISTANCE_CONTEXT_BITS, distance_histogram_length, distance_encoder, cursor, writer)
             end
-            writer.write(entry.distance_prefix >> 10, entry.distance_extra)
+            cursor.write(entry.distance_prefix >> 10, entry.distance_extra)
           end
         end
       end
+      writer.commit(cursor)
       writer.align if is_last
     end
 
     @[AlwaysInline]
-    private def self.store_command_extra(entry : Command, writer : BitWriter) : Nil
+    private def self.store_command_extra(entry : Command, cursor : BitWriter::Cursor) : BitWriter::Cursor
       copy_code_length = entry.copy_length_code
       insert_code = Encode.insert_length_code(entry.insert_length)
       copy_code = Encode.copy_length_code(copy_code_length)
       insert_extra_count = INSERT_EXTRA.unsafe_fetch(insert_code)
       insert_extra = (entry.insert_length &- INSERT_BASE.unsafe_fetch(insert_code)).to_u64!
       copy_extra = (copy_code_length &- COPY_BASE.unsafe_fetch(copy_code)).to_u64!
-      writer.write(insert_extra_count &+ COPY_EXTRA.unsafe_fetch(copy_code), (copy_extra << insert_extra_count) | insert_extra)
+      cursor.write(insert_extra_count &+ COPY_EXTRA.unsafe_fetch(copy_code), (copy_extra << insert_extra_count) | insert_extra)
+      cursor
     end
   end
 end
