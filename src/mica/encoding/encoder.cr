@@ -107,6 +107,12 @@ module Mica::Encoding
   # code point to report when the encoding has none. The class may define
   # `flush(output, written) : Int32` for the end of the input and
   # `ascii_direct? : Bool` when ASCII bytes are written as themselves.
+  #
+  # While no sequence is open, `encode_valid_run` reads whole well-formed
+  # sequences straight from the chunk (ASCII eight bytes at a time when
+  # the encoder writes it as itself); only a sequence that is ill-formed or
+  # split across chunks goes through the state machine byte by byte, so
+  # results, problems and offsets match a byte-at-a-time run exactly.
   module EncoderLoop
     # Room one step may need: at most a 3-byte escape (ISO-2022-JP back to
     # ASCII) and a 10-byte character reference.
@@ -135,20 +141,25 @@ module Mica::Encoding
       limit = output.size - STEP_ROOM
       while read < size
         return finish_call(Status::OutputFull, read, written) if written > limit
-        byte = input.unsafe_fetch(read).to_i32
-        code_point = -1
         if @needed == 0
-          if byte < 0x80 && ascii_direct?
-            output.unsafe_put(written, byte.to_u8!)
-            written += 1
-            read += 1
+          read, written, start = encode_valid_run(input, read, output, written, limit)
+          if (unmappable = @unmappable) >= 0
+            @unmappable = -1
+            if @error_mode.fatal?
+              @sequence_start = @position + start
+              return fail(Problem::Unmappable, unmappable, read, written)
+            end
+            written = write_reference(output, written, unmappable) if @error_mode.replacement?
             next
           end
+          next if read >= size || written > limit
+          # The byte at *read* begins a sequence that is ill-formed or runs
+          # past this chunk: the state machine takes it one byte at a time.
+          byte = input.unsafe_fetch(read).to_i32
+          code_point = -1
           @sequence_start = @position + read
           read += 1
-          if byte < 0x80
-            code_point = byte
-          elsif byte >= 0xC2 && byte <= 0xDF
+          if byte >= 0xC2 && byte <= 0xDF
             @needed = 1
             @code_point = byte & 0x1F
           elsif byte >= 0xE0 && byte <= 0xEF
@@ -164,19 +175,23 @@ module Mica::Encoding
           else
             code_point = -2
           end
-        elsif byte < @lower || byte > @upper
-          # Not consumed: the byte may begin the next sequence.
-          clear_utf8
-          code_point = -2
         else
-          read += 1
-          @lower = 0x80
-          @upper = 0xBF
-          @code_point = (@code_point << 6) | (byte & 0x3F)
-          @seen += 1
-          if @seen == @needed
-            code_point = @code_point
+          byte = input.unsafe_fetch(read).to_i32
+          code_point = -1
+          if byte < @lower || byte > @upper
+            # Not consumed: the byte may begin the next sequence.
             clear_utf8
+            code_point = -2
+          else
+            read += 1
+            @lower = 0x80
+            @upper = 0xBF
+            @code_point = (@code_point << 6) | (byte & 0x3F)
+            @seen += 1
+            if @seen == @needed
+              code_point = @code_point
+              clear_utf8
+            end
           end
         end
         if code_point == -2
@@ -210,6 +225,94 @@ module Mica::Encoding
       finish_call(Status::InputEmpty, read, written)
     end
 
+    # Encodes the well-formed UTF-8 at *read* while no sequence is open,
+    # one step at a time while the output is within *limit*, and returns
+    # the new read and write offsets and where the last sequence began.
+    # Stops at the end of the input, at the output limit, after a code
+    # point the encoding lacks (`@unmappable` is then set), or before a
+    # sequence that is ill-formed or does not lie wholly in *input*; every
+    # stop is where the byte-by-byte state machine would be at that point.
+    private def encode_valid_run(input : Bytes, read : Int32, output : Bytes, written : Int32, limit : Int32) : {Int32, Int32, Int32}
+      size = input.size
+      start = read
+      while read < size && written <= limit
+        start = read
+        lead = input.unsafe_fetch(read).to_i32
+        if lead < 0x80
+          if ascii_direct?
+            read, written = copy_ascii(input, read, output, written, limit)
+            next
+          end
+          code_point = lead
+          read &+= 1
+        elsif lead >= 0xE0 && lead <= 0xEF
+          break if read &+ 2 >= size
+          second = input.unsafe_fetch(read &+ 1).to_i32
+          third = input.unsafe_fetch(read &+ 2).to_i32
+          lower = lead == 0xE0 ? 0xA0 : 0x80
+          upper = lead == 0xED ? 0x9F : 0xBF
+          break if second < lower || second > upper || (third & 0xC0) != 0x80
+          code_point = ((lead & 0xF) << 12) | ((second & 0x3F) << 6) | (third & 0x3F)
+          read &+= 3
+        elsif lead >= 0xC2 && lead <= 0xDF
+          break if read &+ 1 >= size
+          second = input.unsafe_fetch(read &+ 1).to_i32
+          break if (second & 0xC0) != 0x80
+          code_point = ((lead & 0x1F) << 6) | (second & 0x3F)
+          read &+= 2
+        elsif lead >= 0xF0 && lead <= 0xF4
+          break if read &+ 3 >= size
+          second = input.unsafe_fetch(read &+ 1).to_i32
+          third = input.unsafe_fetch(read &+ 2).to_i32
+          fourth = input.unsafe_fetch(read &+ 3).to_i32
+          lower = lead == 0xF0 ? 0x90 : 0x80
+          upper = lead == 0xF4 ? 0x8F : 0xBF
+          break if second < lower || second > upper || (third & 0xC0) != 0x80 || (fourth & 0xC0) != 0x80
+          code_point = ((lead & 0x7) << 18) | ((second & 0x3F) << 12) | ((third & 0x3F) << 6) | (fourth & 0x3F)
+          read &+= 4
+        else
+          break
+        end
+        written = encode_one(code_point, output, written)
+        break if @unmappable >= 0
+      end
+      {read, written, start}
+    end
+
+    # Copies the ASCII run at *read* (whose first byte is ASCII and fits)
+    # and returns the new read and write offsets. Eight bytes go at a time
+    # while all eight are ASCII and the last of them would still pass the
+    # loop's room check; it stops exactly where the byte-by-byte loop
+    # would: at a byte that is not ASCII, the end of the input, or the
+    # output limit. Bytes of the last word past the run may land after the
+    # returned offset (inside the room the step reserves), never before it.
+    @[AlwaysInline]
+    private def copy_ascii(input : Bytes, read : Int32, output : Bytes, written : Int32, limit : Int32) : {Int32, Int32}
+      size = input.size
+      source = input.to_unsafe
+      target = output.to_unsafe
+      while read + 8 <= size && written + 7 <= limit
+        word = uninitialized UInt64
+        pointerof(word).as(UInt8*).copy_from(source + read, 8)
+        (target + written).copy_from(pointerof(word).as(UInt8*), 8)
+        high = word & 0x8080808080808080_u64
+        if high != 0
+          count = (IO::ByteFormat::SystemEndian == IO::ByteFormat::LittleEndian ? high.trailing_zeros_count : high.leading_zeros_count) // 8
+          return {read + count, written + count}
+        end
+        read += 8
+        written += 8
+      end
+      while read < size && written <= limit
+        byte = source[read]
+        break if byte >= 0x80
+        target[written] = byte
+        read += 1
+        written += 1
+      end
+      {read, written}
+    end
+
     @[AlwaysInline]
     private def encode_one(code_point : Int32, output : Bytes, written : Int32) : Int32
       encode_code_point(code_point, output, written)
@@ -236,17 +339,21 @@ module Mica::Encoding
     end
 
     # Writes the Encoding Standard's "html" replacement: `&#` the decimal
-    # value `;`.
+    # value `;` (at most 10 bytes, inside the step's room).
     private def write_reference(output : Bytes, written : Int32, code_point : Int32) : Int32
-      output[written] = '&'.ord.to_u8
-      output[written + 1] = '#'.ord.to_u8
+      output.unsafe_put(written, '&'.ord.to_u8)
+      output.unsafe_put(written + 1, '#'.ord.to_u8)
       written += 2
-      digits = code_point.to_s
-      digits.each_byte do |digit|
-        output[written] = digit
-        written += 1
+      divisor = 1
+      while divisor * 10 <= code_point
+        divisor *= 10
       end
-      output[written] = ';'.ord.to_u8
+      while divisor > 0
+        output.unsafe_put(written, (0x30 + code_point // divisor % 10).to_u8!)
+        written += 1
+        divisor //= 10
+      end
+      output.unsafe_put(written, ';'.ord.to_u8)
       written + 1
     end
 
@@ -259,6 +366,38 @@ module Mica::Encoding
     end
 
     private def clear_state : Nil
+    end
+  end
+
+  # For an encoder whose `encode_by_rules(code_point, output, written)`
+  # writes each code point without reading or changing any state: builds
+  # the `TwoByteTable` its hot path reads, from those same rules.
+  module TwoByteLookup
+    # Returns `(first << 8) | second` when the rules write exactly two
+    # bytes for *code_point*, else 0.
+    protected def two_byte_code_by_rules(code_point : Int32) : Int32
+      scratch = uninitialized UInt8[MIN_OUTPUT_BYTES]
+      written = encode_by_rules(code_point, scratch.to_slice, 0)
+      unmappable = @unmappable
+      @unmappable = -1
+      return 0 unless written == 2 && unmappable < 0
+      (scratch[0].to_i32 << 8) | scratch[1]
+    end
+
+    private def build_two_byte_table : TwoByteTable
+      TwoByteTable.new { |code_point| two_byte_code_by_rules(code_point) }
+    end
+
+    # Writes the table's two bytes for *code_point* and returns the new
+    # offset, or returns -1 when the table has none.
+    @[AlwaysInline]
+    private def put_two_byte_code(code_point : Int32, output : Bytes, written : Int32) : Int32
+      return -1 if code_point > 0xFFFF
+      code = @two_byte.code_for(code_point)
+      return -1 if code == 0
+      output.unsafe_put(written, (code >> 8).to_u8!)
+      output.unsafe_put(written &+ 1, code.to_u8!)
+      written &+ 2
     end
   end
 
@@ -354,7 +493,7 @@ module Mica::Encoding
       end
       4.times do |index|
         shift = @big_endian ? 24 - 8 * index : 8 * index
-        output[written + index] = ((code_point >> shift) & 0xFF).to_u8!
+        output.unsafe_put(written + index, ((code_point >> shift) & 0xFF).to_u8!)
       end
       written + 4
     end
@@ -367,22 +506,26 @@ module Mica::Encoding
     include EncoderLoop
 
     @reverse : ReverseTable?
+    # The highest code point written as the byte of the same value:
+    # 0xFF for exact ISO-8859-1, else 0x7F.
+    @identity_limit : Int32
+    @user_defined : Bool
 
     def initialize(codec : Codec, error_mode : ErrorMode)
       super(codec, error_mode)
       @reverse = Tables.single_byte_reverse(codec)
+      @identity_limit = codec.iso8859_1? ? 0xFF : 0x7F
+      @user_defined = codec.x_user_defined?
     end
 
     private def encode_code_point(code_point : Int32, output : Bytes, written : Int32) : Int32
-      if code_point < 0x80
-        output[written] = code_point.to_u8!
+      if code_point <= @identity_limit
+        output.unsafe_put(written, code_point.to_u8!)
         return written + 1
       end
       offset = if reverse = @reverse
                  reverse.pointer_for(code_point)
-               elsif @codec.iso8859_1?
-                 code_point <= 0xFF ? code_point - 0x80 : -1
-               elsif @codec.x_user_defined?
+               elsif @user_defined
                  code_point >= 0xF780 && code_point <= 0xF7FF ? code_point - 0xF780 : -1
                else
                  -1
@@ -391,7 +534,7 @@ module Mica::Encoding
         @unmappable = code_point
         return written
       end
-      output[written] = (offset + 0x80).to_u8!
+      output.unsafe_put(written, (offset + 0x80).to_u8!)
       written + 1
     end
   end
@@ -400,6 +543,22 @@ module Mica::Encoding
   # U+20AC as 0x80).
   class GB18030Encoder < Encoder
     include EncoderLoop
+
+    include TwoByteLookup
+
+    @@gbk_two_byte : TwoByteTable? = nil
+    @@gb18030_two_byte : TwoByteTable? = nil
+
+    @gbk : Bool
+    @reverse : ReverseTable
+    @two_byte : TwoByteTable = TwoByteTable::EMPTY
+
+    def initialize(codec : Codec, error_mode : ErrorMode)
+      super(codec, error_mode)
+      @gbk = codec.gbk?
+      @reverse = Tables.gb18030_reverse
+      @two_byte = @gbk ? (@@gbk_two_byte ||= build_two_byte_table) : (@@gb18030_two_byte ||= build_two_byte_table)
+    end
 
     # Private Use code points the GB18030-2005 two-byte mapping keeps
     # (the Encoding Standard's side table): their two bytes, or nil.
@@ -428,41 +587,52 @@ module Mica::Encoding
 
     private def encode_code_point(code_point : Int32, output : Bytes, written : Int32) : Int32
       if code_point < 0x80
-        output[written] = code_point.to_u8!
+        output.unsafe_put(written, code_point.to_u8!)
+        return written &+ 1
+      end
+      after = put_two_byte_code(code_point, output, written)
+      return after if after >= 0
+      encode_by_rules(code_point, output, written)
+    end
+
+    private def encode_by_rules(code_point : Int32, output : Bytes, written : Int32) : Int32
+      if code_point < 0x80
+        output.unsafe_put(written, code_point.to_u8!)
         return written + 1
       end
-      if code_point == 0xE5E5
-        @unmappable = code_point
-        return written
+      if code_point >= 0xE5E5 && code_point <= 0xE864
+        if code_point == 0xE5E5
+          @unmappable = code_point
+          return written
+        end
+        if code_point >= 0xE78D && (bytes = GB18030Encoder.private_use_bytes(code_point))
+          output.unsafe_put(written, bytes[0])
+          output.unsafe_put(written + 1, bytes[1])
+          return written + 2
+        end
       end
-      gbk = @codec.gbk?
-      if gbk && code_point == 0x20AC
-        output[written] = 0x80_u8
+      if @gbk && code_point == 0x20AC
+        output.unsafe_put(written, 0x80_u8)
         return written + 1
       end
-      if code_point >= 0xE78D && code_point <= 0xE864 && (bytes = GB18030Encoder.private_use_bytes(code_point))
-        output[written] = bytes[0]
-        output[written + 1] = bytes[1]
-        return written + 2
-      end
-      pointer = Tables.gb18030_encode(code_point)
+      pointer = @reverse.pointer_for(code_point)
       if pointer >= 0
         trailing = pointer % 190
-        output[written] = (pointer // 190 + 0x81).to_u8!
-        output[written + 1] = (trailing + (trailing < 0x3F ? 0x40 : 0x41)).to_u8!
+        output.unsafe_put(written, (pointer // 190 + 0x81).to_u8!)
+        output.unsafe_put(written + 1, (trailing + (trailing < 0x3F ? 0x40 : 0x41)).to_u8!)
         return written + 2
       end
-      if gbk
+      if @gbk
         @unmappable = code_point
         return written
       end
       pointer = Tables.gb18030_ranges_pointer(code_point)
-      output[written] = (pointer // 12600 + 0x81).to_u8!
+      output.unsafe_put(written, (pointer // 12600 + 0x81).to_u8!)
       pointer %= 12600
-      output[written + 1] = (pointer // 1260 + 0x30).to_u8!
+      output.unsafe_put(written + 1, (pointer // 1260 + 0x30).to_u8!)
       pointer %= 1260
-      output[written + 2] = (pointer // 10 + 0x81).to_u8!
-      output[written + 3] = (pointer % 10 + 0x30).to_u8!
+      output.unsafe_put(written + 2, (pointer // 10 + 0x81).to_u8!)
+      output.unsafe_put(written + 3, (pointer % 10 + 0x30).to_u8!)
       written + 4
     end
   end
@@ -474,7 +644,22 @@ module Mica::Encoding
   class Big5Encoder < Encoder
     include EncoderLoop
 
+    include TwoByteLookup
+
+    @@big5_two_byte : TwoByteTable? = nil
+    @@big5_hkscs_two_byte : TwoByteTable? = nil
+
     @held = -1
+    @hkscs : Bool
+    @reverse : ReverseTable
+    @two_byte : TwoByteTable = TwoByteTable::EMPTY
+
+    def initialize(codec : Codec, error_mode : ErrorMode)
+      super(codec, error_mode)
+      @hkscs = codec.big5_hkscs?
+      @reverse = @hkscs ? Tables.big5_hkscs_reverse : Tables.big5_reverse
+      @two_byte = @hkscs ? (@@big5_hkscs_two_byte ||= build_two_byte_table) : (@@big5_two_byte ||= build_two_byte_table)
+    end
 
     private def ascii_direct? : Bool
       @held < 0
@@ -489,13 +674,13 @@ module Mica::Encoding
         @held = -1
         if code_point == 0x0304 || code_point == 0x030C
           trailing = held == 0x00CA ? (code_point == 0x0304 ? 0x62 : 0x64) : (code_point == 0x0304 ? 0xA3 : 0xA5)
-          output[written] = 0x88_u8
-          output[written + 1] = trailing.to_u8
+          output.unsafe_put(written, 0x88_u8)
+          output.unsafe_put(written + 1, trailing.to_u8!)
           return written + 2
         end
         written = encode_single(held, output, written)
       end
-      if @codec.big5_hkscs? && (code_point == 0x00CA || code_point == 0x00EA)
+      if @hkscs && (code_point == 0x00CA || code_point == 0x00EA)
         @held = code_point
         return written
       end
@@ -509,19 +694,31 @@ module Mica::Encoding
       encode_single(held, output, written)
     end
 
+    @[AlwaysInline]
     private def encode_single(code_point : Int32, output : Bytes, written : Int32) : Int32
       if code_point < 0x80
-        output[written] = code_point.to_u8!
+        output.unsafe_put(written, code_point.to_u8!)
+        return written &+ 1
+      end
+      after = put_two_byte_code(code_point, output, written)
+      return after if after >= 0
+      encode_by_rules(code_point, output, written)
+    end
+
+    # One code point, with no held letter.
+    private def encode_by_rules(code_point : Int32, output : Bytes, written : Int32) : Int32
+      if code_point < 0x80
+        output.unsafe_put(written, code_point.to_u8!)
         return written + 1
       end
-      pointer = @codec.big5_hkscs? ? Tables.big5_hkscs_encode(code_point) : Tables.big5_encode(code_point)
+      pointer = @reverse.pointer_for(code_point)
       if pointer < 0
         @unmappable = code_point
         return written
       end
       trailing = pointer % 157
-      output[written] = (pointer // 157 + 0x81).to_u8!
-      output[written + 1] = (trailing + (trailing < 0x3F ? 0x40 : 0x62)).to_u8!
+      output.unsafe_put(written, (pointer // 157 + 0x81).to_u8!)
+      output.unsafe_put(written + 1, (trailing + (trailing < 0x3F ? 0x40 : 0x62)).to_u8!)
       written + 2
     end
   end
@@ -529,33 +726,55 @@ module Mica::Encoding
   # EUC-JP (JIS X 0208 and halfwidth katakana; JIS X 0212 is decode-only).
   class EUCJPEncoder < Encoder
     include EncoderLoop
+    include TwoByteLookup
+
+    @@two_byte : TwoByteTable? = nil
+
+    @reverse : ReverseTable
+    @two_byte : TwoByteTable = TwoByteTable::EMPTY
+
+    def initialize(codec : Codec, error_mode : ErrorMode)
+      super(codec, error_mode)
+      @reverse = Tables.jis0208_reverse
+      @two_byte = @@two_byte ||= build_two_byte_table
+    end
 
     private def encode_code_point(code_point : Int32, output : Bytes, written : Int32) : Int32
       if code_point < 0x80
-        output[written] = code_point.to_u8!
+        output.unsafe_put(written, code_point.to_u8!)
+        return written &+ 1
+      end
+      after = put_two_byte_code(code_point, output, written)
+      return after if after >= 0
+      encode_by_rules(code_point, output, written)
+    end
+
+    private def encode_by_rules(code_point : Int32, output : Bytes, written : Int32) : Int32
+      if code_point < 0x80
+        output.unsafe_put(written, code_point.to_u8!)
         return written + 1
       end
       if code_point == 0x00A5
-        output[written] = 0x5C_u8
+        output.unsafe_put(written, 0x5C_u8)
         return written + 1
       end
       if code_point == 0x203E
-        output[written] = 0x7E_u8
+        output.unsafe_put(written, 0x7E_u8)
         return written + 1
       end
       if code_point >= 0xFF61 && code_point <= 0xFF9F
-        output[written] = 0x8E_u8
-        output[written + 1] = (code_point - 0xFF61 + 0xA1).to_u8!
+        output.unsafe_put(written, 0x8E_u8)
+        output.unsafe_put(written + 1, (code_point - 0xFF61 + 0xA1).to_u8!)
         return written + 2
       end
       code_point = 0xFF0D if code_point == 0x2212
-      pointer = Tables.jis0208_encode(code_point)
+      pointer = @reverse.pointer_for(code_point)
       if pointer < 0
         @unmappable = code_point
         return written
       end
-      output[written] = (pointer // 94 + 0xA1).to_u8!
-      output[written + 1] = (pointer % 94 + 0xA1).to_u8!
+      output.unsafe_put(written, (pointer // 94 + 0xA1).to_u8!)
+      output.unsafe_put(written + 1, (pointer % 94 + 0xA1).to_u8!)
       written + 2
     end
   end
@@ -572,6 +791,12 @@ module Mica::Encoding
     end
 
     @state = State::ASCII
+    @reverse : ReverseTable
+
+    def initialize(codec : Codec, error_mode : ErrorMode)
+      super(codec, error_mode)
+      @reverse = Tables.jis0208_reverse
+    end
 
     private def ascii_direct? : Bool
       false
@@ -595,11 +820,11 @@ module Mica::Encoding
           return written
         end
         if @state.ascii? && code_point < 0x80
-          output[written] = code_point.to_u8!
+          output.unsafe_put(written, code_point.to_u8!)
           return written + 1
         end
         if @state.roman? && ((code_point < 0x80 && code_point != 0x5C && code_point != 0x7E) || code_point == 0x00A5 || code_point == 0x203E)
-          output[written] = (code_point == 0x00A5 ? 0x5C : (code_point == 0x203E ? 0x7E : code_point)).to_u8!
+          output.unsafe_put(written, (code_point == 0x00A5 ? 0x5C : (code_point == 0x203E ? 0x7E : code_point)).to_u8!)
           return written + 1
         end
         if code_point < 0x80
@@ -616,7 +841,7 @@ module Mica::Encoding
         if code_point >= 0xFF61 && code_point <= 0xFF9F
           code_point = Tables::ISO_2022_JP_KATAKANA[code_point - 0xFF61].to_i32
         end
-        pointer = Tables.jis0208_encode(code_point)
+        pointer = @reverse.pointer_for(code_point)
         if pointer < 0
           if @state.jis0208?
             @state = State::ASCII
@@ -631,16 +856,16 @@ module Mica::Encoding
           written = escape(output, written, 0x24, 0x42)
           next
         end
-        output[written] = (pointer // 94 + 0x21).to_u8!
-        output[written + 1] = (pointer % 94 + 0x21).to_u8!
+        output.unsafe_put(written, (pointer // 94 + 0x21).to_u8!)
+        output.unsafe_put(written + 1, (pointer % 94 + 0x21).to_u8!)
         return written + 2
       end
     end
 
     private def escape(output : Bytes, written : Int32, first : Int32, second : Int32) : Int32
-      output[written] = 0x1B_u8
-      output[written + 1] = first.to_u8
-      output[written + 2] = second.to_u8
+      output.unsafe_put(written, 0x1B_u8)
+      output.unsafe_put(written + 1, first.to_u8!)
+      output.unsafe_put(written + 2, second.to_u8!)
       written + 3
     end
   end
@@ -648,34 +873,56 @@ module Mica::Encoding
   # Shift_JIS.
   class ShiftJISEncoder < Encoder
     include EncoderLoop
+    include TwoByteLookup
+
+    @@two_byte : TwoByteTable? = nil
+
+    @reverse : ReverseTable
+    @two_byte : TwoByteTable = TwoByteTable::EMPTY
+
+    def initialize(codec : Codec, error_mode : ErrorMode)
+      super(codec, error_mode)
+      @reverse = Tables.shift_jis_reverse
+      @two_byte = @@two_byte ||= build_two_byte_table
+    end
 
     private def encode_code_point(code_point : Int32, output : Bytes, written : Int32) : Int32
+      if code_point < 0x80
+        output.unsafe_put(written, code_point.to_u8!)
+        return written &+ 1
+      end
+      after = put_two_byte_code(code_point, output, written)
+      return after if after >= 0
+      encode_by_rules(code_point, output, written)
+    end
+
+    private def encode_by_rules(code_point : Int32, output : Bytes, written : Int32) : Int32
       if code_point <= 0x80
-        output[written] = code_point.to_u8!
+        output.unsafe_put(written, code_point.to_u8!)
         return written + 1
       end
       if code_point == 0x00A5
-        output[written] = 0x5C_u8
+        output.unsafe_put(written, 0x5C_u8)
         return written + 1
       end
       if code_point == 0x203E
-        output[written] = 0x7E_u8
+        output.unsafe_put(written, 0x7E_u8)
         return written + 1
       end
       if code_point >= 0xFF61 && code_point <= 0xFF9F
-        output[written] = (code_point - 0xFF61 + 0xA1).to_u8!
+        output.unsafe_put(written, (code_point - 0xFF61 + 0xA1).to_u8!)
         return written + 1
       end
       code_point = 0xFF0D if code_point == 0x2212
-      pointer = Tables.shift_jis_encode(code_point)
+      pointer = @reverse.pointer_for(code_point)
       if pointer < 0
         @unmappable = code_point
         return written
       end
       leading = pointer // 188
       trailing = pointer % 188
-      output[written] = (leading + (leading < 0x1F ? 0x81 : 0xC1)).to_u8!
-      output[written + 1] = (trailing + (trailing < 0x3F ? 0x40 : 0x41)).to_u8!
+      output.unsafe_put(written, (leading + (leading < 0x1F ? 0x81 : 0xC1)).to_u8!)
+      output.unsafe_put(written + 1, (trailing + (trailing < 0x3F ? 0x40 : 0x41)).to_u8!)
       written + 2
     end
   end
@@ -683,19 +930,41 @@ module Mica::Encoding
   # EUC-KR.
   class EUCKREncoder < Encoder
     include EncoderLoop
+    include TwoByteLookup
+
+    @@two_byte : TwoByteTable? = nil
+
+    @reverse : ReverseTable
+    @two_byte : TwoByteTable = TwoByteTable::EMPTY
+
+    def initialize(codec : Codec, error_mode : ErrorMode)
+      super(codec, error_mode)
+      @reverse = Tables.euc_kr_reverse
+      @two_byte = @@two_byte ||= build_two_byte_table
+    end
 
     private def encode_code_point(code_point : Int32, output : Bytes, written : Int32) : Int32
       if code_point < 0x80
-        output[written] = code_point.to_u8!
+        output.unsafe_put(written, code_point.to_u8!)
+        return written &+ 1
+      end
+      after = put_two_byte_code(code_point, output, written)
+      return after if after >= 0
+      encode_by_rules(code_point, output, written)
+    end
+
+    private def encode_by_rules(code_point : Int32, output : Bytes, written : Int32) : Int32
+      if code_point < 0x80
+        output.unsafe_put(written, code_point.to_u8!)
         return written + 1
       end
-      pointer = Tables.euc_kr_encode(code_point)
+      pointer = @reverse.pointer_for(code_point)
       if pointer < 0
         @unmappable = code_point
         return written
       end
-      output[written] = (pointer // 190 + 0x81).to_u8!
-      output[written + 1] = (pointer % 190 + 0x41).to_u8!
+      output.unsafe_put(written, (pointer // 190 + 0x81).to_u8!)
+      output.unsafe_put(written + 1, (pointer % 190 + 0x41).to_u8!)
       written + 2
     end
   end
