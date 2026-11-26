@@ -194,9 +194,11 @@ module Mica::Brotli
     @command_trees = [] of Int32
     @distance_trees = [] of Int32
     @table = PrefixCode::Store.new
-    @sorted = Slice(UInt16).new(COMMAND_CODES)
-    # The current code's symbols with nonzero lengths, and per-length counts.
-    @code_symbols = Slice(UInt16).new(COMMAND_CODES)
+    # The current code's per-length symbol lists (see `PrefixCode::HEADS`)
+    # and each list's last node.
+    @code_lists = Slice(UInt16).new(COMMAND_CODES + PrefixCode::HEADS)
+    @code_tails = StaticArray(UInt16, 16).new(0_u16)
+    # The number of symbols with nonzero lengths, and the count per length.
     @code_used : Int32 = 0
     @code_count = StaticArray(Int32, 16).new(0)
     @lengths = Bytes.new(COMMAND_CODES)
@@ -608,13 +610,14 @@ module Mica::Brotli
     private def read_prefix_code(alphabet : Int32, limit : Int32) : Int32
       @code_used = 0
       @code_count = StaticArray(Int32, 16).new(0)
+      @code_tails = StaticArray(UInt16, 16).new { |length| length.to_u16 }
       skip = read_bits(2)
       if skip == 1
         read_simple_code(alphabet, limit)
       else
         read_complex_code(alphabet, skip)
       end
-      PrefixCode.build_from_list(@code_symbols, @lengths, @code_used, @code_count, @table, @sorted)
+      PrefixCode.build_from_lists(@code_lists, @code_used, @code_count, @table)
     end
 
     # Records that *symbol* has code *length* (nonzero); symbols arrive in
@@ -622,7 +625,9 @@ module Mica::Brotli
     @[AlwaysInline]
     private def add_code_symbol(symbol : Int32, length : Int32) : Nil
       @lengths[symbol] = length.to_u8
-      @code_symbols[@code_used] = symbol.to_u16
+      node = PrefixCode.node(symbol)
+      @code_lists[@code_tails[length]] = node
+      @code_tails[length] = node
       @code_used += 1
       @code_count[length] += 1
     end
@@ -729,12 +734,13 @@ module Mica::Brotli
       repeat = 0
       repeat_length = 0
       space = 32_768
-      # The used-symbol list and per-length counts in locals for the loop
+      # The symbol lists' tails and per-length counts in locals for the loop
       # (`add_code_symbol` inlined); stored back at the end.
       used_symbols = @code_used
       length_count = @code_count
+      tails = @code_tails
       lengths_out = @lengths.to_unsafe
-      symbols_out = @code_symbols.to_unsafe
+      lists_out = @code_lists.to_unsafe
       # The bit buffer and input position live in locals while at least
       # 16 input bytes remain (a code length symbol and its extra bits take
       # at most 8 bits); near the end the careful readers take over.
@@ -782,7 +788,9 @@ module Mica::Brotli
           repeat = 0
           if code != 0
             lengths_out[symbol] = code.to_u8!
-            symbols_out[used_symbols] = symbol.to_u16!
+            node = PrefixCode.node(symbol)
+            lists_out[tails.unsafe_fetch(code)] = node
+            tails.unsafe_put(code, node)
             used_symbols &+= 1
             length_count[code] &+= 1
             previous = code
@@ -812,10 +820,13 @@ module Mica::Brotli
         end
         if repeat_length != 0
           length_byte = repeat_length.to_u8!
+          # The run's symbols join their length's list in order.
+          lists_out[tails.unsafe_fetch(repeat_length)] = PrefixCode.node(symbol)
           delta.times do |index|
             lengths_out[symbol &+ index] = length_byte
-            symbols_out[used_symbols &+ index] = (symbol &+ index).to_u16!
+            lists_out[PrefixCode.node(symbol &+ index)] = PrefixCode.node(symbol &+ index &+ 1)
           end
+          tails.unsafe_put(repeat_length, PrefixCode.node(symbol &+ delta &- 1))
           used_symbols &+= delta
           length_count[repeat_length] &+= delta
         end
@@ -827,6 +838,7 @@ module Mica::Brotli
       @in_pos = in_pos
       @code_used = used_symbols
       @code_count = length_count
+      @code_tails = tails
       malformed("Prefix code is not complete") if space != 0
     end
 

@@ -57,50 +57,56 @@ module Mica::Brotli
       end
     end
 
+    # Per-length symbol lists (google/brotli's `symbol_lists`), filled as
+    # code lengths are read so the builder needs no sorting pass. Node
+    # `length` (0 to 15) heads the list of that length; symbol *s* is node
+    # `s + HEADS`. Each node holds the next node of its list.
+    HEADS = 16
+
+    # The node that *symbol* occupies in a symbol list.
+    @[AlwaysInline]
+    def self.node(symbol : Int32) : UInt16
+      (symbol &+ HEADS).to_u16!
+    end
+
     # Appends the table for the code with *lengths* (one entry per symbol
     # of the alphabet, 0 for an unused symbol) to *store* and returns where
-    # it starts. See `build_from_list`.
-    def self.build(lengths : Slice(UInt8), store : Store, sorted : Slice(UInt16), symbols : Slice(UInt16)) : Int32
+    # it starts. *lists* needs `lengths.size + HEADS` entries. See
+    # `build_from_lists`.
+    def self.build(lengths : Slice(UInt8), store : Store, lists : Slice(UInt16)) : Int32
       count = StaticArray(Int32, 16).new(0)
+      tail = StaticArray(UInt16, 16).new { |length| length.to_u16 }
       used = 0
       lengths.each_with_index do |length, symbol|
         next if length == 0
         count[length] += 1
-        symbols[used] = symbol.to_u16
+        lists[tail[length]] = node(symbol)
+        tail[length] = node(symbol)
         used += 1
       end
-      build_from_list(symbols, lengths, used, count, store, sorted)
+      build_from_lists(lists, used, count, store)
     end
 
     # Appends the table for a code to *store* and returns where it starts.
-    # *symbols* lists the first *used* symbols with a nonzero length in
-    # increasing order, *lengths* gives each symbol's length (indexed by
-    # symbol) and *count* the number of symbols of each length. The code
-    # must be complete (the caller has checked the Kraft sum), or have
-    # exactly one used symbol, which then decodes from zero bits. *sorted*
-    # is scratch space of at least *used* entries.
-    def self.build_from_list(symbols : Slice(UInt16), lengths : Slice(UInt8), used : Int32,
-                             count : StaticArray(Int32, 16), store : Store, sorted : Slice(UInt16)) : Int32
+    # *lists* holds, for each code length, its *count* symbols in
+    # increasing order (see `HEADS`); *used* is the number of symbols with
+    # a nonzero length. The code must be complete (the caller has checked
+    # the Kraft sum), or have exactly one used symbol, which then decodes
+    # from zero bits.
+    def self.build_from_lists(lists : Slice(UInt16), used : Int32,
+                              count : StaticArray(Int32, 16), store : Store) : Int32
       start = store.append(ROOT_SIZE)
       if used <= 1
-        entry = used == 1 ? symbols[0].to_u32 << 8 : 0_u32
+        entry = 0_u32
+        if used == 1
+          length = (1..MAX_LENGTH).find { |width| count[width] != 0 } || 0
+          entry = (lists[length].to_u32 &- HEADS) << 8
+        end
         Slice.new(store.to_unsafe + start, ROOT_SIZE).fill(entry)
         return start
       end
 
-      # Symbols sorted by code length, then by value: canonical order.
-      offsets = StaticArray(Int32, 16).new(0)
-      (2..MAX_LENGTH).each { |length| offsets[length] = offsets[length - 1] + count[length - 1] }
-      sorted_out = sorted.to_unsafe
-      used.times do |index|
-        symbol = symbols.unsafe_fetch(index)
-        length = lengths.unsafe_fetch(symbol.to_i32).to_i32
-        slot = offsets.unsafe_fetch(length)
-        sorted_out[slot] = symbol
-        offsets.unsafe_put(length, slot &+ 1)
-      end
-
-      at = 0
+      nodes = lists.to_unsafe
       code = 0
       max_length = MAX_LENGTH
       while max_length > 1 && count[max_length] == 0
@@ -115,14 +121,15 @@ module Mica::Brotli
       table = store.to_unsafe + start
       (1..ROOT_BITS).each do |length|
         step = 1 << length
+        at = length
         count[length].times do
-          entry = (sorted.unsafe_fetch(at).to_u32 << 8) | length.to_u32
+          at = nodes[at].to_i32
+          entry = ((at &- HEADS).to_u32! << 8) | length.to_u32
           index = reverse(code, length)
           while index < table_size
             table[index] = entry
             index += step
           end
-          at += 1
           code += 1
         end
         code <<= 1
@@ -141,7 +148,9 @@ module Mica::Brotli
       sub_size = 0
       (ROOT_BITS + 1..MAX_LENGTH).each do |length|
         step = 1 << (length - ROOT_BITS)
+        at = length
         while count[length] > 0
+          at = nodes[at].to_i32
           reversed = reverse(code, length)
           root = reversed & (ROOT_SIZE - 1)
           if root != low
@@ -151,14 +160,13 @@ module Mica::Brotli
             low = root
             (store.to_unsafe + start)[root] = ((sub_start - start).to_u32 << 8) | (ROOT_BITS + width).to_u32
           end
-          entry = (sorted[at].to_u32 << 8) | (length - ROOT_BITS).to_u32
+          entry = ((at &- HEADS).to_u32! << 8) | (length - ROOT_BITS).to_u32
           index = reversed >> ROOT_BITS
           table = store.to_unsafe + sub_start
           while index < sub_size
             table[index] = entry
             index += step
           end
-          at += 1
           code += 1
           count[length] -= 1
         end
