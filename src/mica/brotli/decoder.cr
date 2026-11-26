@@ -80,6 +80,19 @@ module Mica::Brotli
       ]
     {% end %}
 
+    # The transforms' prefixes and suffixes as whole words for
+    # `write_plain_word`: 16 bytes per transform ID, the prefix (at most
+    # 5 bytes) in the first 8 and the suffix (at most 8) in the last 8,
+    # zero padded.
+    PLAIN_AFFIXES = begin
+      affixes = Bytes.new(Tables::TRANSFORMS.size * 16)
+      Tables::TRANSFORMS.each_with_index do |transform, id|
+        affixes[id * 16, transform.prefix.size].copy_from(transform.prefix)
+        affixes[id * 16 + 8, transform.suffix.size].copy_from(transform.suffix)
+      end
+      affixes
+    end
+
     # Short distance codes 0 to 15 (RFC 7932, section 4): which of the
     # last four distances, and the change to it.
     SHORT_DISTANCE_INDEX = StaticArray[0, 1, 2, 3, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1]
@@ -1208,13 +1221,6 @@ module Mica::Brotli
           return
         end
         if insert > 0
-          if pos > 0
-            p1 = ring[pos &- 1].to_i32!
-            p2 = pos > 1 ? ring[pos &- 2].to_i32 : (@ring_base + pos >= 2 ? ring[@ring_size - 1].to_i32 : 0)
-          else
-            fast_save
-            p1, p2 = last_two_bytes
-          end
           left = insert
           # The literal block's state in locals for the loop.
           block_left = @block_left[0]
@@ -1251,7 +1257,6 @@ module Mica::Brotli
             if fixed_tree >= 0
               # One tree for the whole block: no context. A refill leaves
               # at least 56 bits, enough for three literals.
-              single = run == 1
               while run >= 3
                 fast_refill
                 literal = 0
@@ -1272,14 +1277,15 @@ module Mica::Brotli
                 pos &+= 1
                 run &-= 1
               end
-              if single
-                p2 = p1
-                p1 = ring[pos &- 1].to_i32!
-              else
-                p1 = ring[pos &- 1].to_i32!
-                p2 = ring[pos &- 2].to_i32!
-              end
               next
+            end
+            # The context comes from the last two bytes written.
+            if pos >= 2
+              p1 = ring[pos &- 1].to_i32!
+              p2 = ring[pos &- 2].to_i32!
+            else
+              fast_save
+              p1, p2 = last_two_bytes
             end
             while run > 0
               tree = tree_row[lookup_row[p1] | lookup_row[256 &+ p2]]
@@ -1528,7 +1534,7 @@ module Mica::Brotli
       malformed("Dictionary transform #{transform_id} does not exist") if transform_id >= Tables::TRANSFORMS.size
       offset = Dictionary::OFFSETS_BY_LENGTH[length] + word_index * length
       transform = Tables::TRANSFORMS.unsafe_fetch(transform_id)
-      return if write_plain_word(transform, offset, length)
+      return if write_plain_word(transform, transform_id, offset, length)
       size = apply_transform(transform, Dictionary::DATA.to_unsafe + offset, length)
       malformed("Dictionary word runs past the metablock") if size > @meta_remaining
       if @pos + size <= @out_end
@@ -1552,10 +1558,12 @@ module Mica::Brotli
     end
 
     # Writes a dictionary word whose transform only adds a prefix and a
-    # suffix (kind 0, the common case) straight into the ring, the word in
-    # whole 8-byte words, when it fits before `@out_end`. Returns false,
-    # writing nothing, otherwise.
-    private def write_plain_word(transform : Tables::Transform, offset : Int32, length : Int32) : Bool
+    # suffix (kind 0, the common case) straight into the ring, all in whole
+    # 8-byte words, when it fits before `@out_end`. Returns false, writing
+    # nothing, otherwise. The words reach at most 8 bytes past the
+    # transformed word: into the ring's slack, or into the 16 oldest bytes
+    # of history, which no back reference can reach.
+    private def write_plain_word(transform : Tables::Transform, transform_id : Int32, offset : Int32, length : Int32) : Bool
       return false unless transform.kind == 0
       prefix = transform.prefix
       suffix = transform.suffix
@@ -1566,11 +1574,10 @@ module Mica::Brotli
       # The 8-byte reads stay inside the dictionary.
       return false if offset &+ length &+ 8 > data.size
       destination = @ring.to_unsafe + @pos
-      index = 0
-      while index < prefix.size
-        destination[index] = prefix.unsafe_fetch(index)
-        index &+= 1
-      end
+      affixes = PLAIN_AFFIXES.to_unsafe + (transform_id << 4)
+      # The prefix word; the word below overwrites its padding (a
+      # dictionary word is at least 4 bytes, copied as at least 8).
+      destination.as(UInt64*).value = affixes.as(UInt64*).value
       destination += prefix.size
       source = data.to_unsafe + offset
       at = 0
@@ -1579,11 +1586,7 @@ module Mica::Brotli
         at &+= 8
       end
       destination += length
-      index = 0
-      while index < suffix.size
-        destination[index] = suffix.unsafe_fetch(index)
-        index &+= 1
-      end
+      (destination.as(UInt64*)).value = (affixes + 8).as(UInt64*).value
       @pos &+= size
       @meta_remaining &-= size
       @stage = Stage::Command
