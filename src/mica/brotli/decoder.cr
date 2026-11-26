@@ -191,8 +191,6 @@ module Mica::Brotli
     @literal_map : Bytes = Bytes.new(64 * 256)
     @distance_map : Bytes = Bytes.new(4 * 256)
     @literal_trees = [] of Int32
-    # Per literal tree: whether its codes are at most 14 bits long.
-    @literal_tree_short = [] of Bool
     @command_trees = [] of Int32
     @distance_trees = [] of Int32
     @table = PrefixCode::Store.new
@@ -241,10 +239,6 @@ module Mica::Brotli
     # Per literal block type: the tree its whole context map row names, or
     # -1 when the row names more than one (worked out once per header).
     @fixed_tree_by_type = StaticArray(Int32, 256).new(-1)
-    # Per literal block type with a fixed tree: whether that tree's codes
-    # are at most 14 bits long (four fit in the 56 bits a refill leaves).
-    @fixed_short_by_type = StaticArray(Bool, 256).new(false)
-    @literal_tree_fixed_short : Bool = false
     # The context maps resolved to table offsets: per literal block type
     # and context, and per distance block type and context, the start of
     # the tree that context selects (one load fewer per symbol).
@@ -590,11 +584,7 @@ module Mica::Brotli
       read_context_map(@distance_map, 4 * @num_types[2], distance_trees)
 
       @literal_trees.clear
-      @literal_tree_short.clear
-      literal_trees.times do
-        @literal_trees << read_prefix_code(LITERAL_CODES, LITERAL_CODES)
-        @literal_tree_short << (@code_count[15] == 0)
-      end
+      literal_trees.times { @literal_trees << read_prefix_code(LITERAL_CODES, LITERAL_CODES) }
       @command_trees.clear
       @num_types[1].times { @command_trees << read_prefix_code(COMMAND_CODES, COMMAND_CODES) }
       distance_alphabet = 16 + @direct_codes + (48 << @postfix_bits)
@@ -924,7 +914,6 @@ module Mica::Brotli
       @context_lookup_offset = @context_modes[block_type].to_i32 << 9
       @literal_map_offset = block_type << 6
       @literal_tree_fixed = @fixed_tree_by_type.unsafe_fetch(block_type)
-      @literal_tree_fixed_short = @fixed_short_by_type.unsafe_fetch(block_type)
     end
 
     # Fills `@literal_tree_map` and `@fixed_tree_by_type` for the *types*
@@ -944,7 +933,6 @@ module Mica::Brotli
           same = false unless (row + (word << 3)).as(UInt64*).value == pattern
         end
         @fixed_tree_by_type[block_type] = same ? @literal_trees.unsafe_fetch(row[0].to_i32) : -1
-        @fixed_short_by_type[block_type] = same && @literal_tree_short.unsafe_fetch(row[0].to_i32)
       end
     end
 
@@ -1275,7 +1263,6 @@ module Mica::Brotli
           # The literal block's state in locals for the loop.
           block_left = @block_left[0]
           fixed_tree = @literal_tree_fixed
-          fixed_short = @literal_tree_fixed_short
           lookup_row = lookup + @context_lookup_offset
           tree_row = @literal_tree_map.to_unsafe + @literal_map_offset
           while left > 0
@@ -1291,7 +1278,6 @@ module Mica::Brotli
               select_literal_block
               block_left = @block_left[0]
               fixed_tree = @literal_tree_fixed
-              fixed_short = @literal_tree_fixed_short
               lookup_row = lookup + @context_lookup_offset
               tree_row = @literal_tree_map.to_unsafe + @literal_map_offset
               next
@@ -1307,24 +1293,7 @@ module Mica::Brotli
             left &-= run
             if fixed_tree >= 0
               # One tree for the whole block: no context. A refill leaves
-              # at least 56 bits: four literals of at most 14 bits, or
-              # three of at most 15.
-              if fixed_short
-                while run >= 4
-                  fast_refill
-                  literal = 0
-                  fast_symbol(fixed_tree, literal)
-                  ring[pos] = literal.to_u8!
-                  fast_symbol(fixed_tree, literal)
-                  ring[pos &+ 1] = literal.to_u8!
-                  fast_symbol(fixed_tree, literal)
-                  ring[pos &+ 2] = literal.to_u8!
-                  fast_symbol(fixed_tree, literal)
-                  ring[pos &+ 3] = literal.to_u8!
-                  pos &+= 4
-                  run &-= 4
-                end
-              end
+              # at least 56 bits, enough for three literals.
               while run >= 3
                 fast_refill
                 literal = 0
