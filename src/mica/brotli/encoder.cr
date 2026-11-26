@@ -22,10 +22,21 @@ module Mica::Brotli
   #
   # :nodoc:
   class Encoder
+    # Whether qualities 5 and 6 keep a tag byte per slot (google/brotli
+    # 1.2.1's H58 and H68) or search the bucket untagged (H5 and H6, as
+    # libbrotlienc 1.1.0 does): the same matches in the same order, so the
+    # same output. Tags pay off where SSE2 compares sixteen at once
+    # (x86-64); elsewhere the untagged search is faster.
+    {% if flag?(:x86_64) %}
+      TAGGED_SHORT_BUCKETS = 1
+    {% else %}
+      TAGGED_SHORT_BUCKETS = 0
+    {% end %}
+
     # The hasher of each quality from 5 to 9: bytes hashed (5 for inputs
     # of 1 MiB and more), tagged, bucket bits and block bits.
-    alias Hasher = Encode::LongestMatchHasher(4, 1, 14, 4) | Encode::LongestMatchHasher(5, 1, 15, 4) |
-                   Encode::LongestMatchHasher(4, 1, 14, 5) | Encode::LongestMatchHasher(5, 1, 15, 5) |
+    alias Hasher = Encode::LongestMatchHasher(4, TAGGED_SHORT_BUCKETS, 14, 4) | Encode::LongestMatchHasher(5, TAGGED_SHORT_BUCKETS, 15, 4) |
+                   Encode::LongestMatchHasher(4, TAGGED_SHORT_BUCKETS, 14, 5) | Encode::LongestMatchHasher(5, TAGGED_SHORT_BUCKETS, 15, 5) |
                    Encode::LongestMatchHasher(4, 0, 15, 6) | Encode::LongestMatchHasher(5, 0, 15, 6) |
                    Encode::LongestMatchHasher(4, 0, 15, 7) | Encode::LongestMatchHasher(5, 0, 15, 7) |
                    Encode::LongestMatchHasher(4, 0, 15, 8) | Encode::LongestMatchHasher(5, 0, 15, 8)
@@ -192,8 +203,8 @@ module Mica::Brotli
 
     private def new_hasher(large : Bool, last_distances : Int32) : Hasher
       case @quality
-      when 5 then large ? Encode::LongestMatchHasher(5, 1, 15, 4).new(last_distances) : Encode::LongestMatchHasher(4, 1, 14, 4).new(last_distances)
-      when 6 then large ? Encode::LongestMatchHasher(5, 1, 15, 5).new(last_distances) : Encode::LongestMatchHasher(4, 1, 14, 5).new(last_distances)
+      when 5 then large ? Encode::LongestMatchHasher(5, TAGGED_SHORT_BUCKETS, 15, 4).new(last_distances) : Encode::LongestMatchHasher(4, TAGGED_SHORT_BUCKETS, 14, 4).new(last_distances)
+      when 6 then large ? Encode::LongestMatchHasher(5, TAGGED_SHORT_BUCKETS, 15, 5).new(last_distances) : Encode::LongestMatchHasher(4, TAGGED_SHORT_BUCKETS, 14, 5).new(last_distances)
       when 7 then large ? Encode::LongestMatchHasher(5, 0, 15, 6).new(last_distances) : Encode::LongestMatchHasher(4, 0, 15, 6).new(last_distances)
       when 8 then large ? Encode::LongestMatchHasher(5, 0, 15, 7).new(last_distances) : Encode::LongestMatchHasher(4, 0, 15, 7).new(last_distances)
       else        large ? Encode::LongestMatchHasher(5, 0, 15, 8).new(last_distances) : Encode::LongestMatchHasher(4, 0, 15, 8).new(last_distances)
