@@ -91,6 +91,11 @@ module Mica::Brotli::Encode
         n = 0
         i = length
         while i != 0
+          # Two zero counts at a time: most of a short input's alphabet.
+          if i >= 2 && (data + (i &- 2)).as(UInt64*).value == 0
+            i &-= 2
+            next
+          end
           i &-= 1
           if data[i] != 0
             tree[n] = HuffmanNode.new(Math.max(data[i], count_limit), -1_i16, i.to_i16)
@@ -288,8 +293,10 @@ module Mica::Brotli::Encode
     def self.write_huffman_tree(depth : UInt8*, length : Int32, tree : UInt8*, extra : UInt8*) : Int32
       previous = INITIAL_REPEATED_LENGTH.to_u8!
       new_length = length
-      length.times do |i|
-        break unless depth[length &- i &- 1] == 0
+      while new_length >= 8 && Encode.load64(depth + (new_length &- 8)) == 0
+        new_length &-= 8
+      end
+      while new_length > 0 && depth[new_length &- 1] == 0
         new_length &-= 1
       end
       use_rle_for_non_zero = false
@@ -340,28 +347,62 @@ module Mica::Brotli::Encode
       size
     end
 
+    {% if flag?(:x86_64) %}
+      # Each byte value with its bits reversed: x86-64 has no bit-reverse
+      # instruction, and two lookups beat the shift-and-mask expansion.
+      REVERSED_BYTES = begin
+        table = StaticArray(UInt8, 256).new(0_u8)
+        256.times { |value| table[value] = value.to_u8!.bit_reverse }
+        table
+      end
+    {% end %}
+
     # The low *num_bits* (1 to 16) of *bits* in reverse order.
     @[AlwaysInline]
     private def self.reverse_bits(num_bits : Int32, bits : UInt16) : UInt16
-      bits.to_u32!.bit_reverse.unsafe_shr(32 &- num_bits).to_u16!
+      {% if flag?(:x86_64) %}
+        reversed = (REVERSED_BYTES.unsafe_fetch(bits & 0xFF).to_u32! << 8) | REVERSED_BYTES.unsafe_fetch(bits >> 8)
+        reversed.unsafe_shr(16 &- num_bits).to_u16!
+      {% else %}
+        bits.to_u32!.bit_reverse.unsafe_shr(32 &- num_bits).to_u16!
+      {% end %}
     end
 
     # Canonical codes for `depth[0, length]`, bit-reversed for writing.
+    # Runs of eight zero depths (most of a short input's alphabets) are
+    # skipped a word at a time.
     def self.convert_bit_depths_to_symbols(depth : UInt8*, length : Int32, bits : UInt16*) : Nil
-      bl_count = StaticArray(UInt16, 16).new(0_u16)
-      next_code = StaticArray(UInt16, 16).new(0_u16)
-      length.times { |i| bl_count[depth[i]] &+= 1 }
+      counts = StaticArray(UInt16, 16).new(0_u16)
+      codes = StaticArray(UInt16, 16).new(0_u16)
+      bl_count = counts.to_unsafe
+      next_code = codes.to_unsafe
+      i = 0
+      while i < length
+        if i &+ 8 <= length && Encode.load64(depth + i) == 0
+          i &+= 8
+          next
+        end
+        bl_count[depth[i] & 15] &+= 1
+        i &+= 1
+      end
       bl_count[0] = 0_u16
       code = 0
-      (1...16).each do |i|
-        code = (code &+ bl_count[i &- 1]) << 1
-        next_code[i] = code.to_u16!
+      (1...16).each do |k|
+        code = (code &+ bl_count[k &- 1]) << 1
+        next_code[k] = code.to_u16!
       end
-      length.times do |i|
-        d = depth[i]
-        next if d == 0
-        bits[i] = reverse_bits(d.to_i32!, next_code[d])
-        next_code[d] &+= 1
+      i = 0
+      while i < length
+        if i &+ 8 <= length && Encode.load64(depth + i) == 0
+          i &+= 8
+          next
+        end
+        d = depth[i] & 15
+        if d != 0
+          bits[i] = reverse_bits(d.to_i32!, next_code[d])
+          next_code[d] &+= 1
+        end
+        i &+= 1
       end
     end
 
@@ -441,14 +482,21 @@ module Mica::Brotli::Encode
                              depth : UInt8*, bits : UInt16*, writer : BitWriter) : Nil
       count = 0
       s4 = StaticArray(Int32, 4).new(0)
-      length.times do |i|
-        next if histogram[i] == 0
-        if count < 4
-          s4[count] = i
-        elsif count > 4
-          break
+      i = 0
+      while i < length
+        if i &+ 2 <= length && (histogram + i).as(UInt64*).value == 0
+          i &+= 2
+          next
         end
-        count &+= 1
+        if histogram[i] != 0
+          if count < 4
+            s4[count] = i
+          elsif count > 4
+            break
+          end
+          count &+= 1
+        end
+        i &+= 1
       end
       max_bits = 0
       counter = alphabet_size &- 1

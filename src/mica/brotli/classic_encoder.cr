@@ -62,7 +62,9 @@ module Mica::Brotli
       encoder = new(quality, window_bits, Math.max(input.size, 1))
       writer = BitWriter.new(input.size // 2 + 64)
       encoder.encode_block(writer, input, 0, input.size, 0_i64, is_last: true)
-      writer.to_slice.dup
+      encoded = writer.to_slice.dup
+      writer.release
+      encoded
     end
 
     # Encodes `input[start, length]` as metablocks; `input[0, start]` is

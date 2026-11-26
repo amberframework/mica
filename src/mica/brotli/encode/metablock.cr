@@ -53,7 +53,12 @@ module Mica::Brotli::Encode
     def add_histogram(to : Int, source : HistogramSet, from : Int) : Nil
       target = self[to]
       other = source[from]
-      @data_size.times { |symbol| target[symbol] &+= other[symbol] }
+      size = @data_size
+      symbol = 0
+      while symbol < size
+        target[symbol] &+= other[symbol]
+        symbol &+= 1
+      end
       @totals[to] &+= source.totals[from]
     end
 
@@ -144,6 +149,48 @@ module Mica::Brotli::Encode
       @histograms.add(@current &+ context, symbol)
       @block_size &+= 1
       finish_block(false) if @block_size == @target_block_size
+    end
+
+    # Adds `symbols[0, count]` with no context: `add` for each, with the
+    # histogram held in a local between block ends.
+    def add_run(symbols : UInt8*, count : Int32) : Nil
+      while count > 0
+        chunk = Math.min(count, @target_block_size &- @block_size)
+        histogram = @histograms[@current]
+        chunk.times { |k| histogram[symbols[k]] &+= 1 }
+        @histograms.totals.to_unsafe[@current] &+= chunk
+        @block_size &+= chunk
+        symbols += chunk
+        count &-= chunk
+        finish_block(false) if @block_size == @target_block_size
+      end
+    end
+
+    # Adds the *count* literals at `data[position]`, each with the static
+    # context of the two bytes before it (from *context_map* over *lut*);
+    # returns those two bytes after the last literal.
+    def add_context_run(data : UInt8*, position : Int32, count : Int32, previous_byte : UInt8, previous_byte2 : UInt8,
+                        context_map : UInt32*, lut : UInt8*) : {UInt8, UInt8}
+      totals = @histograms.totals.to_unsafe
+      data_size = @histograms.data_size
+      while count > 0
+        chunk = Math.min(count, @target_block_size &- @block_size)
+        current = @current
+        base = @histograms[current]
+        chunk.times do
+          byte = data[position]
+          context = context_map[lut[previous_byte] | lut[256 &+ previous_byte2]].to_i32!
+          base[context &* data_size &+ byte] &+= 1
+          totals[current &+ context] &+= 1
+          previous_byte2 = previous_byte
+          previous_byte = byte
+          position &+= 1
+        end
+        @block_size &+= chunk
+        count &-= chunk
+        finish_block(false) if @block_size == @target_block_size
+      end
+      {previous_byte, previous_byte2}
     end
 
     def finish_block(is_final : Bool) : Nil
@@ -351,20 +398,14 @@ module Mica::Brotli::Encode
       commands.size.times do |i|
         entry = commands[i]
         command.add(entry.command_prefix)
+        inserted = entry.insert_length.to_i32!
         if num_contexts == 1
-          entry.insert_length.times do
-            literal.add(data[position])
-            position &+= 1
-          end
+          literal.add_run(data + position, inserted)
         else
-          entry.insert_length.times do
-            byte = data[position]
-            literal.add(byte, static_context_map[lut[previous_byte] | lut[256 &+ previous_byte2]])
-            previous_byte2 = previous_byte
-            previous_byte = byte
-            position &+= 1
-          end
+          previous_byte, previous_byte2 = literal.add_context_run(data, position, inserted, previous_byte,
+            previous_byte2, static_context_map, lut)
         end
+        position &+= inserted
         copy = entry.copy_length.to_i32!
         position &+= copy
         if copy != 0
@@ -405,7 +446,7 @@ module Mica::Brotli::Encode
       best = params
       best_cost = 1e99
       check_original = true
-      scratch = HistogramSet.new(NUM_HISTOGRAM_DISTANCES, 1)
+      scratch = HistogramSet.new(NUM_HISTOGRAM_DISTANCES, 1, arena)
       direct_msb = 0
       4.times do |postfix|
         while direct_msb < 16
@@ -426,15 +467,15 @@ module Mica::Brotli::Encode
         best = original if cost && cost < best_cost
       end
       recompute_distance_prefixes(commands, original, best)
-      literal_split, command_split, distance_split = BlockSplitter.split_block(commands, data, position, quality)
-      literal_histograms = HistogramSet.new(NUM_LITERAL_SYMBOLS, literal_split.num_types << LITERAL_CONTEXT_BITS)
+      literal_split, command_split, distance_split = BlockSplitter.split_block(commands, data, position, quality, arena)
+      literal_histograms = HistogramSet.new(NUM_LITERAL_SYMBOLS, literal_split.num_types << LITERAL_CONTEXT_BITS, arena)
       command_histograms = HistogramSet.new(NUM_COMMAND_SYMBOLS, command_split.num_types, arena)
-      distance_histograms = HistogramSet.new(NUM_HISTOGRAM_DISTANCES, distance_split.num_types << DISTANCE_CONTEXT_BITS)
+      distance_histograms = HistogramSet.new(NUM_HISTOGRAM_DISTANCES, distance_split.num_types << DISTANCE_CONTEXT_BITS, arena)
       build_histograms_with_context(commands, literal_split, command_split, distance_split, data, position,
         previous_byte, previous_byte2, literal_context_mode, literal_histograms, command_histograms,
         distance_histograms)
-      literal_clusters, literal_map = Cluster.cluster_histograms(literal_histograms, 256)
-      distance_clusters, distance_map = Cluster.cluster_histograms(distance_histograms, 256)
+      literal_clusters, literal_map = Cluster.cluster_histograms(literal_histograms, 256, arena)
+      distance_clusters, distance_map = Cluster.cluster_histograms(distance_histograms, 256, arena)
       metablock = MetaBlock.new(literal_split, command_split, distance_split, literal_clusters, command_histograms,
         distance_clusters)
       metablock.literal_context_map = literal_map

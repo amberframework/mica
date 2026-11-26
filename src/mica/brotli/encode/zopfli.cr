@@ -64,68 +64,66 @@ module Mica::Brotli::Encode
       (Encode.load32(data) &* HASH_MUL32) >> (32 - BUCKET_BITS)
     end
 
-    @[AlwaysInline]
-    private def left_child(position : UInt32) : UInt32
-      2_u32 &* (position & @window_mask)
-    end
-
-    @[AlwaysInline]
-    private def right_child(position : UInt32) : UInt32
-      2_u32 &* (position & @window_mask) &+ 1
-    end
-
     # Walks the bucket's tree for matches at *position* (when *matches* is
     # given) and re-roots the tree there when 128 bytes follow it.
     private def store_and_find_matches(data : UInt8*, position : Int32, max_length : Int32, max_backward : Int32,
                                        best_length : Int32, matches : Pointer(BackwardMatch), count : Int32) : {Int32, Int32}
-      current = position.to_u32
+      current = position.to_u32!
       max_comp_length = Math.min(max_length, MAX_TREE_COMP_LENGTH)
       reroot = max_length >= MAX_TREE_COMP_LENGTH
+      # Locals, not fields: the forest stores cannot then force reloads.
+      forest = @forest
+      window_mask = @window_mask
+      invalid_position = @invalid_position
+      max_backward_distance = max_backward.to_u32!
       key = hash_bytes(data + position)
       previous = @buckets[key]
-      node_left = left_child(current)
-      node_right = right_child(current)
+      node_left = 2_u32 &* (current & window_mask)
+      node_right = node_left &+ 1
       best_length_left = 0
       best_length_right = 0
       @buckets[key] = current if reroot
       depth_remaining = MAX_TREE_SEARCH_DEPTH
+      here = data + position
       loop do
         backward = current &- previous
-        if backward == 0 || backward > max_backward.to_u32 || depth_remaining == 0
+        if backward == 0 || backward > max_backward_distance || depth_remaining == 0
           if reroot
-            @forest[node_left] = @invalid_position
-            @forest[node_right] = @invalid_position
+            forest[node_left] = invalid_position
+            forest[node_right] = invalid_position
           end
           break
         end
-        previous_position = previous.to_i32
+        candidate = data + previous
         current_length = Math.min(best_length_left, best_length_right)
-        length = current_length + Encode.match_length(data + position + current_length,
-          data + previous_position + current_length, max_length - current_length)
+        length = current_length &+ Encode.match_length(here + current_length, candidate + current_length,
+          max_length &- current_length)
         if !matches.null? && length > best_length
           best_length = length
-          matches[count] = BackwardMatch.new(backward, (length << 5).to_u32)
-          count += 1
+          matches[count] = BackwardMatch.new(backward, (length << 5).to_u32!)
+          count &+= 1
         end
         if length >= max_comp_length
           if reroot
-            @forest[node_left] = @forest[left_child(previous)]
-            @forest[node_right] = @forest[right_child(previous)]
+            previous_left = 2_u32 &* (previous & window_mask)
+            forest[node_left] = forest[previous_left]
+            forest[node_right] = forest[previous_left &+ 1]
           end
           break
         end
-        if data[position + length] > data[previous_position + length]
+        previous_left = 2_u32 &* (previous & window_mask)
+        if here[length] > candidate[length]
           best_length_left = length
-          @forest[node_left] = previous if reroot
-          node_left = right_child(previous)
-          previous = @forest[node_left]
+          forest[node_left] = previous if reroot
+          node_left = previous_left &+ 1
+          previous = forest[node_left]
         else
           best_length_right = length
-          @forest[node_right] = previous if reroot
-          node_right = left_child(previous)
-          previous = @forest[node_right]
+          forest[node_right] = previous if reroot
+          node_right = previous_left
+          previous = forest[node_right]
         end
-        depth_remaining -= 1
+        depth_remaining &-= 1
       end
       {best_length, count}
     end
@@ -140,23 +138,24 @@ module Mica::Brotli::Encode
       count = 0
       best_length = 1
       short_match_max_backward = quality != 11 ? 16 : 64
-      stop = position - short_match_max_backward
+      stop = position &- short_match_max_backward
       stop = 0 if position < short_match_max_backward
       current = data + position
-      i = position - 1
+      first_two = (current.as(UInt16*)).value
+      i = position &- 1
       while i > stop && best_length <= 2
-        backward = position - i
+        backward = position &- i
         break if backward > max_backward
         previous = data + i
-        if current[0] == previous[0] && current[1] == previous[1]
+        if previous.as(UInt16*).value == first_two
           length = Encode.match_length(previous, current, max_length)
           if length > best_length
             best_length = length
-            matches[count] = BackwardMatch.new(backward.to_u32, (length << 5).to_u32)
-            count += 1
+            matches[count] = BackwardMatch.new(backward.to_u32!, (length << 5).to_u32!)
+            count &+= 1
           end
         end
-        i -= 1
+        i &-= 1
       end
       if best_length < max_length
         best_length, count = store_and_find_matches(data, position, max_length, max_backward, best_length, matches, count)
@@ -211,6 +210,53 @@ module Mica::Brotli::Encode
     end
   end
 
+  # The matches of every position of a block, in a buffer outside the
+  # collector (it can reach megabytes); `release` frees it.
+  class MatchList
+    getter size = 0
+    @capacity : Int32
+    @buffer : Pointer(BackwardMatch)
+
+    def initialize(capacity : Int32)
+      @capacity = Math.max(capacity, 16)
+      @buffer = Encode.table(BackwardMatch, @capacity)
+    end
+
+    def finalize
+      release
+    end
+
+    def release : Nil
+      @buffer = Encode.free_table(@buffer)
+      @capacity = 0
+      @size = 0
+    end
+
+    # Makes room for *extra* more matches.
+    def reserve(extra : Int32) : Nil
+      needed = @size &+ extra
+      return if needed <= @capacity
+      capacity = Math.max(needed, @capacity &* 2)
+      grown = Encode.table(BackwardMatch, capacity)
+      grown.copy_from(@buffer, @size)
+      Encode.free_table(@buffer)
+      @buffer = grown
+      @capacity = capacity
+    end
+
+    # Appends *match*; `reserve` made room.
+    @[AlwaysInline]
+    def <<(match : BackwardMatch) : self
+      @buffer[@size] = match
+      @size &+= 1
+      self
+    end
+
+    def to_unsafe : Pointer(BackwardMatch)
+      @buffer
+    end
+  end
+
   # The optimal parse of qualities 10 and 11 (google/brotli's
   # backward_references_hq.c): a shortest path over byte positions where
   # each edge is a command costed by a histogram model.
@@ -221,6 +267,9 @@ module Mica::Brotli::Encode
     LONG_COPY_QUICK_STEP  =      16384
     DISTANCE_CACHE_INDEX  = StaticArray[0, 1, 2, 3, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1]
     DISTANCE_CACHE_OFFSET = StaticArray[0, 0, 0, 0, -1, 1, -2, 2, -3, 3, -1, 1, -2, 2, -3, 3]
+    # INSERT_EXTRA and COPY_EXTRA as the Float32 the cost sums add.
+    INSERT_EXTRA_COST = INSERT_EXTRA.map(&.to_f32)
+    COPY_EXTRA_COST   = COPY_EXTRA.map(&.to_f32)
 
     # One position of the path: the best command reaching it. *length*
     # holds the copy length and, above bit 25, 9 + length - length code;
@@ -280,20 +329,25 @@ module Mica::Brotli::Encode
 
       def push(data : PositionData) : Nil
         offset = ~@index & 7
-        @index += 1
+        @index &+= 1
         length = size
-        @queue[offset] = data
+        queue = @queue.to_unsafe
+        queue[offset] = data
         (1...length).each do
-          if @queue[offset & 7].cost_diff > @queue[(offset + 1) & 7].cost_diff
-            @queue[offset & 7], @queue[(offset + 1) & 7] = @queue[(offset + 1) & 7], @queue[offset & 7]
+          here = queue + (offset & 7)
+          after = queue + ((offset &+ 1) & 7)
+          if here.value.cost_diff > after.value.cost_diff
+            swapped = here.value
+            here.value = after.value
+            after.value = swapped
           end
-          offset += 1
+          offset &+= 1
         end
       end
 
       @[AlwaysInline]
       def at(k : Int32) : PositionData
-        @queue[(k - @index) & 7]
+        @queue.unsafe_fetch((k &- @index) & 7)
       end
     end
 
@@ -305,9 +359,21 @@ module Mica::Brotli::Encode
       getter literal_costs : Slice(Float32)
       getter min_command_cost = 0_f32
 
+      # The literal costs live outside the collector (four bytes per input
+      # byte); `release` frees them.
       def initialize(distance_alphabet : Int32, @num_bytes : Int32)
         @distance_costs = Slice(Float32).new(distance_alphabet, 0_f32)
-        @literal_costs = Slice(Float32).new(@num_bytes + 2, 0_f32)
+        @literal_costs = Slice.new(Encode.table(Float32, @num_bytes &+ 2), @num_bytes &+ 2)
+        @literal_costs.fill(0_f32)
+      end
+
+      def finalize
+        release
+      end
+
+      def release : Nil
+        Encode.free_table(@literal_costs.to_unsafe) unless @literal_costs.empty?
+        @literal_costs = Slice(Float32).empty
       end
 
       @[AlwaysInline]
@@ -381,10 +447,10 @@ module Mica::Brotli::Encode
     @[AlwaysInline]
     private def self.update_node(nodes : Node*, pos : Int32, start : Int32, length : Int32, length_code : Int32,
                                  distance : UInt32, short_code : Int32, cost : Float32) : Nil
-      node = nodes + pos + length
-      node.value.length = (length.to_u32 | ((length + 9 - length_code).to_u32 << 25))
+      node = nodes + (pos &+ length)
+      node.value.length = length.to_u32! | ((length &+ 9 &- length_code).to_u32! << 25)
       node.value.distance = distance
-      node.value.dcode_insert_length = (short_code.to_u32 << 27) | (pos - start).to_u32
+      node.value.dcode_insert_length = (short_code.to_u32! << 27) | (pos &- start).to_u32!
       node.value.cost = cost
     end
 
@@ -393,12 +459,12 @@ module Mica::Brotli::Encode
       length = 2
       next_length_bucket = 4
       next_length_offset = 10
-      while pos + length <= num_bytes && nodes[pos + length].cost <= min_cost
-        length += 1
+      while pos &+ length <= num_bytes && nodes[pos &+ length].cost <= min_cost
+        length &+= 1
         if length == next_length_offset
           min_cost += 1_f32
-          next_length_offset += next_length_bucket
-          next_length_bucket *= 2
+          next_length_offset &+= next_length_bucket
+          next_length_bucket &*= 2
         end
       end
       length
@@ -407,33 +473,34 @@ module Mica::Brotli::Encode
     private def self.compute_distance_shortcut(block_start : Int64, pos : Int32, max_backward_limit : Int32,
                                                nodes : Node*) : UInt32
       node = nodes[pos]
-      c_len = node.copy_length.to_i64
-      i_len = node.insert_length.to_i64
-      dist = node.distance.to_i64
+      c_len = node.copy_length.to_i64!
+      i_len = node.insert_length.to_i64!
+      dist = node.distance.to_i64!
       if pos == 0
         0_u32
-      elsif dist + c_len <= block_start + pos && dist <= max_backward_limit && node.distance_code > 0
-        pos.to_u32
+      elsif dist &+ c_len <= block_start &+ pos && dist <= max_backward_limit && node.distance_code > 0
+        pos.to_u32!
       else
-        nodes[pos - c_len - i_len].link
+        nodes[pos.to_i64! &- c_len &- i_len].link
       end
     end
 
     private def self.compute_distance_cache(pos : Int32, starting_cache : Int32*, nodes : Node*) : StaticArray(Int32, 4)
       cache = StaticArray(Int32, 4).new(0)
+      slots = cache.to_unsafe
       index = 0
-      p = nodes[pos].link.to_i32
+      p = nodes[pos].link.to_i32!
       while index < 4 && p > 0
         node = nodes[p]
-        cache[index] = node.distance.to_i32!
-        index += 1
-        p = nodes[p - node.copy_length.to_i32 - node.insert_length.to_i32].link.to_i32
+        slots[index] = node.distance.to_i32!
+        index &+= 1
+        p = nodes[p &- node.copy_length.to_i32! &- node.insert_length.to_i32!].link.to_i32!
       end
       start = 0
       while index < 4
-        cache[index] = starting_cache[start]
-        start += 1
-        index += 1
+        slots[index] = starting_cache[start]
+        start &+= 1
+        index &+= 1
       end
       cache
     end
@@ -454,81 +521,104 @@ module Mica::Brotli::Encode
                                   params : DistanceParams, max_backward_limit : Int32, stream_offset : Int64,
                                   starting_cache : Int32*, num_matches : Int32, matches : Pointer(BackwardMatch),
                                   model : CostModel, queue : StartPositionQueue, nodes : Node*) : Int32
-      cur_ix = block_start + pos
+      cur_ix = block_start &+ pos
       max_distance = Math.min(cur_ix, max_backward_limit)
-      dictionary_start = Math.min(cur_ix.to_i64 + stream_offset, max_backward_limit.to_i64).to_i32
-      max_length = num_bytes - pos
+      dictionary_start = Math.min(cur_ix.to_i64! &+ stream_offset, max_backward_limit.to_i64!).to_i32!
+      max_length = num_bytes &- pos
       max_zopfli_length = quality <= 10 ? MAX_ZOPFLI_LENGTH_10 : MAX_ZOPFLI_LENGTH_11
       max_iters = quality <= 10 ? 1 : 5
+      direct_codes = params.direct_codes
+      postfix_bits = params.postfix_bits
+      # Locals, not fields: the node stores below cannot then force reloads.
+      command_costs = model.command_costs.to_unsafe
+      distance_costs = model.distance_costs.to_unsafe
+      literal_costs = model.literal_costs.to_unsafe
       result = 0
-      evaluate_node(block_start + stream_offset, pos, max_backward_limit, starting_cache, model, queue, nodes)
+      evaluate_node(block_start.to_i64! &+ stream_offset, pos, max_backward_limit, starting_cache, model, queue, nodes)
       first = queue.at(0)
-      min_cost = first.cost + model.min_command_cost + model.literal_costs(first.position, pos)
+      min_cost = first.cost + model.min_command_cost + (literal_costs[pos] - literal_costs[first.position])
       min_length = compute_minimum_copy_length(min_cost, nodes, num_bytes, pos)
       current = data + cur_ix
+      queue_size = queue.size
       k = 0
-      while k < max_iters && k < queue.size
+      while k < max_iters && k < queue_size
         posdata = queue.at(k)
         start = posdata.position
-        insert_code = Encode.insert_length_code((pos - start).to_u32)
+        insert_code = Encode.insert_length_code((pos &- start).to_u32!)
         start_costdiff = posdata.cost_diff
-        base_cost = start_costdiff + INSERT_EXTRA[insert_code].to_f32 + model.literal_costs(0, pos)
-        best_length = min_length - 1
+        base_cost = start_costdiff + INSERT_EXTRA_COST.unsafe_fetch(insert_code) + (literal_costs[pos] - literal_costs[0])
+        distance_cache = posdata.distance_cache
+        best_length = min_length &- 1
         j = 0
         while j < NUM_DISTANCE_SHORT_CODES && best_length < max_length
-          backward = posdata.distance_cache[DISTANCE_CACHE_INDEX[j]].to_i64 + DISTANCE_CACHE_OFFSET[j]
-          j_current = j
-          j += 1
+          backward = distance_cache.unsafe_fetch(DISTANCE_CACHE_INDEX.unsafe_fetch(j)).to_i64! &+
+                     DISTANCE_CACHE_OFFSET.unsafe_fetch(j)
+          short_code = j
+          j &+= 1
           next if backward > dictionary_start
           next unless backward <= max_distance
           next if backward <= 0
           previous = current - backward
-          continuation = current[best_length]
-          next if continuation != previous[best_length]
+          next if current[best_length] != previous[best_length]
           length = Encode.match_length(previous, current, max_length)
-          dist_cost = base_cost + model.distance_costs.to_unsafe[j_current]
-          l = best_length + 1
+          dist_cost = base_cost + distance_costs[short_code]
+          l = best_length &+ 1
           while l <= length
-            copy_code = Encode.copy_length_code(l.to_u32)
-            command_code = Encode.combine_length_codes(insert_code, copy_code, j_current == 0)
-            cost = (command_code < 128 ? base_cost : dist_cost) + COPY_EXTRA[copy_code].to_f32 +
-                   model.command_costs.to_unsafe[command_code]
-            if cost < nodes[pos + l].cost
-              update_node(nodes, pos, start, l, l, backward.to_u32, j_current + 1, cost)
+            copy_code = Encode.copy_length_code(l.to_u32!)
+            command_code = Encode.combine_length_codes(insert_code, copy_code, short_code == 0)
+            cost = (command_code < 128 ? base_cost : dist_cost) + COPY_EXTRA_COST.unsafe_fetch(copy_code) +
+                   command_costs[command_code]
+            if cost < nodes[pos &+ l].cost
+              update_node(nodes, pos, start, l, l, backward.to_u32!, short_code &+ 1, cost)
               result = l if l > result
             end
             best_length = l
-            l += 1
+            l &+= 1
           end
         end
         if k >= 2
-          k += 1
+          k &+= 1
           next
         end
         length = min_length
-        num_matches.times do |m|
+        m = 0
+        while m < num_matches
           match = matches[m]
+          m &+= 1
           dist = match.distance
-          dictionary_match = dist.to_i64 > dictionary_start
-          dist_symbol, _ = Encode.prefix_encode_distance(dist &+ NUM_DISTANCE_SHORT_CODES &- 1, params.direct_codes, params.postfix_bits)
-          dist_cost = base_cost + (dist_symbol >> 10).to_f32 + model.distance_costs.to_unsafe[dist_symbol & 0x3FF]
+          dictionary_match = dist.to_i64! > dictionary_start
+          dist_symbol, _ = Encode.prefix_encode_distance(dist &+ NUM_DISTANCE_SHORT_CODES &- 1, direct_codes, postfix_bits)
+          dist_cost = base_cost + (dist_symbol >> 10).to_f32 + distance_costs[dist_symbol & 0x3FF]
           max_match_length = match.length
           if length < max_match_length && (dictionary_match || max_match_length > max_zopfli_length)
             length = max_match_length
           end
-          while length <= max_match_length
-            length_code = dictionary_match ? match.length_code : length
-            copy_code = Encode.copy_length_code(length_code.to_u32)
+          if dictionary_match
+            length_code = match.length_code
+            copy_code = Encode.copy_length_code(length_code.to_u32!)
             command_code = Encode.combine_length_codes(insert_code, copy_code, false)
-            cost = dist_cost + COPY_EXTRA[copy_code].to_f32 + model.command_costs.to_unsafe[command_code]
-            if cost < nodes[pos + length].cost
-              update_node(nodes, pos, start, length, length_code, dist, 0, cost)
-              result = length if length > result
+            cost = dist_cost + COPY_EXTRA_COST.unsafe_fetch(copy_code) + command_costs[command_code]
+            while length <= max_match_length
+              if cost < nodes[pos &+ length].cost
+                update_node(nodes, pos, start, length, length_code, dist, 0, cost)
+                result = length if length > result
+              end
+              length &+= 1
             end
-            length += 1
+          else
+            while length <= max_match_length
+              copy_code = Encode.copy_length_code(length.to_u32!)
+              command_code = Encode.combine_length_codes(insert_code, copy_code, false)
+              cost = dist_cost + COPY_EXTRA_COST.unsafe_fetch(copy_code) + command_costs[command_code]
+              if cost < nodes[pos &+ length].cost
+                update_node(nodes, pos, start, length, length, dist, 0, cost)
+                result = length if length > result
+              end
+              length &+= 1
+            end
           end
         end
-        k += 1
+        k &+= 1
       end
       result
     end
@@ -598,8 +688,22 @@ module Mica::Brotli::Encode
                                         window_bits : Int32, stream_offset : Int64, params : DistanceParams,
                                         hasher : BinaryTreeHasher, cache : Int32*, last_insert_length : Int32,
                                         commands : CommandBuffer) : {Int32, Int64}
-      nodes_slice = Slice(Node).new(num_bytes + 1, Node.new)
-      nodes = nodes_slice.to_unsafe
+      # Scratch outside the collector, freed on return: megabytes for a
+      # large block, which would set off collections.
+      nodes = Encode.table(Node, num_bytes &+ 1)
+      Slice.new(nodes, num_bytes &+ 1).fill(Node.new)
+      begin
+        create_backward_references(num_bytes, position, data, quality, window_bits, stream_offset, params, hasher,
+          cache, last_insert_length, commands, nodes)
+      ensure
+        Encode.free_table(nodes)
+      end
+    end
+
+    private def self.create_backward_references(num_bytes : Int32, position : Int32, data : UInt8*, quality : Int32,
+                                                window_bits : Int32, stream_offset : Int64, params : DistanceParams,
+                                                hasher : BinaryTreeHasher, cache : Int32*, last_insert_length : Int32,
+                                                commands : CommandBuffer, nodes : Node*) : {Int32, Int64}
       max_backward_limit = (1 << window_bits) - WINDOW_GAP
       max_zopfli_length = quality <= 10 ? MAX_ZOPFLI_LENGTH_10 : MAX_ZOPFLI_LENGTH_11
       matches = Slice(BackwardMatch).new(2 * (BinaryTreeHasher::MAX_NUM_MATCHES + 64), BackwardMatch.new(0_u32, 0_u32))
@@ -637,6 +741,7 @@ module Mica::Brotli::Encode
         i += 1
       end
       compute_shortest_path_from_nodes(num_bytes, nodes)
+      model.release
       create_commands(num_bytes, position, nodes, cache, last_insert_length, params, window_bits, stream_offset, commands)
     end
 
@@ -647,9 +752,28 @@ module Mica::Brotli::Encode
                                            window_bits : Int32, stream_offset : Int64, params : DistanceParams,
                                            hasher : BinaryTreeHasher, cache : Int32*, last_insert_length : Int32,
                                            commands : CommandBuffer) : {Int32, Int64}
+      # Scratch outside the collector, freed on return: megabytes for a
+      # large block, which would set off collections.
+      num_matches = Encode.table(UInt32, num_bytes)
+      num_matches.clear(num_bytes)
+      matches = MatchList.new(4 &* num_bytes &+ BinaryTreeHasher::MAX_NUM_MATCHES)
+      nodes = Encode.table(Node, num_bytes &+ 1)
+      begin
+        create_hq_backward_references(num_bytes, position, data, quality, window_bits, stream_offset, params, hasher,
+          cache, last_insert_length, commands, Slice.new(num_matches, num_bytes), matches, nodes)
+      ensure
+        Encode.free_table(num_matches)
+        matches.release
+        Encode.free_table(nodes)
+      end
+    end
+
+    private def self.create_hq_backward_references(num_bytes : Int32, position : Int32, data : UInt8*, quality : Int32,
+                                                   window_bits : Int32, stream_offset : Int64, params : DistanceParams,
+                                                   hasher : BinaryTreeHasher, cache : Int32*, last_insert_length : Int32,
+                                                   commands : CommandBuffer, num_matches : Slice(UInt32),
+                                                   matches : MatchList, nodes : Node*) : {Int32, Int64}
       max_backward_limit = (1 << window_bits) - WINDOW_GAP
-      num_matches = Slice(UInt32).new(num_bytes, 0_u32)
-      matches = Array(BackwardMatch).new(4 * num_bytes + BinaryTreeHasher::MAX_NUM_MATCHES)
       store_end = num_bytes >= hasher.store_lookahead ? position + num_bytes - hasher.store_lookahead + 1 : position
       scratch = Slice(BackwardMatch).new(BinaryTreeHasher::MAX_NUM_MATCHES + 64, BackwardMatch.new(0_u32, 0_u32))
       i = 0
@@ -660,6 +784,7 @@ module Mica::Brotli::Encode
         found = hasher.find_all_matches(data, pos, num_bytes - i, max_distance, dictionary_start,
           params.max_distance.to_i32, quality, scratch.to_unsafe)
         num_matches[i] = found.to_u32
+        matches.reserve(found)
         if found > 0
           match_length = scratch[found - 1].length
           if match_length > MAX_ZOPFLI_LENGTH_11
@@ -679,8 +804,7 @@ module Mica::Brotli::Encode
       orig_last_insert_length = last_insert_length
       orig_cache = StaticArray(Int32, 4).new { |slot| cache[slot] }
       orig_num_commands = commands.size
-      nodes_slice = Slice(Node).new(num_bytes + 1, Node.new)
-      nodes = nodes_slice.to_unsafe
+      nodes_slice = Slice.new(nodes, num_bytes &+ 1)
       model = CostModel.new(params.alphabet_size.to_i32, num_bytes)
       matches_pointer = matches.to_unsafe
       result = {0, 0_i64}
@@ -698,6 +822,7 @@ module Mica::Brotli::Encode
         result = create_commands(num_bytes, position, nodes, cache, orig_last_insert_length, params, window_bits,
           stream_offset, commands)
       end
+      model.release
       result
     end
 

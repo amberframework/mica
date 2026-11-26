@@ -11,6 +11,30 @@ module Mica::Brotli
     # Where the writer stood, in bits.
     record Mark, position : Int64
 
+    # The buffer and bit position as a value, for a loop that writes many
+    # codes: kept in locals, they need no reload after each store into the
+    # buffer. `room?` says whether *bytes* more fit without growing; hand
+    # the position back with `commit` before using the writer again.
+    struct Cursor
+      getter position : Int64
+
+      def initialize(@buffer : Pointer(UInt8), @position : Int64, @capacity : Int64)
+      end
+
+      @[AlwaysInline]
+      def room?(bytes : Int) : Bool
+        (@position >> 3) &+ bytes &+ 8 <= @capacity
+      end
+
+      # `BitWriter#write` without the growth check: the caller made room.
+      @[AlwaysInline]
+      def write(count : Int, value : Int) : Nil
+        pointer = @buffer + (@position >> 3)
+        pointer.as(UInt64*).value = pointer.value.to_u64 | (value.to_u64! << (@position & 7))
+        @position &+= count
+      end
+    end
+
     # Outside the garbage collector: it grows to twice the input and holds
     # no references. Freed when the writer is collected.
     @buffer : Pointer(UInt8)
@@ -24,7 +48,15 @@ module Mica::Brotli
     end
 
     def finalize
+      release
+    end
+
+    # Frees the buffer now rather than when the collector runs the
+    # finalizer (malloc'd memory the collector does not see, so it would
+    # pile up between collections); the writer is unusable after.
+    def release : Nil
       @buffer = Encode.free_table(@buffer)
+      @capacity = 0
     end
 
     # Appends the low *count* bits of *value* (at most 56 bits; *value*
@@ -43,6 +75,17 @@ module Mica::Brotli
     def reserve(bytes : Int32) : Nil
       needed = (@position >> 3).to_i32 + bytes + 8
       grow(needed) if needed > @capacity
+    end
+
+    # A cursor at the current position with room for *bytes* more bytes.
+    def cursor(bytes : Int32) : Cursor
+      reserve(bytes)
+      Cursor.new(@buffer, @position, @capacity.to_i64)
+    end
+
+    # Takes the position back from *cursor*.
+    def commit(cursor : Cursor) : Nil
+      @position = cursor.position
     end
 
     # Pads with zero bits to the next byte boundary.
@@ -98,9 +141,10 @@ module Mica::Brotli
 
     private def grow(needed : Int32) : Nil
       capacity = Math.max(needed, @capacity * 2)
-      grown = LibC.realloc(@buffer.as(Void*), LibC::SizeT.new(capacity))
-      raise RuntimeError.new("Brotli encoder could not allocate #{capacity} bytes") if grown.null?
-      @buffer = grown.as(UInt8*)
+      grown = Encode.table(UInt8, capacity)
+      grown.copy_from(@buffer, @capacity) unless @buffer.null?
+      Encode.free_table(@buffer)
+      @buffer = grown
       @capacity = capacity
     end
   end

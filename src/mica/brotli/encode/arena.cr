@@ -42,6 +42,14 @@ module Mica::Brotli::Encode
       memory
     end
 
+    # A slice of *count* values of *type*, each *value*, valid until
+    # `reset`.
+    def filled(type : T.class, count : Int32, value : T) : Slice(T) forall T
+      slice = Slice.new(alloc(type, count), count)
+      slice.fill(value)
+      slice
+    end
+
     # Makes all the memory handed out available again.
     def reset : Nil
       @current = 0

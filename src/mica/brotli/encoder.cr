@@ -22,8 +22,13 @@ module Mica::Brotli
   #
   # :nodoc:
   class Encoder
-    alias Hasher = Encode::LongestMatchHasher(4, 1) | Encode::LongestMatchHasher(5, 1) |
-                   Encode::LongestMatchHasher(4, 0) | Encode::LongestMatchHasher(5, 0)
+    # The hasher of each quality from 5 to 9: bytes hashed (5 for inputs
+    # of 1 MiB and more), bucket bits and block bits.
+    alias Hasher = Encode::LongestMatchHasher(4, 14, 4) | Encode::LongestMatchHasher(5, 15, 4) |
+                   Encode::LongestMatchHasher(4, 14, 5) | Encode::LongestMatchHasher(5, 15, 5) |
+                   Encode::LongestMatchHasher(4, 15, 6) | Encode::LongestMatchHasher(5, 15, 6) |
+                   Encode::LongestMatchHasher(4, 15, 7) | Encode::LongestMatchHasher(5, 15, 7) |
+                   Encode::LongestMatchHasher(4, 15, 8) | Encode::LongestMatchHasher(5, 15, 8)
 
     INITIAL_CACHE = StaticArray[4, 11, 15, 16]
 
@@ -74,7 +79,9 @@ module Mica::Brotli
       writer = BitWriter.new(2 * input.size + 600)
       encoder.encode_block(writer, input, 0, input.size, 0_i64, is_last: true)
       encoder.release
-      writer.to_slice.dup
+      encoded = writer.to_slice.dup
+      writer.release
+      encoded
     end
 
     # How much input the streaming writer buffers before encoding it.
@@ -156,7 +163,8 @@ module Mica::Brotli
       @hasher_prepared = false
     end
 
-    # Frees the hash tables now rather than when the encoder is collected.
+    # Frees the hash tables, scratch arena and command buffer now rather
+    # than when the encoder is collected.
     def release : Nil
       if hasher = @hasher
         hasher.release
@@ -167,6 +175,7 @@ module Mica::Brotli
         @tree_hasher = nil
       end
       @arena.release
+      @commands.release
     end
 
     private def ported? : Bool
@@ -176,14 +185,18 @@ module Mica::Brotli
     private def hasher : Hasher
       @hasher ||= begin
         large = @size_hint >= (1 << 20) && @window_bits >= 19
-        block_bits = @quality - 1
-        bucket_bits = @quality < 7 ? 14 : 15
         last_distances = @quality < 7 ? 4 : (@quality < 9 ? 10 : 16)
-        if @quality <= 6
-          large ? Encode::LongestMatchHasher(5, 1).new(15, block_bits, last_distances) : Encode::LongestMatchHasher(4, 1).new(bucket_bits, block_bits, last_distances)
-        else
-          large ? Encode::LongestMatchHasher(5, 0).new(15, block_bits, last_distances) : Encode::LongestMatchHasher(4, 0).new(bucket_bits, block_bits, last_distances)
-        end
+        new_hasher(large, last_distances)
+      end
+    end
+
+    private def new_hasher(large : Bool, last_distances : Int32) : Hasher
+      case @quality
+      when 5 then large ? Encode::LongestMatchHasher(5, 15, 4).new(last_distances) : Encode::LongestMatchHasher(4, 14, 4).new(last_distances)
+      when 6 then large ? Encode::LongestMatchHasher(5, 15, 5).new(last_distances) : Encode::LongestMatchHasher(4, 14, 5).new(last_distances)
+      when 7 then large ? Encode::LongestMatchHasher(5, 15, 6).new(last_distances) : Encode::LongestMatchHasher(4, 15, 6).new(last_distances)
+      when 8 then large ? Encode::LongestMatchHasher(5, 15, 7).new(last_distances) : Encode::LongestMatchHasher(4, 15, 7).new(last_distances)
+      else        large ? Encode::LongestMatchHasher(5, 15, 8).new(last_distances) : Encode::LongestMatchHasher(4, 15, 8).new(last_distances)
       end
     end
 
@@ -207,16 +220,16 @@ module Mica::Brotli
       end
       # One branch per hasher type, so each search loop is compiled for
       # its own hasher.
-      @last_insert_length, literals = case current
-                                      when Encode::LongestMatchHasher(4, 1)
-                                        find_commands(current, data, position, bytes, stream_offset)
-                                      when Encode::LongestMatchHasher(5, 1)
-                                        find_commands(current, data, position, bytes, stream_offset)
-                                      when Encode::LongestMatchHasher(4, 0)
-                                        find_commands(current, data, position, bytes, stream_offset)
-                                      else
-                                        find_commands(current, data, position, bytes, stream_offset)
-                                      end
+      @last_insert_length, literals = {% begin %}
+        case current
+        {% for type in Hasher.resolve.union_types %}
+          when {{type}}
+            find_commands(current, data, position, bytes, stream_offset)
+        {% end %}
+        else
+          raise ArgumentError.new("no hasher for Brotli quality #{@quality}")
+        end
+      {% end %}
       @num_literals += literals
     end
 
