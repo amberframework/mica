@@ -14,11 +14,13 @@ module Mica::Encoding
   # the first time an encoder needs it. The Basic Multilingual Plane is a
   # page map (one entry per high byte: 0, or the 1-based number of a
   # 256-entry block whose entries are pointer + 1); code points above
-  # U+FFFF go in a hash. Built once per process (constants initialize
-  # lazily and under a lock) and read-only afterwards.
+  # U+FFFF go in a hash. Built once per process (see `Tables`) and
+  # read-only afterwards; lookups read the blocks through a `Slice`.
   class ReverseTable
     @pages = StaticArray(UInt16, 256).new(0_u16)
+    # Grows while the table is built; `@blocks` views its buffer.
     @values = [] of UInt16
+    @blocks = Slice(UInt16).empty
     @astral = {} of Int32 => Int32
 
     # Indexes every pointer of *forward* from *first_pointer* on, outside
@@ -29,6 +31,7 @@ module Mica::Encoding
         code_point = forward.unsafe_fetch(pointer).to_i32
         add(code_point, pointer, replace: false) unless code_point == 0
       end
+      view_blocks
     end
 
     # Makes each of *code_points* map to its last pointer at or after
@@ -38,6 +41,7 @@ module Mica::Encoding
         last = (first_pointer...forward.size).reverse_each.find { |pointer| forward.unsafe_fetch(pointer).to_i32 == target }
         add(target, last, replace: true) if last
       end
+      view_blocks
       self
     end
 
@@ -46,6 +50,7 @@ module Mica::Encoding
       forward.each_with_index do |code_point, pointer|
         add(code_point.to_i32, pointer, replace: false) unless code_point == 0
       end
+      view_blocks
       self
     end
 
@@ -55,10 +60,16 @@ module Mica::Encoding
       if code_point <= 0xFFFF
         page = @pages.unsafe_fetch(code_point >> 8).to_i32
         return -1 if page == 0
-        @values.unsafe_fetch(((page - 1) << 8) | (code_point & 0xFF)).to_i32 - 1
+        @blocks.unsafe_fetch(((page - 1) << 8) | (code_point & 0xFF)).to_i32 - 1
       else
         @astral.fetch(code_point, -1)
       end
+    end
+
+    # Points `@blocks` at the current buffer of `@values` (which moves
+    # when it grows); called after every change.
+    private def view_blocks : Nil
+      @blocks = Slice.new(@values.to_unsafe, @values.size, read_only: true)
     end
 
     private def add(code_point : Int32, pointer : Int32, replace : Bool) : Nil
@@ -102,10 +113,15 @@ module Mica::Encoding::Tables
                  ] %}
     @@{{ spec[0].id }}_reverse : ReverseTable? = nil
 
+    # Returns the reverse table, building it on first use. Encoders keep
+    # the result so their per-character lookup skips this check.
+    def self.{{ spec[0].id }}_reverse : ReverseTable
+      @@{{ spec[0].id }}_reverse ||= {{ spec[1].id }}
+    end
+
     # Returns the pointer for *code_point* (see the comments above), or -1.
     def self.{{ spec[0].id }}_encode(code_point : Int32) : Int32
-      table = @@{{ spec[0].id }}_reverse ||= {{ spec[1].id }}
-      table.pointer_for(code_point)
+      {{ spec[0].id }}_reverse.pointer_for(code_point)
     end
   {% end %}
 
@@ -180,4 +196,49 @@ module Mica::Encoding::Tables
 
   # US-ASCII: no byte above 0x7F has a code point.
   ASCII_ONLY = {% begin %}Slice(UInt16).literal({{ (0...128).to_a.map { 0 }.join(", ").id }}){% end %}
+end
+
+module Mica::Encoding
+  # The two bytes a stateless multi-byte encoder writes for each Basic
+  # Multilingual Plane code point, as `(first << 8) | second`, or 0 when
+  # the encoder writes anything else (one byte, four bytes, nothing). Each
+  # encoder builds its table once per process from its own rules, so a hit
+  # is byte for byte what the rules write. A lookup is two reads and no
+  # branch: missing pages point at block 0, which is all zeros.
+  class TwoByteTable
+    # The table with no entries: every lookup returns 0.
+    EMPTY = new
+
+    @offsets = StaticArray(Int32, 256).new(0)
+    @codes : Slice(UInt16)
+
+    def initialize
+      @codes = Slice(UInt16).new(256, 0_u16, read_only: true)
+    end
+
+    # Asks the block for the code of every BMP code point from U+0080 on
+    # (surrogates excluded); a block result of 0 leaves no entry.
+    def initialize(& : Int32 -> Int32)
+      codes = Array(UInt16).new(256, 0_u16)
+      0x80.upto(0xFFFF) do |code_point|
+        next if code_point >= 0xD800 && code_point <= 0xDFFF
+        code = yield code_point
+        next if code == 0
+        offset = @offsets[code_point >> 8]
+        if offset == 0
+          offset = codes.size
+          codes.concat(Array(UInt16).new(256, 0_u16))
+          @offsets[code_point >> 8] = offset
+        end
+        codes[offset + (code_point & 0xFF)] = code.to_u16
+      end
+      @codes = Slice.new(codes.size, read_only: true) { |index| codes.unsafe_fetch(index) }
+    end
+
+    # Returns the code for *code_point* (at most U+FFFF), or 0.
+    @[AlwaysInline]
+    def code_for(code_point : Int32) : Int32
+      @codes.unsafe_fetch(@offsets.unsafe_fetch(code_point >> 8) &+ (code_point & 0xFF)).to_i32
+    end
+  end
 end
