@@ -1094,9 +1094,16 @@ module Mica::Brotli
       end
     end
 
-    # The fast loop starts a symbol only while this many input bytes
-    # remain, so its refills can load 8 bytes without checking the end.
-    FAST_INPUT_MARGIN = 128
+    # The fast loop starts a command, or a literal run or block switch
+    # inside one, only while more than this many input bytes remain, so
+    # its refills can load 8 bytes without checking the end. Past such a
+    # check a command reads at most 210 bits (a command block switch, 54;
+    # the command symbol and both length extras, 63; a distance block
+    # switch, 54; the distance symbol and its extra bits, 39), and a
+    # literal run stops at the check's position plus one literal; with
+    # at most 63 bits buffered and 8-byte loads, the last load ends at
+    # most 43 bytes past the check.
+    FAST_INPUT_MARGIN = 64
 
     # Refills the local bit buffer of `fast_commands` from 8 input bytes.
     private macro fast_refill
