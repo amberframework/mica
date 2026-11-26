@@ -338,6 +338,62 @@ describe Mica::YAML::Emitter do
       end
       output.should eq("---\n- a\n- ! 'a b'\n- ! '- a'\n- ! |-\n  a\n")
     end
+
+    it "reads a character that is not ASCII where an eight-byte ASCII run ends" do
+      output = emitted do |emitter|
+        emitter.document_start
+        emitter.sequence_start
+        emitter.scalar("abcdefg\u00E9")
+        emitter.scalar("abcdefgh\u00E9")
+        emitter.scalar("abcdefg\u00E9 tail")
+        emitter.scalar("abcdefg\u00A0x")
+        emitter.scalar("abcdefg\u2028x")
+        emitter.scalar("abcdefg\u0085x")
+        emitter.scalar("abcdefg\uFEFFx")
+        emitter.scalar("abcdefg:\u2028")
+        emitter.sequence_end
+        emitter.document_end
+      end
+      output.should eq("---\n- abcdefgé\n- abcdefghé\n- abcdefgé tail\n- abcdefg\u00A0x\n- 'abcdefg\u2028  x'\n" \
+                       "- \"abcdefg\\Nx\"\n- \"abcdefg\\uFEFFx\"\n- 'abcdefg:\u2028  '\n")
+    end
+
+    it "reads a space, `: ` and ` #` where an ASCII run ends" do
+      output = emitted do |emitter|
+        emitter.document_start
+        emitter.sequence_start
+        emitter.scalar("abcdefgh ")
+        emitter.scalar("abcdefgh: x")
+        emitter.scalar("abcdefgh:")
+        emitter.scalar("abcdefgh #x")
+        emitter.scalar("abcdefgh #")
+        emitter.scalar("abcdefgh#x")
+        emitter.scalar("abc \u00E9 #x")
+        emitter.scalar("two  spaces here")
+        emitter.scalar("abcdefgh\n x")
+        emitter.scalar("abcdefgh \nx")
+        emitter.scalar("word word\tx")
+        emitter.scalar("abcdefgh\u0000x")
+        emitter.sequence_end
+        emitter.document_end
+      end
+      output.should eq("---\n- 'abcdefgh '\n- 'abcdefgh: x'\n- 'abcdefgh:'\n- 'abcdefgh #x'\n- 'abcdefgh #'\n" \
+                       "- abcdefgh#x\n- 'abc é #x'\n- two  spaces here\n- \"abcdefgh\\n x\"\n- \"abcdefgh \\nx\"\n" \
+                       "- \"word word\\tx\"\n- \"abcdefgh\\0x\"\n")
+    end
+
+    it "reads a flow indicator where an ASCII run ends" do
+      output = emitted do |emitter|
+        emitter.document_start
+        emitter.sequence_start(style: Mica::YAML::SequenceStyle::Flow)
+        emitter.scalar("abcdefgh,x")
+        emitter.scalar("abcdefg:\u00A0x")
+        emitter.scalar("abcdefgh#x")
+        emitter.sequence_end
+        emitter.document_end
+      end
+      output.should eq("--- ['abcdefgh,x', 'abcdefg:\u00A0x', abcdefgh#x]\n")
+    end
   end
 
   describe "single-quoted scalars" do
@@ -1338,6 +1394,32 @@ describe Mica::YAML::Emitter do
         emitter.document_end
       end
       output.should eq("---\n- a\n- b\n")
+    end
+
+    it "rejects a sequence that is not UTF-8 just after a long ASCII run" do
+      emitter = Mica::YAML::Emitter.new(IO::Memory.new)
+      emitter.stream_start
+      emitter.document_start
+      ascii = "a" * 17
+      [Bytes[0xFF], Bytes[0xC3], Bytes[0xE0, 0x80, 0x80], Bytes[0xE2, 0x82], Bytes[0xF0, 0x80, 0x80, 0x80], Bytes[0xC3, 0x41]].each do |tail|
+        [8, 15, 16, 17].each do |run|
+          expect_raises(Mica::YAML::EmitError, "scalar value is not valid UTF-8") do
+            emitter.scalar(String.new(ascii.to_slice[0, run]) + String.new(tail))
+          end
+        end
+      end
+    end
+
+    it "accepts an encoded surrogate and a value above U+10FFFF after an ASCII run, as libyaml does" do
+      output = emitted do |emitter|
+        emitter.document_start
+        emitter.sequence_start
+        emitter.scalar("aaaaaaaa" + String.new(Bytes[0xED, 0xA0, 0x80]))
+        emitter.scalar("aaaaaaaa" + String.new(Bytes[0xF4, 0x90, 0x80, 0x80]))
+        emitter.sequence_end
+        emitter.document_end
+      end
+      output.should eq("---\n- \"aaaaaaaa\\uD800\"\n- \"aaaaaaaa\\U00110000\"\n")
     end
 
     it "is a Mica::Error" do
