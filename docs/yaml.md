@@ -109,9 +109,10 @@ All errors descend from `Mica::Error`:
 
 `Mica::YAML::Emitter` is a port of libyaml 0.2.5's emitter and writes the
 same bytes for the same events (2,400,000 differential cases, none
-different). Through the standard library's `to_yaml` it runs from 0.86x
-(a 2.1 MB manifest) to 1.75x (a short lockfile) of libyaml's speed; see
-[benchmarks.md](benchmarks.md):
+different). Through the standard library's `to_yaml` it is faster than
+libyaml on every file of the benchmark corpus: over the whole corpus 1.62x
+as fast on macOS arm64, 1.29x on Linux aarch64 and 1.29x on Linux x86-64;
+see [benchmarks.md](benchmarks.md):
 
 ```crystal
 emitter = Mica::YAML::Emitter.new(io)
