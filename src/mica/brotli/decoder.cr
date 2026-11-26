@@ -203,6 +203,11 @@ module Mica::Brotli
     # Per literal block type: the tree its whole context map row names, or
     # -1 when the row names more than one (worked out once per header).
     @fixed_tree_by_type = StaticArray(Int32, 256).new(-1)
+    # The context maps resolved to table offsets: per literal block type
+    # and context, and per distance block type and context, the start of
+    # the tree that context selects (one load fewer per symbol).
+    @literal_tree_map = Slice(Int32).new(64)
+    @distance_tree_map = Slice(Int32).new(4 * 256)
 
     def initialize(@limits : DecodeLimits)
       @meter = Core::WorkMeter.new(@limits.work_budget(nil))
@@ -298,8 +303,9 @@ module Mica::Brotli
       @flushed += count
     end
 
-    # Decodes until the ring is full or the stream ends. Returns false once
-    # the stream has ended and every byte is pending or taken.
+    # Decodes until the ring is full, a streaming run of `RUN_BYTES` is
+    # pending, or the stream ends. Returns false once the stream has ended
+    # and every byte is pending or taken.
     def produce : Bool
       return false if @phase.ended?
       if @pos == @ring_size && @ring_size == @full_ring && @flushed == @pos
@@ -550,7 +556,8 @@ module Mica::Brotli
       distance_trees.times { @distance_trees << read_prefix_code(distance_alphabet, distance_alphabet) }
 
       @meter.enforce { position } if @meter.charge(@table.size)
-      find_fixed_literal_trees(literal_types)
+      map_literal_trees(literal_types)
+      map_distance_trees(4 * @num_types[2])
       select_literal_block
       @command_tree = @command_trees.unsafe_fetch(0)
       @distance_map_offset = 0
@@ -862,11 +869,15 @@ module Mica::Brotli
       @literal_tree_fixed = @fixed_tree_by_type.unsafe_fetch(block_type)
     end
 
-    # Fills `@fixed_tree_by_type` for the *types* literal block types: a
-    # row of 64 equal context map entries (compared as eight 8-byte words)
-    # always selects the same tree.
-    private def find_fixed_literal_trees(types : Int32) : Nil
+    # Fills `@literal_tree_map` and `@fixed_tree_by_type` for the *types*
+    # literal block types: a row of 64 equal context map entries (compared
+    # as eight 8-byte words) always selects the same tree.
+    private def map_literal_trees(types : Int32) : Nil
+      @literal_tree_map = Slice(Int32).new(64 * types) if @literal_tree_map.size < 64 * types
       map = @literal_map.to_unsafe
+      trees = @literal_trees.to_unsafe
+      tree_map = @literal_tree_map.to_unsafe
+      (64 * types).times { |index| tree_map[index] = trees[map[index]] }
       types.times do |block_type|
         row = map + (block_type << 6)
         pattern = row[0].to_u64 &* 0x0101010101010101_u64
@@ -876,6 +887,14 @@ module Mica::Brotli
         end
         @fixed_tree_by_type[block_type] = same ? @literal_trees.unsafe_fetch(row[0].to_i32) : -1
       end
+    end
+
+    # Fills `@distance_tree_map` for the first *size* context map entries.
+    private def map_distance_trees(size : Int32) : Nil
+      map = @distance_map.to_unsafe
+      trees = @distance_trees.to_unsafe
+      tree_map = @distance_tree_map.to_unsafe
+      size.times { |index| tree_map[index] = trees[map[index]] }
     end
 
     # --- Output ---------------------------------------------------------
@@ -924,7 +943,8 @@ module Mica::Brotli
     end
 
     # Called when the next byte would land at `@out_end`. Returns false
-    # when the ring is full and the caller must stop for it to be drained.
+    # when the caller must stop for the ring to be drained: it is full, or
+    # (streaming) a run is pending.
     private def make_room : Bool
       settle
       total = @ring_base + @pos
@@ -937,7 +957,9 @@ module Mica::Brotli
         grow_ring(doubled < @ring_cap ? doubled.to_i32 : @ring_cap)
       end
       update_out_end
-      true
+      # A streaming decode stops at each run with output pending, so the
+      # caller takes that run while it is still in cache.
+      @linear || @pos == @flushed
     end
 
     # Settles the work meter, the ratio check and the deadline for the
@@ -1148,8 +1170,7 @@ module Mica::Brotli
       direct_codes = @direct_codes
       postfix_bits = @postfix_bits
       postfix_mask = @postfix_mask
-      distance_trees = @distance_trees.to_unsafe
-      distance_map = @distance_map.to_unsafe
+      distance_tree_map = @distance_tree_map.to_unsafe
       written_before = @ring_base
       max_backward = @max_backward
       fast_load
@@ -1199,8 +1220,7 @@ module Mica::Brotli
           block_left = @block_left[0]
           fixed_tree = @literal_tree_fixed
           lookup_row = lookup + @context_lookup_offset
-          map_row = @literal_map.to_unsafe + @literal_map_offset
-          trees = @literal_trees.to_unsafe
+          tree_row = @literal_tree_map.to_unsafe + @literal_map_offset
           while left > 0
             if in_pos > in_limit
               fast_save
@@ -1216,7 +1236,7 @@ module Mica::Brotli
               block_left = @block_left[0]
               fixed_tree = @literal_tree_fixed
               lookup_row = lookup + @context_lookup_offset
-              map_row = @literal_map.to_unsafe + @literal_map_offset
+              tree_row = @literal_tree_map.to_unsafe + @literal_map_offset
               next
             end
             # A run of literals inside one block that the input margin
@@ -1262,7 +1282,7 @@ module Mica::Brotli
               next
             end
             while run > 0
-              tree = trees[map_row[lookup_row[p1] | lookup_row[256 &+ p2]]]
+              tree = tree_row[lookup_row[p1] | lookup_row[256 &+ p2]]
               fast_refill if nbits < 15
               literal = 0
               fast_symbol(tree, literal)
@@ -1292,7 +1312,7 @@ module Mica::Brotli
           end
           distance_left &-= 1
           context = copy_length > 4 ? 3 : copy_length &- 2
-          tree = distance_trees[distance_map[@distance_map_offset &+ context]]
+          tree = distance_tree_map[@distance_map_offset &+ context]
           fast_refill
           fast_symbol(tree, code)
           if code < 16
@@ -1422,7 +1442,7 @@ module Mica::Brotli
         tree = @literal_tree_fixed
         if tree < 0
           context = lookup[@context_lookup_offset + p1] | lookup[@context_lookup_offset + 256 + p2]
-          tree = @literal_trees.unsafe_fetch(@literal_map.unsafe_fetch(@literal_map_offset + context).to_i32)
+          tree = @literal_tree_map.unsafe_fetch(@literal_map_offset + context)
         end
         literal = read_symbol(tree)
         ring[@pos] = literal.to_u8
@@ -1459,7 +1479,7 @@ module Mica::Brotli
           end
           @block_left[2] -= 1
           context = @copy_length > 4 ? 3 : @copy_length - 2
-          tree = @distance_trees.unsafe_fetch(@distance_map.unsafe_fetch(@distance_map_offset + context).to_i32)
+          tree = @distance_tree_map.unsafe_fetch(@distance_map_offset + context)
           code = read_symbol(tree)
           translate_distance(code)
         end
