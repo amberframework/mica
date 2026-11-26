@@ -212,17 +212,18 @@ module Mica::Brotli::Encode
     # Clusters `input` into at most *max_histograms* histograms; returns
     # them and the map from each input histogram to its cluster
     # (google/brotli's BrotliClusterHistograms).
-    def self.cluster_histograms(input : HistogramSet, max_histograms : Int32) : {HistogramSet, Slice(UInt32)}
+    # Scratch and the result come from *arena*, valid until it is reset.
+    def self.cluster_histograms(input : HistogramSet, max_histograms : Int32, arena : Arena) : {HistogramSet, Slice(UInt32)}
       in_size = input.count
       data_size = input.data_size
-      cluster_size = Slice(UInt32).new(in_size, 1_u32)
-      clusters = Slice(UInt32).new(in_size, 0_u32)
-      symbols = Slice(UInt32).new(in_size, 0_u32)
+      cluster_size = arena.filled(UInt32, in_size, 1_u32)
+      clusters = arena.filled(UInt32, in_size, 0_u32)
+      symbols = arena.filled(UInt32, in_size, 0_u32)
       max_input_histograms = 64
       pairs_capacity = max_input_histograms * max_input_histograms // 2
-      pairs = Slice(Pair).new(pairs_capacity + 1, Pair.new(0_u32, 0_u32, 0.0, 0.0))
-      tmp = HistogramSet.new(data_size, 1)
-      output = HistogramSet.new(data_size, in_size)
+      pairs = Slice.new(arena.alloc(Pair, pairs_capacity + 1), pairs_capacity + 1)
+      tmp = HistogramSet.new(data_size, 1, arena)
+      output = HistogramSet.new(data_size, in_size, arena)
       in_size.times do |i|
         output.copy(i, input, i)
         output.bit_costs[i] = population_cost(input, i)
@@ -239,12 +240,12 @@ module Mica::Brotli::Encode
       end
       max_num_pairs = Math.min(64 * num_clusters, (num_clusters // 2) * num_clusters)
       if pairs.size < max_num_pairs + 1
-        pairs = Slice(Pair).new(max_num_pairs + 1, Pair.new(0_u32, 0_u32, 0.0, 0.0))
+        pairs = Slice.new(arena.alloc(Pair, max_num_pairs + 1), max_num_pairs + 1)
       end
       num_clusters = combine(output, tmp, cluster_size, symbols.to_unsafe, clusters.to_unsafe, pairs, num_clusters,
         in_size, max_histograms, max_num_pairs)
       remap(input, clusters, num_clusters, output, tmp, symbols)
-      reindexed = reindex(output, symbols)
+      reindexed = reindex(output, symbols, arena)
       {reindexed, symbols}
     end
 
@@ -270,9 +271,9 @@ module Mica::Brotli::Encode
 
     # Renumbers the clusters in order of first use and packs them
     # (google/brotli's BrotliHistogramReindex).
-    private def self.reindex(output : HistogramSet, symbols : Slice(UInt32)) : HistogramSet
+    private def self.reindex(output : HistogramSet, symbols : Slice(UInt32), arena : Arena) : HistogramSet
       invalid = UInt32::MAX
-      new_index = Slice(UInt32).new(output.count, invalid)
+      new_index = arena.filled(UInt32, output.count, invalid)
       next_index = 0_u32
       symbols.each do |symbol|
         if new_index[symbol] == invalid
@@ -280,7 +281,7 @@ module Mica::Brotli::Encode
           next_index += 1
         end
       end
-      packed = HistogramSet.new(output.data_size, next_index.to_i32)
+      packed = HistogramSet.new(output.data_size, next_index.to_i32, arena)
       next_index = 0_u32
       symbols.size.times do |i|
         if new_index[symbols[i]] == next_index

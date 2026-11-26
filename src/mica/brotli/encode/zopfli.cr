@@ -210,6 +210,53 @@ module Mica::Brotli::Encode
     end
   end
 
+  # The matches of every position of a block, in a buffer outside the
+  # collector (it can reach megabytes); `release` frees it.
+  class MatchList
+    getter size = 0
+    @capacity : Int32
+    @buffer : Pointer(BackwardMatch)
+
+    def initialize(capacity : Int32)
+      @capacity = Math.max(capacity, 16)
+      @buffer = Encode.table(BackwardMatch, @capacity)
+    end
+
+    def finalize
+      release
+    end
+
+    def release : Nil
+      @buffer = Encode.free_table(@buffer)
+      @capacity = 0
+      @size = 0
+    end
+
+    # Makes room for *extra* more matches.
+    def reserve(extra : Int32) : Nil
+      needed = @size &+ extra
+      return if needed <= @capacity
+      capacity = Math.max(needed, @capacity &* 2)
+      grown = Encode.table(BackwardMatch, capacity)
+      grown.copy_from(@buffer, @size)
+      Encode.free_table(@buffer)
+      @buffer = grown
+      @capacity = capacity
+    end
+
+    # Appends *match*; `reserve` made room.
+    @[AlwaysInline]
+    def <<(match : BackwardMatch) : self
+      @buffer[@size] = match
+      @size &+= 1
+      self
+    end
+
+    def to_unsafe : Pointer(BackwardMatch)
+      @buffer
+    end
+  end
+
   # The optimal parse of qualities 10 and 11 (google/brotli's
   # backward_references_hq.c): a shortest path over byte positions where
   # each edge is a command costed by a histogram model.
@@ -312,9 +359,21 @@ module Mica::Brotli::Encode
       getter literal_costs : Slice(Float32)
       getter min_command_cost = 0_f32
 
+      # The literal costs live outside the collector (four bytes per input
+      # byte); `release` frees them.
       def initialize(distance_alphabet : Int32, @num_bytes : Int32)
         @distance_costs = Slice(Float32).new(distance_alphabet, 0_f32)
-        @literal_costs = Slice(Float32).new(@num_bytes + 2, 0_f32)
+        @literal_costs = Slice.new(Encode.table(Float32, @num_bytes &+ 2), @num_bytes &+ 2)
+        @literal_costs.fill(0_f32)
+      end
+
+      def finalize
+        release
+      end
+
+      def release : Nil
+        Encode.free_table(@literal_costs.to_unsafe) unless @literal_costs.empty?
+        @literal_costs = Slice(Float32).empty
       end
 
       @[AlwaysInline]
@@ -629,8 +688,22 @@ module Mica::Brotli::Encode
                                         window_bits : Int32, stream_offset : Int64, params : DistanceParams,
                                         hasher : BinaryTreeHasher, cache : Int32*, last_insert_length : Int32,
                                         commands : CommandBuffer) : {Int32, Int64}
-      nodes_slice = Slice(Node).new(num_bytes + 1, Node.new)
-      nodes = nodes_slice.to_unsafe
+      # Scratch outside the collector, freed on return: megabytes for a
+      # large block, which would set off collections.
+      nodes = Encode.table(Node, num_bytes &+ 1)
+      Slice.new(nodes, num_bytes &+ 1).fill(Node.new)
+      begin
+        create_backward_references(num_bytes, position, data, quality, window_bits, stream_offset, params, hasher,
+          cache, last_insert_length, commands, nodes)
+      ensure
+        Encode.free_table(nodes)
+      end
+    end
+
+    private def self.create_backward_references(num_bytes : Int32, position : Int32, data : UInt8*, quality : Int32,
+                                                window_bits : Int32, stream_offset : Int64, params : DistanceParams,
+                                                hasher : BinaryTreeHasher, cache : Int32*, last_insert_length : Int32,
+                                                commands : CommandBuffer, nodes : Node*) : {Int32, Int64}
       max_backward_limit = (1 << window_bits) - WINDOW_GAP
       max_zopfli_length = quality <= 10 ? MAX_ZOPFLI_LENGTH_10 : MAX_ZOPFLI_LENGTH_11
       matches = Slice(BackwardMatch).new(2 * (BinaryTreeHasher::MAX_NUM_MATCHES + 64), BackwardMatch.new(0_u32, 0_u32))
@@ -668,6 +741,7 @@ module Mica::Brotli::Encode
         i += 1
       end
       compute_shortest_path_from_nodes(num_bytes, nodes)
+      model.release
       create_commands(num_bytes, position, nodes, cache, last_insert_length, params, window_bits, stream_offset, commands)
     end
 
@@ -678,9 +752,28 @@ module Mica::Brotli::Encode
                                            window_bits : Int32, stream_offset : Int64, params : DistanceParams,
                                            hasher : BinaryTreeHasher, cache : Int32*, last_insert_length : Int32,
                                            commands : CommandBuffer) : {Int32, Int64}
+      # Scratch outside the collector, freed on return: megabytes for a
+      # large block, which would set off collections.
+      num_matches = Encode.table(UInt32, num_bytes)
+      num_matches.clear(num_bytes)
+      matches = MatchList.new(4 &* num_bytes &+ BinaryTreeHasher::MAX_NUM_MATCHES)
+      nodes = Encode.table(Node, num_bytes &+ 1)
+      begin
+        create_hq_backward_references(num_bytes, position, data, quality, window_bits, stream_offset, params, hasher,
+          cache, last_insert_length, commands, Slice.new(num_matches, num_bytes), matches, nodes)
+      ensure
+        Encode.free_table(num_matches)
+        matches.release
+        Encode.free_table(nodes)
+      end
+    end
+
+    private def self.create_hq_backward_references(num_bytes : Int32, position : Int32, data : UInt8*, quality : Int32,
+                                                   window_bits : Int32, stream_offset : Int64, params : DistanceParams,
+                                                   hasher : BinaryTreeHasher, cache : Int32*, last_insert_length : Int32,
+                                                   commands : CommandBuffer, num_matches : Slice(UInt32),
+                                                   matches : MatchList, nodes : Node*) : {Int32, Int64}
       max_backward_limit = (1 << window_bits) - WINDOW_GAP
-      num_matches = Slice(UInt32).new(num_bytes, 0_u32)
-      matches = Array(BackwardMatch).new(4 * num_bytes + BinaryTreeHasher::MAX_NUM_MATCHES)
       store_end = num_bytes >= hasher.store_lookahead ? position + num_bytes - hasher.store_lookahead + 1 : position
       scratch = Slice(BackwardMatch).new(BinaryTreeHasher::MAX_NUM_MATCHES + 64, BackwardMatch.new(0_u32, 0_u32))
       i = 0
@@ -691,6 +784,7 @@ module Mica::Brotli::Encode
         found = hasher.find_all_matches(data, pos, num_bytes - i, max_distance, dictionary_start,
           params.max_distance.to_i32, quality, scratch.to_unsafe)
         num_matches[i] = found.to_u32
+        matches.reserve(found)
         if found > 0
           match_length = scratch[found - 1].length
           if match_length > MAX_ZOPFLI_LENGTH_11
@@ -710,8 +804,7 @@ module Mica::Brotli::Encode
       orig_last_insert_length = last_insert_length
       orig_cache = StaticArray(Int32, 4).new { |slot| cache[slot] }
       orig_num_commands = commands.size
-      nodes_slice = Slice(Node).new(num_bytes + 1, Node.new)
-      nodes = nodes_slice.to_unsafe
+      nodes_slice = Slice.new(nodes, num_bytes &+ 1)
       model = CostModel.new(params.alphabet_size.to_i32, num_bytes)
       matches_pointer = matches.to_unsafe
       result = {0, 0_i64}
@@ -729,6 +822,7 @@ module Mica::Brotli::Encode
         result = create_commands(num_bytes, position, nodes, cache, orig_last_insert_length, params, window_bits,
           stream_offset, commands)
       end
+      model.release
       result
     end
 

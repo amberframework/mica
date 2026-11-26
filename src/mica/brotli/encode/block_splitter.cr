@@ -23,10 +23,12 @@ module Mica::Brotli::Encode
 
     # Splits the literals, command symbols and distance symbols of
     # *commands* (google/brotli's BrotliSplitBlock).
-    def self.split_block(commands : CommandBuffer, data : UInt8*, position : Int32, quality : Int32) : {BlockSplit, BlockSplit, BlockSplit}
+    # Scratch and the splits come from *arena*, valid until it is reset.
+    def self.split_block(commands : CommandBuffer, data : UInt8*, position : Int32, quality : Int32,
+                         arena : Arena) : {BlockSplit, BlockSplit, BlockSplit}
       literal_count = 0
       commands.size.times { |i| literal_count += commands[i].insert_length.to_i32 }
-      literals = Bytes.new(literal_count)
+      literals = Slice.new(arena.alloc(UInt8, literal_count), literal_count)
       at = 0
       from = position
       commands.size.times do |i|
@@ -37,11 +39,12 @@ module Mica::Brotli::Encode
         from += insert + entry.copy_length.to_i32
       end
       literal_split = split_byte_vector(literals.to_unsafe, literal_count, NUM_LITERAL_SYMBOLS, SYMBOLS_PER_LITERAL_HISTO,
-        MAX_LITERAL_HISTOGRAMS, LITERAL_STRIDE, LITERAL_SWITCH_COST, quality)
-      codes = Slice(UInt16).new(commands.size) { |i| commands[i].command_prefix }
+        MAX_LITERAL_HISTOGRAMS, LITERAL_STRIDE, LITERAL_SWITCH_COST, quality, arena)
+      codes = Slice.new(arena.alloc(UInt16, commands.size), commands.size)
+      commands.size.times { |i| codes[i] = commands[i].command_prefix }
       command_split = split_byte_vector(codes.to_unsafe, codes.size, NUM_COMMAND_SYMBOLS, SYMBOLS_PER_COMMAND_HISTO,
-        MAX_COMMAND_HISTOGRAMS, COMMAND_STRIDE, COMMAND_SWITCH_COST, quality)
-      distances = Slice(UInt16).new(commands.size, 0_u16)
+        MAX_COMMAND_HISTOGRAMS, COMMAND_STRIDE, COMMAND_SWITCH_COST, quality, arena)
+      distances = arena.filled(UInt16, commands.size, 0_u16)
       count = 0
       commands.size.times do |i|
         entry = commands[i]
@@ -51,7 +54,7 @@ module Mica::Brotli::Encode
         end
       end
       distance_split = split_byte_vector(distances.to_unsafe, count, NUM_HISTOGRAM_DISTANCES, SYMBOLS_PER_DISTANCE_HISTO,
-        MAX_COMMAND_HISTOGRAMS, DISTANCE_STRIDE, DISTANCE_SWITCH_COST, quality)
+        MAX_COMMAND_HISTOGRAMS, DISTANCE_STRIDE, DISTANCE_SWITCH_COST, quality, arena)
       {literal_split, command_split, distance_split}
     end
 
@@ -68,9 +71,9 @@ module Mica::Brotli::Encode
 
     private def self.split_byte_vector(data : T*, length : Int32, data_size : Int32, symbols_per_histogram : Int32,
                                        max_histograms : Int32, stride : Int32, block_switch_cost : Float64,
-                                       quality : Int32) : BlockSplit forall T
+                                       quality : Int32, arena : Arena) : BlockSplit forall T
       num_histograms = Math.min(length // symbols_per_histogram + 1, max_histograms)
-      split = BlockSplit.new(1)
+      split = BlockSplit.new(1, arena)
       if length == 0
         split.num_types = 1
         return split
@@ -82,7 +85,7 @@ module Mica::Brotli::Encode
         split.num_blocks = 1
         return split
       end
-      histograms = HistogramSet.new(data_size, num_histograms + 1)
+      histograms = HistogramSet.new(data_size, num_histograms + 1, arena)
       tmp = num_histograms
       # Initial entropy codes.
       seed = 7_u32
@@ -113,12 +116,12 @@ module Mica::Brotli::Encode
         add_vector(histograms, tmp, data + pos, sample_stride)
         histograms.add_histogram(iter % num_histograms, histograms, tmp)
       end
-      block_ids = Bytes.new(length)
+      block_ids = Slice.new(arena.alloc_cleared(UInt8, length), length)
       bitmap_len = (num_histograms + 7) >> 3
-      insert_cost = Slice(Float64).new(data_size * num_histograms, 0.0)
-      cost = Slice(Float64).new(num_histograms, 0.0)
-      switch_signal = Bytes.new(length * bitmap_len)
-      new_id = Slice(UInt16).new(num_histograms, 0_u16)
+      insert_cost = Slice.new(arena.alloc(Float64, data_size * num_histograms), data_size * num_histograms)
+      cost = Slice.new(arena.alloc(Float64, num_histograms), num_histograms)
+      switch_signal = Slice.new(arena.alloc(UInt8, length * bitmap_len), length * bitmap_len)
+      new_id = Slice.new(arena.alloc(UInt16, num_histograms), num_histograms)
       num_blocks = 0
       (quality < 11 ? 3 : 10).times do
         num_blocks = find_blocks(data, length, block_switch_cost, num_histograms, histograms, insert_cost, cost,
@@ -128,7 +131,7 @@ module Mica::Brotli::Encode
         ids = block_ids.to_unsafe
         length.times { |i| histograms.add(ids[i], data[i]) }
       end
-      cluster_blocks(data, length, num_blocks, block_ids, data_size)
+      cluster_blocks(data, length, num_blocks, block_ids, data_size, arena)
     end
 
     private def self.find_blocks(data : T*, length : Int32, block_switch_bitcost : Float64, num_histograms : Int32,
@@ -223,21 +226,21 @@ module Mica::Brotli::Encode
     end
 
     private def self.cluster_blocks(data : T*, length : Int32, num_blocks : Int32, block_ids : Bytes,
-                                    data_size : Int32) : BlockSplit forall T
-      histogram_symbols = Slice(UInt32).new(num_blocks, 0_u32)
-      block_lengths = Slice(UInt32).new(num_blocks, 0_u32)
+                                    data_size : Int32, arena : Arena) : BlockSplit forall T
+      histogram_symbols = arena.filled(UInt32, num_blocks, 0_u32)
+      block_lengths = arena.filled(UInt32, num_blocks, 0_u32)
       expected_num_clusters = CLUSTERS_PER_BATCH * (num_blocks + HISTOGRAMS_PER_BATCH - 1) // HISTOGRAMS_PER_BATCH
       all_histograms = [] of HistogramSet
       cluster_size_list = [] of UInt32
       num_clusters = 0
-      batch = HistogramSet.new(data_size, Math.min(num_blocks, HISTOGRAMS_PER_BATCH))
+      batch = HistogramSet.new(data_size, Math.min(num_blocks, HISTOGRAMS_PER_BATCH), arena)
       max_num_pairs = HISTOGRAMS_PER_BATCH * HISTOGRAMS_PER_BATCH // 2
-      pairs = Slice(Cluster::Pair).new(max_num_pairs + 1, Cluster::Pair.new(0_u32, 0_u32, 0.0, 0.0))
-      tmp = HistogramSet.new(data_size, 2)
-      sizes = Slice(UInt32).new(HISTOGRAMS_PER_BATCH, 0_u32)
-      new_clusters = Slice(UInt32).new(HISTOGRAMS_PER_BATCH, 0_u32)
-      symbols = Slice(UInt32).new(HISTOGRAMS_PER_BATCH, 0_u32)
-      remap = Slice(UInt32).new(HISTOGRAMS_PER_BATCH, 0_u32)
+      pairs = Slice.new(arena.alloc(Cluster::Pair, max_num_pairs + 1), max_num_pairs + 1)
+      tmp = HistogramSet.new(data_size, 2, arena)
+      sizes = arena.filled(UInt32, HISTOGRAMS_PER_BATCH, 0_u32)
+      new_clusters = arena.filled(UInt32, HISTOGRAMS_PER_BATCH, 0_u32)
+      symbols = arena.filled(UInt32, HISTOGRAMS_PER_BATCH, 0_u32)
+      remap = arena.filled(UInt32, HISTOGRAMS_PER_BATCH, 0_u32)
       block_index = 0
       length.times do |i|
         block_lengths[block_index] += 1
@@ -261,7 +264,7 @@ module Mica::Brotli::Encode
         num_new_clusters = Cluster.combine(batch, tmp, sizes, symbols.to_unsafe, new_clusters.to_unsafe, pairs,
           num_to_combine, num_to_combine, HISTOGRAMS_PER_BATCH, max_num_pairs)
         num_new_clusters.times do |j|
-          single = HistogramSet.new(data_size, 1)
+          single = HistogramSet.new(data_size, 1, arena)
           single.copy(0, batch, new_clusters[j])
           all_histograms << single
           cluster_size_list << sizes[new_clusters[j]]
@@ -271,18 +274,20 @@ module Mica::Brotli::Encode
         num_clusters += num_new_clusters
         i += HISTOGRAMS_PER_BATCH
       end
-      everything = HistogramSet.new(data_size, num_clusters)
+      everything = HistogramSet.new(data_size, num_clusters, arena)
       num_clusters.times { |j| everything.copy(j, all_histograms[j], 0) }
-      cluster_size = Slice(UInt32).new(num_clusters) { |j| cluster_size_list[j] }
+      cluster_size = Slice.new(arena.alloc(UInt32, num_clusters), num_clusters)
+      num_clusters.times { |j| cluster_size[j] = cluster_size_list[j] }
       max_num_pairs = Math.min(64 * num_clusters, (num_clusters // 2) * num_clusters)
       if pairs.size < max_num_pairs + 1
-        pairs = Slice(Cluster::Pair).new(max_num_pairs + 1, Cluster::Pair.new(0_u32, 0_u32, 0.0, 0.0))
+        pairs = Slice.new(arena.alloc(Cluster::Pair, max_num_pairs + 1), max_num_pairs + 1)
       end
-      clusters = Slice(UInt32).new(num_clusters) { |j| j.to_u32 }
+      clusters = Slice.new(arena.alloc(UInt32, num_clusters), num_clusters)
+      num_clusters.times { |j| clusters[j] = j.to_u32 }
       num_final_clusters = Cluster.combine(everything, tmp, cluster_size, histogram_symbols.to_unsafe, clusters.to_unsafe,
         pairs, num_clusters, num_blocks, MAX_BLOCK_TYPES, max_num_pairs)
       invalid = UInt32::MAX
-      new_index = Slice(UInt32).new(num_clusters, invalid)
+      new_index = arena.filled(UInt32, num_clusters, invalid)
       pos = 0
       next_index = 0_u32
       num_blocks.times do |block|
@@ -306,7 +311,7 @@ module Mica::Brotli::Encode
           next_index += 1
         end
       end
-      split = BlockSplit.new(num_blocks)
+      split = BlockSplit.new(num_blocks, arena)
       current_length = 0_u32
       block_index = 0
       max_type = 0_u8

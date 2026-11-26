@@ -74,7 +74,9 @@ module Mica::Brotli
       writer = BitWriter.new(2 * input.size + 600)
       encoder.encode_block(writer, input, 0, input.size, 0_i64, is_last: true)
       encoder.release
-      writer.to_slice.dup
+      encoded = writer.to_slice.dup
+      writer.release
+      encoded
     end
 
     # How much input the streaming writer buffers before encoding it.
@@ -156,7 +158,8 @@ module Mica::Brotli
       @hasher_prepared = false
     end
 
-    # Frees the hash tables now rather than when the encoder is collected.
+    # Frees the hash tables, scratch arena and command buffer now rather
+    # than when the encoder is collected.
     def release : Nil
       if hasher = @hasher
         hasher.release
@@ -167,6 +170,7 @@ module Mica::Brotli
         @tree_hasher = nil
       end
       @arena.release
+      @commands.release
     end
 
     private def ported? : Bool

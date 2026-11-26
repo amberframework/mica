@@ -446,7 +446,7 @@ module Mica::Brotli::Encode
       best = params
       best_cost = 1e99
       check_original = true
-      scratch = HistogramSet.new(NUM_HISTOGRAM_DISTANCES, 1)
+      scratch = HistogramSet.new(NUM_HISTOGRAM_DISTANCES, 1, arena)
       direct_msb = 0
       4.times do |postfix|
         while direct_msb < 16
@@ -467,15 +467,15 @@ module Mica::Brotli::Encode
         best = original if cost && cost < best_cost
       end
       recompute_distance_prefixes(commands, original, best)
-      literal_split, command_split, distance_split = BlockSplitter.split_block(commands, data, position, quality)
-      literal_histograms = HistogramSet.new(NUM_LITERAL_SYMBOLS, literal_split.num_types << LITERAL_CONTEXT_BITS)
+      literal_split, command_split, distance_split = BlockSplitter.split_block(commands, data, position, quality, arena)
+      literal_histograms = HistogramSet.new(NUM_LITERAL_SYMBOLS, literal_split.num_types << LITERAL_CONTEXT_BITS, arena)
       command_histograms = HistogramSet.new(NUM_COMMAND_SYMBOLS, command_split.num_types, arena)
-      distance_histograms = HistogramSet.new(NUM_HISTOGRAM_DISTANCES, distance_split.num_types << DISTANCE_CONTEXT_BITS)
+      distance_histograms = HistogramSet.new(NUM_HISTOGRAM_DISTANCES, distance_split.num_types << DISTANCE_CONTEXT_BITS, arena)
       build_histograms_with_context(commands, literal_split, command_split, distance_split, data, position,
         previous_byte, previous_byte2, literal_context_mode, literal_histograms, command_histograms,
         distance_histograms)
-      literal_clusters, literal_map = Cluster.cluster_histograms(literal_histograms, 256)
-      distance_clusters, distance_map = Cluster.cluster_histograms(distance_histograms, 256)
+      literal_clusters, literal_map = Cluster.cluster_histograms(literal_histograms, 256, arena)
+      distance_clusters, distance_map = Cluster.cluster_histograms(distance_histograms, 256, arena)
       metablock = MetaBlock.new(literal_split, command_split, distance_split, literal_clusters, command_histograms,
         distance_clusters)
       metablock.literal_context_map = literal_map

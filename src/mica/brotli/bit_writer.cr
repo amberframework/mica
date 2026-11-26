@@ -48,7 +48,15 @@ module Mica::Brotli
     end
 
     def finalize
+      release
+    end
+
+    # Frees the buffer now rather than when the collector runs the
+    # finalizer (malloc'd memory the collector does not see, so it would
+    # pile up between collections); the writer is unusable after.
+    def release : Nil
       @buffer = Encode.free_table(@buffer)
+      @capacity = 0
     end
 
     # Appends the low *count* bits of *value* (at most 56 bits; *value*

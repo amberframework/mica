@@ -236,7 +236,15 @@ module Mica::Brotli::Encode
     end
 
     def finalize
+      release
+    end
+
+    # Frees the buffer now rather than when the collector runs the
+    # finalizer; the buffer grows again on the next push.
+    def release : Nil
       @buffer = Encode.free_table(@buffer)
+      @capacity = 0
+      @size = 0
     end
 
     def reserve(extra : Int32) : Nil
