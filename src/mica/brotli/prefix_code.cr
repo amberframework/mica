@@ -88,6 +88,20 @@ module Mica::Brotli
         return start
       end
 
+      # Symbols sorted by code length, then by value: canonical order.
+      offsets = StaticArray(Int32, 16).new(0)
+      (2..MAX_LENGTH).each { |length| offsets[length] = offsets[length - 1] + count[length - 1] }
+      sorted_out = sorted.to_unsafe
+      used.times do |index|
+        symbol = symbols.unsafe_fetch(index)
+        length = lengths.unsafe_fetch(symbol.to_i32).to_i32
+        slot = offsets.unsafe_fetch(length)
+        sorted_out[slot] = symbol
+        offsets.unsafe_put(length, slot &+ 1)
+      end
+
+      at = 0
+      code = 0
       max_length = MAX_LENGTH
       while max_length > 1 && count[max_length] == 0
         max_length -= 1
@@ -99,39 +113,20 @@ module Mica::Brotli
       table_bits = max_length < ROOT_BITS ? max_length : ROOT_BITS
       table_size = 1 << table_bits
       table = store.to_unsafe + start
-      # The first canonical code of each length (RFC 7932, section 3.2).
-      next_code = StaticArray(Int32, 16).new(0)
-      (2..MAX_LENGTH).each { |length| next_code[length] = (next_code[length - 1] + count[length - 1]) << 1 }
-      # Codes of more than ROOT_BITS bits, sorted by length and then by
-      # symbol (canonical order), for the second-level tables below.
-      offsets = StaticArray(Int32, 16).new(0)
-      (ROOT_BITS + 2..MAX_LENGTH).each { |length| offsets[length] = offsets[length - 1] + count[length - 1] }
-      sorted_out = sorted.to_unsafe
-      # Symbols arrive in increasing order, which is canonical order
-      # within a length, so each short code is its length's next code and
-      # fills the root at once. (Sorting every symbol first made each one
-      # wait on the previous same-length slot through memory.)
-      used.times do |index|
-        symbol = symbols.unsafe_fetch(index)
-        length = lengths.unsafe_fetch(symbol.to_i32).to_i32
-        if length > ROOT_BITS
-          slot = offsets.unsafe_fetch(length)
-          sorted_out[slot] = symbol
-          offsets.unsafe_put(length, slot &+ 1)
-          next
-        end
-        code = next_code.unsafe_fetch(length)
-        next_code.unsafe_put(length, code &+ 1)
-        entry = (symbol.to_u32 << 8) | length.to_u32
+      (1..ROOT_BITS).each do |length|
         step = 1 << length
-        slot = reverse(code, length)
-        while slot < table_size
-          table[slot] = entry
-          slot &+= step
+        count[length].times do
+          entry = (sorted.unsafe_fetch(at).to_u32 << 8) | length.to_u32
+          index = reverse(code, length)
+          while index < table_size
+            table[index] = entry
+            index += step
+          end
+          at += 1
+          code += 1
         end
+        code <<= 1
       end
-      at = 0
-      code = next_code[ROOT_BITS + 1]
       filled = table_size
       while filled < ROOT_SIZE
         (table + filled).copy_from(table, filled)
