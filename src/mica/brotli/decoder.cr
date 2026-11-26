@@ -61,10 +61,24 @@ module Mica::Brotli
       2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 14, 18, 22, 30, 38, 54, 70, 102, 134, 198, 326, 582, 1094, 2118,
     ]
     COPY_EXTRA = StaticArray[0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 7, 8, 9, 10, 24]
-    # For each 64-symbol cell of the insert-and-copy alphabet: the first
-    # insert length code and the first copy length code.
-    CELL_INSERT = StaticArray[0, 0, 0, 0, 8, 8, 0, 16, 8, 16, 16]
-    CELL_COPY   = StaticArray[0, 8, 0, 8, 0, 8, 16, 0, 16, 8, 16]
+    # Each insert-and-copy symbol unpacked (RFC 7932, section 5): bits 0-15
+    # hold the insert length base, 16-23 its extra bit count, 24-39 the
+    # copy length base and 40-47 its extra bit count.
+    COMMAND_LUT = {% begin %}
+      {% insert_base = [0, 1, 2, 3, 4, 5, 6, 8, 10, 14, 18, 26, 34, 50, 66, 98, 130, 194, 322, 578, 1090, 2114, 6210, 22594] %}
+      {% insert_extra = [0, 0, 0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 7, 8, 9, 10, 12, 14, 24] %}
+      {% copy_base = [2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 14, 18, 22, 30, 38, 54, 70, 102, 134, 198, 326, 582, 1094, 2118] %}
+      {% copy_extra = [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 7, 8, 9, 10, 24] %}
+      {% cell_insert = [0, 0, 0, 0, 8, 8, 0, 16, 8, 16, 16] %}
+      {% cell_copy = [0, 8, 0, 8, 0, 8, 16, 0, 16, 8, 16] %}
+      StaticArray[
+        {% for symbol in 0...704 %}
+          {% insert_code = cell_insert[symbol // 64] + (symbol // 8) % 8 %}
+          {% copy_code = cell_copy[symbol // 64] + symbol % 8 %}
+          {{ 1_i64 * insert_base[insert_code] + 65_536_i64 * insert_extra[insert_code] + 16_777_216_i64 * copy_base[copy_code] + 1_099_511_627_776_i64 * copy_extra[copy_code] }},
+        {% end %}
+      ]
+    {% end %}
 
     # Short distance codes 0 to 15 (RFC 7932, section 4): which of the
     # last four distances, and the change to it.
@@ -353,9 +367,8 @@ module Mica::Brotli
       if @in_end - @in_pos >= 8
         word = (@input.to_unsafe + @in_pos).as(UInt64*).value
         @bits |= word.unsafe_shl(@bit_count)
-        count = (63 &- @bit_count) >> 3
-        @in_pos &+= count
-        @bit_count &+= count << 3
+        @in_pos &+= (@bit_count >> 3) ^ 7
+        @bit_count |= 56
         return
       end
       while @bit_count <= 56
@@ -1020,9 +1033,8 @@ module Mica::Brotli
     private macro fast_refill
       %word = (input + in_pos).as(UInt64*).value
       bits |= %word.unsafe_shl(nbits)
-      %count = (63 &- nbits) >> 3
-      in_pos &+= %count
-      nbits &+= %count << 3
+      in_pos &+= (nbits >> 3) ^ 7
+      nbits |= 56
     end
 
     # Reads one symbol in `fast_commands` (at least 15 bits are buffered).
@@ -1151,24 +1163,18 @@ module Mica::Brotli
         fast_refill
         symbol = 0
         fast_symbol(command_tree, symbol)
-        # A command symbol is below COMMAND_CODES (704), so its cell is
-        # below 11 and both codes are below 24.
-        cell = symbol >> 6
-        insert_code = CELL_INSERT.unsafe_fetch(cell) &+ ((symbol >> 3) & 7)
-        copy_code = CELL_COPY.unsafe_fetch(cell) &+ (symbol & 7)
+        # A command symbol is below COMMAND_CODES (704). Both lengths'
+        # extra bits (at most 48) are read at once.
+        command = COMMAND_LUT.unsafe_fetch(symbol)
+        insert_width = (command >> 16).to_i32! & 0xFF
+        both_width = insert_width &+ ((command >> 40).to_i32! & 0xFF)
+        fast_refill if nbits < both_width
+        length_bits = bits & (1_u64.unsafe_shl(both_width) &- 1)
+        bits = bits.unsafe_shr(both_width)
+        nbits &-= both_width
+        insert = (command.to_i32! & 0xFFFF) &+ (length_bits & (1_u64.unsafe_shl(insert_width) &- 1)).to_i32!
+        copy_length = ((command >> 24).to_i32! & 0xFFFF) &+ length_bits.unsafe_shr(insert_width).to_i32!
         extra = 0
-        insert = INSERT_BASE.unsafe_fetch(insert_code)
-        width = INSERT_EXTRA.unsafe_fetch(insert_code)
-        if width > 0
-          fast_bits(width, extra)
-          insert &+= extra
-        end
-        copy_length = COPY_BASE.unsafe_fetch(copy_code)
-        width = COPY_EXTRA.unsafe_fetch(copy_code)
-        if width > 0
-          fast_bits(width, extra)
-          copy_length &+= extra
-        end
         implicit = symbol < 128
         if insert > meta_left
           fast_save
@@ -1390,12 +1396,10 @@ module Mica::Brotli
       end
       @block_left[1] -= 1
       symbol = read_symbol(@command_tree)
-      cell = symbol >> 6
-      insert_code = CELL_INSERT[cell] + ((symbol >> 3) & 7)
-      copy_code = CELL_COPY[cell] + (symbol & 7)
+      command = COMMAND_LUT[symbol]
       @implicit_distance = symbol < 128
-      @insert_left = INSERT_BASE[insert_code] + read_bits(INSERT_EXTRA[insert_code])
-      @copy_length = COPY_BASE[copy_code] + read_bits(COPY_EXTRA[copy_code])
+      @insert_left = (command.to_i32! & 0xFFFF) + read_bits((command >> 16).to_i32! & 0xFF)
+      @copy_length = ((command >> 24).to_i32! & 0xFFFF) + read_bits((command >> 40).to_i32! & 0xFF)
       malformed("Insert length runs past the metablock") if @insert_left > @meta_remaining
       @stage = Stage::Insert
     end
