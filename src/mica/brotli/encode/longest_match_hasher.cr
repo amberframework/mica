@@ -1,4 +1,19 @@
 module Mica::Brotli::Encode
+  {% if flag?(:x86_64) %}
+    # Bit i set when `tags[i]` (i < 16) equals the byte repeated in *splat*:
+    # SSE2 PCMPEQB and PMOVMSKB over the sixteen bytes, passed in as two
+    # words so the assembly reads no memory.
+    @[AlwaysInline]
+    def self.tag_mask16(tags : UInt8*, splat : UInt32) : UInt32
+      low = Encode.load64(tags)
+      high = Encode.load64(tags + 8)
+      mask = 0_u32
+      asm("movq $1, %xmm1\n\tmovq $2, %xmm2\n\tpunpcklqdq %xmm2, %xmm1\n\tmovd $3, %xmm0\n\tpshufd $$0, %xmm0, %xmm0\n\tpcmpeqb %xmm0, %xmm1\n\tpmovmskb %xmm1, $0"
+              : "=r"(mask) : "r"(low), "r"(high), "r"(splat) : "xmm0", "xmm1", "xmm2")
+      mask
+    end
+  {% end %}
+
   # google/brotli's H5 and H6 (qualities 7 to 9) and, with one tag byte
   # per slot, H58 and H68 (qualities 5 and 6): a table of 2^bucket_bits
   # buckets, each a ring of the latest 2^block_bits positions whose first
@@ -277,6 +292,21 @@ module Mica::Brotli::Encode
     # (google/brotli's GetMatchingTagMask, the eight-byte version).
     @[AlwaysInline]
     private def matching_tag_mask(tag : UInt8, tag_bucket : UInt8*, head : UInt32) : UInt64
+      {% if flag?(:x86_64) %}
+        # SSE2 (every x86-64 CPU has it): one byte compare and mask per
+        # sixteen tags, as google/brotli's GetMatchingTagMask does there.
+        if @block_size <= 32
+          splat = tag.to_u32! &* 0x01010101_u32
+          if @block_size == 16
+            value = Encode.tag_mask16(tag_bucket, splat).to_u16!
+            shift = head & 15
+            return (shift == 0 ? value : (value.unsafe_shr(shift) | value.unsafe_shl(16 &- shift))).to_u64!
+          end
+          value = Encode.tag_mask16(tag_bucket, splat) | Encode.tag_mask16(tag_bucket + 16, splat).unsafe_shl(16)
+          shift = head & 31
+          return (shift == 0 ? value : (value.unsafe_shr(shift) | value.unsafe_shl(32 &- shift))).to_u64!
+        end
+      {% end %}
       ones = 0x0101010101010101_u64
       highs = 0x8080808080808080_u64
       splat = tag.to_u64! &* ones
