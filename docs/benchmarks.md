@@ -620,22 +620,35 @@ round by round; a file's ratio is the median of its paired ratios, and a
 corpus or the whole set combines file ratios with the geometric mean.
 MB/s is total bytes over total time (MB is 10^6 bytes).
 
-**Result** (Apple M1 Max, macOS 26.5.2, 7 rounds, 2026-11-22T16:30:58Z; libyaml sha256 4970f13ebb9075a72f171d232ea9e990141e25806bf5c231cd0cf483dcb71552; load average { 104.42 102.62 118.11 }; the `to_yaml` row is from its own 7-round run right after):
+**Result** (Apple M4 Mac mini, macOS 26.5, nothing else running, 7 rounds, 2026-11-26T15:58:42Z; libyaml 0.2.5 sha256 8d6a60c8d8b91810f60e3fa1094d8c01fe79dad0f787fce8c1dbd59cccee99bb; load average { 5.25 5.07 4.14 }; the `to_yaml` row is from its own 7-round run right after):
 
 | Comparison | Whole corpus | Mica MB/s | libyaml MB/s | kubernetes | github-actions | shards | amber | Slowest file |
 |---|---|---|---|---|---|---|---|---|
-| Events, YAML 1.2 dialect | **1.91x** | 128.7 | 66.0 | 1.98x | 1.95x | 1.86x | 1.87x | 1.44x (starter-crystal.yml) |
-| Events, libyaml dialect | **1.79x** | 117.7 | 66.0 | 1.87x | 1.66x | 1.76x | 1.90x | 1.25x (starter-crystal.yml) |
-| Values (`parse_all`) | **1.50x** | 95.3 | 61.4 | 1.55x | 1.36x | 1.63x | 1.48x | 1.20x (starter-crystal.yml) |
-| `YAML::PullParser` with `-Duse_mica` | **1.84x** | 137.5 | 66.0 | 2.05x | 1.84x | 1.64x | 1.89x | 1.19x (crystal-shard.yml) |
-| `YAML.parse_all` with `-Duse_mica` | **1.61x** | 95.7 | 61.4 | 1.52x | 1.65x | 1.53x | 1.74x | 1.16x (starter-crystal.yml) |
-| `to_yaml` (`YAML::Builder`) with `-Duse_mica` | **1.26x** | 42.6 | 45.6 | 1.01x | 1.10x | 1.55x | 1.41x | 0.86x (argo-cd-install.yaml) |
+| Events, YAML 1.2 dialect | **1.89x** | 312.4 | 153.4 | 2.10x | 1.86x | 1.74x | 1.92x | 1.37x (shards-shard.lock) |
+| Events, libyaml dialect | **1.89x** | 313.9 | 153.4 | 2.10x | 1.85x | 1.72x | 1.94x | 1.33x (shards-shard.lock) |
+| Values (`parse_all`) | **1.41x** | 196.5 | 123.2 | 1.58x | 1.29x | 1.34x | 1.47x | 1.05x (shards-shard.lock) |
+| `YAML::PullParser` with `-Duse_mica` | **1.89x** | 306.9 | 153.4 | 2.07x | 1.84x | 1.74x | 1.96x | 1.37x (shards-shard.lock) |
+| `YAML.parse_all` with `-Duse_mica` | **1.61x** | 212.9 | 123.2 | 1.70x | 1.58x | 1.50x | 1.67x | 1.28x (shards-shard.lock) |
+| `to_yaml` (`YAML::Builder`) with `-Duse_mica` | **1.62x** | 269.1 | 166.9 | 1.69x | 1.47x | 1.68x | 1.65x | 1.39x (starter-crystal.yml) |
 
-Read as "N times as fast as libyaml". The machine was busy with
-other builds during the run (the load average above), so single rounds
-swing widely (`results.json` has every file's range and `samples.tsv`
-every measurement); the paired medians are what the table reports. Every
-file's median ratio is above 1.0 in every parsing comparison (the lowest
-is 1.16x). Writing is 1.26x on the geometric mean, because short files
-gain most; by total bytes it is 0.93x (42.6 against 45.6 MB/s), since the
-2.1 MB Argo CD manifest, most of the corpus, is written at 0.86x.
+Read as "N times as fast as libyaml"; the paired medians are what the
+table reports (`results.json` has every file's range and `samples.tsv`
+every measurement). Every file's median ratio is above 1.0 in every
+comparison, writing included (the lowest writing ratio is 1.39x).
+
+The same harness on Linux (Ubuntu 24.04, stock Crystal 1.21.0, libyaml
+0.2.5 from apt), whole corpus, median of 3 runs each: aarch64 in a 2-CPU
+Colima VM on an Apple M4, x86-64 on GitHub `ubuntu-24.04` runners
+(Intel Xeon 6975P-C twice, AMD EPYC 7763 once):
+
+| Comparison | Linux aarch64 | Linux x86-64 |
+|---|---|---|
+| Events, YAML 1.2 dialect | **1.58x** | **1.68x** |
+| Events, libyaml dialect | **1.58x** | **1.70x** |
+| Values (`parse_all`) | **1.24x** | **1.39x** |
+| `YAML::PullParser` with `-Duse_mica` | **1.67x** | **1.68x** |
+| `YAML.parse_all` with `-Duse_mica` | **1.51x** | **1.48x** |
+| `to_yaml` (`YAML::Builder`) with `-Duse_mica` | **1.29x** | **1.29x** |
+
+On Linux the values comparison is the closest: `Mica::YAML.parse_all` on
+the github-actions files is 1.14x on aarch64 and 1.32x on x86-64.
