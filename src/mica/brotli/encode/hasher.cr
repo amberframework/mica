@@ -154,12 +154,12 @@ module Mica::Brotli::Encode
     private def test_item(length : Int32, word : Int32, data : UInt8*, max_length : Int32, max_backward : Int32,
                           max_distance : Int32, result : SearchResult*) : Bool
       return false if length > max_length
-      offset = Dictionary::OFFSETS_BY_LENGTH[length] &+ length &* word
+      offset = Dictionary::OFFSETS_BY_LENGTH.unsafe_fetch(length) &+ length &* word
       matched = Encode.match_length(data, Dictionary::DATA.to_unsafe + offset, length)
       return false if matched &+ CUTOFF_COUNT <= length || matched == 0
       cut = length &- matched
       transform = (cut << 2) &+ ((CUTOFF_TRANSFORMS >> (cut &* 6)) & 0x3F).to_i32!
-      backward = max_backward.to_i64! &+ 1 &+ word &+ (transform.to_i64! << Dictionary::SIZE_BITS_BY_LENGTH[length])
+      backward = max_backward.to_i64! &+ 1 &+ word &+ (transform.to_i64! << Dictionary::SIZE_BITS_BY_LENGTH.unsafe_fetch(length))
       return false if backward > max_distance
       score = Encode.backward_reference_score(matched, backward.to_i32!)
       return false if score < result.value.score
