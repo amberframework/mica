@@ -16,33 +16,44 @@ module Mica::Brotli::Encode
 
   # google/brotli's H5 and H6 (qualities 7 to 9) and, with one tag byte
   # per slot, H58 and H68 (qualities 5 and 6): a table of 2^bucket_bits
-  # buckets, each a ring of the latest 2^block_bits positions whose first
+  # buckets, each a ring of the latest 2^BLOCK_BITS positions whose first
   # *BYTES* bytes hash there. *BYTES* is 4 (H5, H58) or 5 (H6, H68, for
   # inputs of 1 MiB and more). Searches try the cached distances first,
   # then the bucket, then the static dictionary.
   #
   # :nodoc:
-  class LongestMatchHasher(BYTES, TAGGED)
+  class LongestMatchHasher(BYTES, TAGGED, BUCKET_BITS, BLOCK_BITS)
     TAG_BITS = 8
 
     getter dictionary = DictionarySearch.new
-    @bucket_bits : Int32
-    @block_bits : Int32
-    @block_size : Int32
-    @block_mask : UInt32
     @num_last_distances : Int32
     @num : Pointer(UInt16)
     @tags : Pointer(UInt8)
     @buckets : Pointer(UInt32)
-    @hash_shift : Int32
 
-    def initialize(@bucket_bits : Int32, @block_bits : Int32, @num_last_distances : Int32)
-      @block_size = 1 << @block_bits
-      @hash_shift = (BYTES == 4 ? 32 : 64) - @bucket_bits - (TAGGED == 1 ? TAG_BITS : 0)
-      @block_mask = (@block_size &- 1).to_u32!
-      @num = Encode.table(UInt16, 1 << @bucket_bits)
-      @tags = TAGGED == 1 ? Encode.table(UInt8, 1 << (@bucket_bits &+ @block_bits)) : Pointer(UInt8).null
-      @buckets = Encode.table(UInt32, 1 << (@bucket_bits &+ @block_bits))
+    # The table shape is part of the type (one per quality and input
+    # size), so the shifts and masks of the hot loops are constants.
+    def initialize(@num_last_distances : Int32)
+      @num = Encode.table(UInt16, 1 << BUCKET_BITS)
+      @tags = TAGGED == 1 ? Encode.table(UInt8, 1 << (BUCKET_BITS + BLOCK_BITS)) : Pointer(UInt8).null
+      @buckets = Encode.table(UInt32, 1 << (BUCKET_BITS + BLOCK_BITS))
+    end
+
+    # Slots per bucket.
+    @[AlwaysInline]
+    private def block_size : Int32
+      1 << BLOCK_BITS
+    end
+
+    @[AlwaysInline]
+    private def block_mask : UInt32
+      (1_u32 << BLOCK_BITS) &- 1
+    end
+
+    # Right shift from the hashed word to the bucket (and tag) bits.
+    @[AlwaysInline]
+    private def hash_shift : Int32
+      (BYTES == 4 ? 32 : 64) - BUCKET_BITS - (TAGGED == 1 ? TAG_BITS : 0)
     end
 
     # Bytes a search needs after its position.
@@ -70,9 +81,9 @@ module Mica::Brotli::Encode
     @[AlwaysInline]
     private def hash_bytes(data : UInt8*) : UInt32
       if BYTES == 4
-        (Encode.load32(data) &* HASH_MUL32).unsafe_shr(@hash_shift)
+        (Encode.load32(data) &* HASH_MUL32).unsafe_shr(hash_shift)
       else
-        (Encode.load64(data) &* (HASH_MUL64 << 24)).unsafe_shr(@hash_shift).to_u32!
+        (Encode.load64(data) &* (HASH_MUL64 << 24)).unsafe_shr(hash_shift).to_u32!
       end
     end
 
@@ -80,7 +91,7 @@ module Mica::Brotli::Encode
     # input's positions.
     def prepare(one_shot : Bool, input_size : Int32, data : UInt8*, data_size : Int32) : Nil
       empty = TAGGED == 1 ? 65535_u16 : 0_u16
-      if one_shot && input_size <= (1 << @bucket_bits) >> 6
+      if one_shot && input_size <= (1 << BUCKET_BITS) >> 6
         limit = Math.min(input_size, data_size &- hash_type_length &+ 1)
         limit.times do |position|
           key = hash_bytes(data + position)
@@ -88,7 +99,7 @@ module Mica::Brotli::Encode
           @num[key] = empty
         end
       else
-        Slice.new(@num, 1 << @bucket_bits).fill(empty)
+        Slice.new(@num, 1 << BUCKET_BITS).fill(empty)
       end
     end
 
@@ -96,19 +107,17 @@ module Mica::Brotli::Encode
     def store(data : UInt8*, position : Int32) : Nil
       num = @num
       buckets = @buckets
-      block_bits = @block_bits
-      block_mask = @block_mask
       hash = hash_bytes(data + position)
       if TAGGED == 1
         key = hash >> TAG_BITS
         count = num[key]
-        offset = (count.to_u32! & block_mask) &+ key.unsafe_shl(block_bits)
+        offset = (count.to_u32! & block_mask) &+ key.unsafe_shl(BLOCK_BITS)
         num[key] = count &- 1
         buckets[offset] = position.to_u32!
         @tags[offset] = hash.to_u8!
       else
         count = num[hash]
-        offset = (count.to_u32! & block_mask) &+ hash.unsafe_shl(block_bits)
+        offset = (count.to_u32! & block_mask) &+ hash.unsafe_shl(BLOCK_BITS)
         num[hash] = count &+ 1
         buckets[offset] = position.to_u32!
       end
@@ -118,21 +127,19 @@ module Mica::Brotli::Encode
       num = @num
       buckets = @buckets
       tags = @tags
-      block_bits = @block_bits
-      block_mask = @block_mask
       position = start
       while position < stop
         hash = hash_bytes(data + position)
         if TAGGED == 1
           key = hash >> TAG_BITS
           count = num[key]
-          offset = (count.to_u32! & block_mask) &+ key.unsafe_shl(block_bits)
+          offset = (count.to_u32! & block_mask) &+ key.unsafe_shl(BLOCK_BITS)
           num[key] = count &- 1
           buckets[offset] = position.to_u32!
           tags[offset] = hash.to_u8!
         else
           count = num[hash]
-          offset = (count.to_u32! & block_mask) &+ hash.unsafe_shl(block_bits)
+          offset = (count.to_u32! & block_mask) &+ hash.unsafe_shl(BLOCK_BITS)
           num[hash] = count &+ 1
           buckets[offset] = position.to_u32!
         end
@@ -163,20 +170,17 @@ module Mica::Brotli::Encode
       current = data + position
       # Locals, not fields: stores into the tables cannot then force reloads.
       num = @num
-      block_mask = @block_mask
-      block_bits = @block_bits
-      block_size = @block_size
       min_score = result.value.score
       best_score = result.value.score
       best_length = result.value.length
       hash = hash_bytes(current)
       key = TAGGED == 1 ? hash >> TAG_BITS : hash
-      bucket = @buckets + key.unsafe_shl(block_bits)
+      bucket = @buckets + key.unsafe_shl(BLOCK_BITS)
       Encode.prefetch(bucket)
       if TAGGED == 1
-        Encode.prefetch(@tags + key.unsafe_shl(block_bits))
+        Encode.prefetch(@tags + key.unsafe_shl(BLOCK_BITS))
       end
-      Encode.prefetch(bucket + 16) if block_bits > 4
+      Encode.prefetch(bucket + 16) if BLOCK_BITS > 4
       found_length = 0
       found_distance = 0
       found_score = best_score
@@ -207,7 +211,7 @@ module Mica::Brotli::Encode
       best_length = 3 if best_length < 3
       if TAGGED == 1
         tag = hash.to_u8!
-        tag_bucket = @tags + key.unsafe_shl(block_bits)
+        tag_bucket = @tags + key.unsafe_shl(BLOCK_BITS)
         head = (num[key].to_u32! &+ 1) & block_mask
         matches = matching_tag_mask(tag, tag_bucket, head)
         used = 65535_u32 &- num[key]
@@ -295,9 +299,9 @@ module Mica::Brotli::Encode
       {% if flag?(:x86_64) %}
         # SSE2 (every x86-64 CPU has it): one byte compare and mask per
         # sixteen tags, as google/brotli's GetMatchingTagMask does there.
-        if @block_size <= 32
+        if block_size <= 32
           splat = tag.to_u32! &* 0x01010101_u32
-          if @block_size == 16
+          if block_size == 16
             value = Encode.tag_mask16(tag_bucket, splat).to_u16!
             shift = head & 15
             return (shift == 0 ? value : (value.unsafe_shr(shift) | value.unsafe_shl(16 &- shift))).to_u64!
@@ -311,7 +315,7 @@ module Mica::Brotli::Encode
       highs = 0x8080808080808080_u64
       splat = tag.to_u64! &* ones
       extract = 0x0002040810204081_u64 # (2^64 - 1) / 0x7F >> 8: gathers the eight high bits
-      chunk_count = @block_size // 16
+      chunk_count = block_size // 16
       matches = 0_u64
       index = chunk_count &* 16 &- 8
       while index >= 0
