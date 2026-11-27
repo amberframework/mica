@@ -100,6 +100,19 @@ describe Mica::Core::ProcessorKernels do
   describe "Adler-32" do
     generic = Kernel.new { |adler, pointer, count| Mica::Deflate::Adler32.update_generic(adler, pointer, count) }
 
+    {% if flag?(:aarch64) %}
+      if Mica::Core::ProcessorKernels::HAS_ADVANCED_SIMD
+        it "armv8-neon matches the generic body" do
+          variant = Kernel.new { |adler, pointer, count| Mica::Deflate::Adler32.update_with_advanced_simd(adler, pointer, count) }
+          compare_with_generic(generic, variant, ADLER32_STARTS).should eq(4 * kernel_lengths.size)
+        end
+      else
+        pending "armv8-neon (generic build)"
+      end
+    {% else %}
+      pending "armv8-neon (not an AArch64 build)"
+    {% end %}
+
     {% if flag?(:x86_64) %}
       if Mica::Core::ProcessorKernels::HAS_AVX2
         it "x86-64-v3 (AVX2) matches the generic body" do

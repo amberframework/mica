@@ -52,7 +52,11 @@ module KernelsBench
         end
       {% end %}
       report("adler32", "generic", size, rounds, median_ns(rounds, size) { |seed| Mica::Deflate::Adler32.update_generic(seed, pointer, size) })
-      {% if flag?(:x86_64) %}
+      {% if flag?(:aarch64) %}
+        if Mica::Core::ProcessorKernels::HAS_ADVANCED_SIMD
+          report("adler32", "armv8-neon", size, rounds, median_ns(rounds, size) { |seed| Mica::Deflate::Adler32.update_with_advanced_simd(seed, pointer, size) })
+        end
+      {% elsif flag?(:x86_64) %}
         if Mica::Core::ProcessorKernels::HAS_AVX2
           report("adler32", "x86-64-v3", size, rounds, median_ns(rounds, size) { |seed| Mica::Deflate::Adler32.update_with_avx2(seed, pointer, size) })
         end

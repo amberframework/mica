@@ -22,7 +22,7 @@ module Mica::Core
   # instructions.
   #
   # ```
-  # Mica::Core::ProcessorKernels.chosen_variants # => {"crc32" => "armv8-crc", "adler32" => "armv8-neon"}
+  # Mica::Core::ProcessorKernels.chosen_variants # => {"crc32" => "armv8-crc", "adler32" => "armv8-neon"} on Apple silicon
   # ```
   module ProcessorKernels
     {% if flag?(:aarch64) && flag?(:linux) %}
@@ -100,15 +100,18 @@ module Mica::Core
     {% end %}
 
     # What the kernels use: what the processor has, or nothing under
-    # `-Dmica_generic_kernels`.
+    # `-Dmica_generic_kernels`. Advanced SIMD is part of every AArch64
+    # processor.
     {% if flag?(:mica_generic_kernels) %}
       HAS_CRC32_INSTRUCTIONS = false
       HAS_CARRYLESS_MULTIPLY = false
       HAS_AVX2               = false
+      HAS_ADVANCED_SIMD      = false
     {% else %}
       HAS_CRC32_INSTRUCTIONS = CRC32_INSTRUCTIONS_FOUND
       HAS_CARRYLESS_MULTIPLY = CARRYLESS_MULTIPLY_FOUND
       HAS_AVX2               = AVX2_FOUND
+      HAS_ADVANCED_SIMD      = {{ flag?(:aarch64) }}
     {% end %}
 
     # The variant each kernel runs on this processor, by kernel name, as
@@ -146,7 +149,13 @@ module Mica::Core
     end
 
     private def self.adler32_variant : String
-      HAS_AVX2 ? "x86-64-v3" : "generic"
+      if HAS_ADVANCED_SIMD
+        "armv8-neon"
+      elsif HAS_AVX2
+        "x86-64-v3"
+      else
+        "generic"
+      end
     end
   end
 end
