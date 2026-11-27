@@ -22,9 +22,12 @@
 #   compression  deflate plus Mica::Brotli. The library requires
 #                "<destination>/mica/deflate" and "<destination>/mica/brotli".
 #   decimal      Mica::Decimal128, Mica::Currency and Mica::Money, with no
-#                Mica::Core. The library requires "<destination>/mica/decimal",
-#                and for the opt-in conversions "<destination>/mica/decimal/json",
-#                "<destination>/mica/decimal/yaml" or "<destination>/mica/decimal/big".
+#                Mica::Core, plus the opt-in JSON and YAML conversions. The
+#                library requires "<destination>/mica/decimal" and, for the
+#                conversions, "<destination>/mica/decimal/json" and
+#                "<destination>/mica/decimal/yaml". The BigDecimal conversions
+#                (src/mica/decimal/big.cr) stay out, so the copy never
+#                requires "big" and links no libgmp.
 #
 # The destination receives:
 #
@@ -71,12 +74,17 @@ LIST_OF_PATHS_BY_COMPONENT = {
   "decimal"     => ["src/mica/decimal.cr", "src/mica/decimal"],
 }.freeze
 
+# Files inside those paths that a component leaves out.
+LIST_OF_EXCLUDED_PATHS_BY_COMPONENT = {
+  "decimal" => ["src/mica/decimal/big.cr"],
+}.freeze
+
 # The files a library requires for each component; each must exist at the
 # commit taken.
 LIST_OF_ENTRY_FILES_BY_COMPONENT = {
   "deflate"     => ["src/mica/deflate.cr"],
   "compression" => ["src/mica/deflate.cr", "src/mica/brotli.cr"],
-  "decimal"     => ["src/mica/decimal.cr"],
+  "decimal"     => ["src/mica/decimal.cr", "src/mica/decimal/json.cr", "src/mica/decimal/yaml.cr"],
 }.freeze
 
 # Returns {path => contents} for the files of *component* and LICENSE at
@@ -87,7 +95,8 @@ def files_at(commit, component)
   Gem::Package::TarReader.new(StringIO.new(archive)) do |tar|
     tar.each { |entry| files[entry.full_name] = entry.read if entry.file? }
   end
-  files
+  excluded = LIST_OF_EXCLUDED_PATHS_BY_COMPONENT.fetch(component, [])
+  files.reject { |path, _| excluded.include?(path) }
 end
 
 # Moves every constant of the source under *namespace*.

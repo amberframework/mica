@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased
+
+Adds exact decimals and money, `Mica::Decimal128`, `Mica::Currency` and
+`Mica::Money` (`require "mica/decimal"`, docs/decimal.md), with no C
+library: a program that uses them links no libgmp.
+
+- `Decimal128`: an `Int128` coefficient and a scale of 0 to 38. `+ - *`
+  are exact and raise `OverflowError` past 38 digits; `divide`, `round`
+  and `rescale` take a scale and a `RoundingMode` (ties away, ties even,
+  floor, ceiling, truncate, unnecessary). Equality and hashing go by
+  value (`12.30 == 12.3`). Arithmetic, comparison and rounding allocate
+  nothing. A differential of 1,000,000 seeded operations against
+  `BigDecimal` shows 0 differences (`scripts/decimal_differential.cr`).
+- `Currency`: the ISO 4217 list published 2026-09-17, 178 codes, generated
+  by `scripts/generate_currency_table.rb` from a sha256-pinned snapshot.
+- `Money`: arithmetic only between equal currencies, rounding to the minor
+  unit, and `allocate`/`split` that never lose or invent a minor unit.
+- Opt-in `mica/decimal/json`, `mica/decimal/yaml` and `mica/decimal/big`.
+- `scripts/vendor_into.rb` gains the `decimal` component;
+  `scripts/check_linkage.sh` proves a decimal program links no libgmp.
+
 ## 0.3.0 (2026-11-24)
 
 Adds YAML, DEFLATE (Inflate and the encoders), Brotli, the WHATWG Encoding
