@@ -1,0 +1,32 @@
+# Requirements for Mica::Decimal128, Mica::Currency and Mica::Money (relay
+# chunk G5): the API contract of bignum/G5/CONTRACT.md, one line per
+# contract clause. Format: id<TAB>section<TAB>summary.
+DECIMAL-NEW	Decimal128 .new	.new(coefficient, scale) and .new(Int) accept up to 38 digits and a scale of 0 to 38; more digits raise OverflowError, another scale ArgumentError
+DECIMAL-PARSE	Decimal128 .parse	parse accepts an optional sign, digits, an optional fraction and an optional exponent, keeps trailing fraction zeros as scale, and reads PostgreSQL and MySQL text
+DECIMAL-PARSE-EXPONENT	Decimal128 .parse	Exponent forms parse to their exact value when it fits 38 digits and scale 38
+DECIMAL-PARSE-ERRORS	Decimal128 .parse, .parse?	Malformed text raises ParseError, out-of-range text OverflowError; parse? returns nil for both
+DECIMAL-TO-S	Decimal128 #to_s	to_s writes plain digits with the scale kept and never an exponent
+DECIMAL-ADD-SUB	Decimal128 + -	+ and - are exact at the larger scale and raise OverflowError past 38 digits
+DECIMAL-MUL	Decimal128 *	* is exact at the sum of the scales and raises OverflowError past 38 digits or scale 38
+DECIMAL-DIVIDE	Decimal128 #divide	divide rounds to the given scale with the given mode; a zero divisor raises DivisionByZeroError and an oversized quotient OverflowError
+DECIMAL-ROUNDING-MODES	Decimal128::RoundingMode	TiesAway, TiesEven, Floor, Ceiling, Truncate and Unnecessary act as named on positive and negative ties and non-ties
+DECIMAL-ROUND	Decimal128 #round	round lowers the scale with a mode and leaves a value already at or below the scale unchanged
+DECIMAL-RESCALE	Decimal128 #rescale	rescale raises the scale exactly and lowers it with a mode, by default Unnecessary
+DECIMAL-COMPARE	Decimal128 <=> == hash	Comparison, equality and hash are by value: 12.30 == 12.3 with equal hashes
+DECIMAL-CONVERSIONS	Decimal128 conversions	to_i64, to_f64, zero?, negative?, abs, unary minus and precision
+DECIMAL-38-DIGITS	Decimal128 bounds	38-digit coefficients and scale 38 work at the boundary and fail one past it
+DECIMAL-ERRORS	Decimal128 errors	ParseError, OverflowError, DivisionByZeroError and InexactError descend from Decimal128::Error < Exception
+DECIMAL-NO-ALLOCATION	Decimal128 heap	Arithmetic, comparison, hashing, rounding and rescaling allocate nothing
+DECIMAL-JSON	mica/decimal/json	to_json writes a JSON string; from_json reads a string, integer or float token from its text
+DECIMAL-YAML	mica/decimal/yaml	to_yaml writes the plain scalar and from_yaml reads it back with its scale
+DECIMAL-BIG	mica/decimal/big	to_big_d and Decimal128.new(BigDecimal) convert exactly
+CURRENCY-TABLE	Currency	The table holds every current ISO 4217 code with its numeric code and minor units (USD 2, JPY 0, BHD 3)
+CURRENCY-FIND	Currency .find	find returns a currency or raises Currency::UnknownError; find? returns nil
+MONEY-NEW	Money .new	Money.new takes a Decimal128, String or Int amount and a Currency or String code
+MONEY-ADD-SUB	Money + -	+ and - work between equal currencies and raise CurrencyMismatchError otherwise
+MONEY-MUL	Money *	* by a Decimal128 or Int is exact
+MONEY-ROUND	Money #round	round goes to the currency minor units with the given mode
+MONEY-ALLOCATE	Money #allocate	allocate never loses or invents a minor unit and requires an amount at the minor units (else InexactError)
+MONEY-SPLIT	Money #split	split of 100.00 USD into 3 is 33.34, 33.33, 33.33; JPY and BHD split at 0 and 3 places
+MONEY-TO-S	Money #to_s	to_s writes the plain amount and the code: 12.30 USD
+MONEY-EQUALITY	Money == hash	== and hash are by amount value and currency

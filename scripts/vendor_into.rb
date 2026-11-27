@@ -21,6 +21,10 @@
 #                "<destination>/mica/deflate".
 #   compression  deflate plus Mica::Brotli. The library requires
 #                "<destination>/mica/deflate" and "<destination>/mica/brotli".
+#   decimal      Mica::Decimal128, Mica::Currency and Mica::Money, with no
+#                Mica::Core. The library requires "<destination>/mica/decimal",
+#                and for the opt-in conversions "<destination>/mica/decimal/json",
+#                "<destination>/mica/decimal/yaml" or "<destination>/mica/decimal/big".
 #
 # The destination receives:
 #
@@ -64,6 +68,7 @@ LIST_OF_PATHS_BY_COMPONENT = {
                     "src/mica/gzip.cr"],
   "compression" => ["src/mica/core.cr", "src/mica/core", "src/mica/deflate.cr", "src/mica/deflate", "src/mica/zlib.cr",
                     "src/mica/gzip.cr", "src/mica/brotli.cr", "src/mica/brotli"],
+  "decimal"     => ["src/mica/decimal.cr", "src/mica/decimal"],
 }.freeze
 
 # The files a library requires for each component; each must exist at the
@@ -71,6 +76,7 @@ LIST_OF_PATHS_BY_COMPONENT = {
 LIST_OF_ENTRY_FILES_BY_COMPONENT = {
   "deflate"     => ["src/mica/deflate.cr"],
   "compression" => ["src/mica/deflate.cr", "src/mica/brotli.cr"],
+  "decimal"     => ["src/mica/decimal.cr"],
 }.freeze
 
 # Returns {path => contents} for the files of *component* and LICENSE at
