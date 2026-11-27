@@ -32,15 +32,20 @@ module Mica::Deflate
     end
 
     # :nodoc:
+    #
+    # Runs the variant `Core::ProcessorKernels` chose for this processor:
+    # the ARMv8 CRC-32 instructions, the x86-64 carry-less multiply fold, or
+    # the slicing-by-8 tables.
     def self.update(crc : UInt32, pointer : UInt8*, count : Int32) : UInt32
-      {% if flag?(:aarch64) && flag?(:darwin) %}
-        update_with_instructions(crc, pointer, count)
-      {% else %}
-        update_with_tables(crc, pointer, count)
+      {% if flag?(:aarch64) %}
+        return update_with_instructions(crc, pointer, count) if Core::ProcessorKernels::HAS_CRC32_INSTRUCTIONS
+      {% elsif flag?(:x86_64) %}
+        return update_with_carryless_multiply(crc, pointer, count) if Core::ProcessorKernels::HAS_CARRYLESS_MULTIPLY
       {% end %}
+      update_with_tables(crc, pointer, count)
     end
 
-    {% if flag?(:aarch64) && flag?(:darwin) %}
+    {% if flag?(:aarch64) %}
       # Bytes per stream when three streams are folded side by side.
       LONG_STREAM  = 4_096
       SHORT_STREAM =   256
@@ -68,8 +73,9 @@ module Mica::Deflate
       # The ARMv8 CRC32X instruction: folds the eight bytes of *data* into
       # *crc*. It is written as inline assembly with `.arch_extension crc`
       # because the LLVM intrinsic only compiles when the target CPU is
-      # declared to have the CRC extension, which a default macOS build of
-      # Crystal does not declare; every Apple silicon CPU has it.
+      # declared to have the CRC extension, which a default build of Crystal
+      # does not declare. Only called where `Core::ProcessorKernels` found
+      # the extension (every Apple silicon CPU has it).
       @[AlwaysInline]
       private def self.crc32x(crc : UInt32, data : UInt64) : UInt32
         result = 0_u32
@@ -121,10 +127,13 @@ module Mica::Deflate
         shifted(first, shift_twice) ^ shifted(second, shift_once) ^ third
       end
 
-      # Every Apple silicon CPU has the ARMv8 CRC32 instructions (CRC32X
-      # folds eight bytes into the CRC-32 in one instruction); the inline
-      # assembly above emits them, so no library is involved.
-      private def self.update_with_instructions(crc : UInt32, pointer : UInt8*, count : Int32) : UInt32
+      # :nodoc:
+      #
+      # The CRC-32 on the ARMv8 CRC32 instructions (CRC32X folds eight
+      # bytes into the CRC-32 in one instruction); the inline assembly above
+      # emits them, so no library is involved. Only for a processor that has
+      # them (`Core::ProcessorKernels::HAS_CRC32_INSTRUCTIONS`).
+      def self.update_with_instructions(crc : UInt32, pointer : UInt8*, count : Int32) : UInt32
         crc = ~crc
         index = 0
         if count >= 3 * SHORT_STREAM
@@ -150,6 +159,143 @@ module Mica::Deflate
           index &+= 1
         end
         ~crc
+      end
+    {% end %}
+
+    {% if flag?(:x86_64) %}
+      # The folding constants for the reflected polynomial 0xEDB88320, as
+      # zlib's and Chromium's `crc32_simd.c` lay them out (Gopal et al.,
+      # "Fast CRC Computation for Generic Polynomials Using PCLMULQDQ",
+      # Intel, 2009): x^(4 * 128 + 32) and x^(4 * 128 - 32) modulo P to
+      # fold four registers 64 bytes ahead; the same for one register 16
+      # bytes ahead; x^64 modulo P; the Barrett constants (P and
+      # floor(x^64 / P)); and the mask of each register's low 32-bit words.
+      FOLD_CONSTANTS = StaticArray[
+        0x0154442bd4_u64, 0x01c6e41596_u64,
+        0x01751997d0_u64, 0x00ccaa009e_u64,
+        0x0163cd6124_u64, 0x0000000000_u64,
+        0x01db710641_u64, 0x01f7011641_u64,
+        0x00ffffffff_u64, 0x00ffffffff_u64,
+      ]
+
+      # The fewest bytes the fold takes: four 16-byte registers.
+      FOLD_MINIMUM = 64
+
+      # :nodoc:
+      #
+      # The CRC-32 by carry-less multiplication: four 128-bit registers
+      # fold 64 bytes per step, are folded into one, then reduced to 32 bits
+      # with Barrett's method; the last bytes that do not fill a 16-byte
+      # register go through the tables. Only for a processor that has
+      # `pclmulqdq` and SSE4.1 (`Core::ProcessorKernels::HAS_CARRYLESS_MULTIPLY`).
+      #
+      # Registers: rsi input, rdx bytes left (a multiple of 16), rax
+      # constants; xmm1 to xmm4 the four running registers, xmm0 the fold
+      # constant.
+      def self.update_with_carryless_multiply(crc : UInt32, pointer : UInt8*, count : Int32) : UInt32
+        return update_with_tables(crc, pointer, count) if count < FOLD_MINIMUM
+
+        folded = count & ~15
+        state = ~crc
+        result = 0_u32
+        asm("
+  mov $1, %rsi
+  mov $2, %rdx
+  mov $3, %rax
+  movdqu (%rsi), %xmm1
+  movdqu 16(%rsi), %xmm2
+  movdqu 32(%rsi), %xmm3
+  movdqu 48(%rsi), %xmm4
+  movd $4, %xmm9
+  pxor %xmm9, %xmm1
+  movdqu (%rax), %xmm0
+  add $$64, %rsi
+  sub $$64, %rdx
+  cmp $$64, %rdx
+  jb 2f
+1:
+  movdqa %xmm1, %xmm5
+  movdqa %xmm2, %xmm6
+  movdqa %xmm3, %xmm7
+  movdqa %xmm4, %xmm8
+  pclmulqdq $$0x00, %xmm0, %xmm5
+  pclmulqdq $$0x00, %xmm0, %xmm6
+  pclmulqdq $$0x00, %xmm0, %xmm7
+  pclmulqdq $$0x00, %xmm0, %xmm8
+  pclmulqdq $$0x11, %xmm0, %xmm1
+  pclmulqdq $$0x11, %xmm0, %xmm2
+  pclmulqdq $$0x11, %xmm0, %xmm3
+  pclmulqdq $$0x11, %xmm0, %xmm4
+  movdqu (%rsi), %xmm9
+  movdqu 16(%rsi), %xmm10
+  movdqu 32(%rsi), %xmm11
+  movdqu 48(%rsi), %xmm12
+  pxor %xmm5, %xmm1
+  pxor %xmm6, %xmm2
+  pxor %xmm7, %xmm3
+  pxor %xmm8, %xmm4
+  pxor %xmm9, %xmm1
+  pxor %xmm10, %xmm2
+  pxor %xmm11, %xmm3
+  pxor %xmm12, %xmm4
+  add $$64, %rsi
+  sub $$64, %rdx
+  cmp $$64, %rdx
+  jae 1b
+2:
+  movdqu 16(%rax), %xmm0
+  movdqa %xmm1, %xmm5
+  pclmulqdq $$0x00, %xmm0, %xmm5
+  pclmulqdq $$0x11, %xmm0, %xmm1
+  pxor %xmm2, %xmm1
+  pxor %xmm5, %xmm1
+  movdqa %xmm1, %xmm5
+  pclmulqdq $$0x00, %xmm0, %xmm5
+  pclmulqdq $$0x11, %xmm0, %xmm1
+  pxor %xmm3, %xmm1
+  pxor %xmm5, %xmm1
+  movdqa %xmm1, %xmm5
+  pclmulqdq $$0x00, %xmm0, %xmm5
+  pclmulqdq $$0x11, %xmm0, %xmm1
+  pxor %xmm4, %xmm1
+  pxor %xmm5, %xmm1
+  cmp $$16, %rdx
+  jb 4f
+3:
+  movdqu (%rsi), %xmm2
+  movdqa %xmm1, %xmm5
+  pclmulqdq $$0x00, %xmm0, %xmm5
+  pclmulqdq $$0x11, %xmm0, %xmm1
+  pxor %xmm2, %xmm1
+  pxor %xmm5, %xmm1
+  add $$16, %rsi
+  sub $$16, %rdx
+  cmp $$16, %rdx
+  jae 3b
+4:
+  movdqa %xmm1, %xmm2
+  pclmulqdq $$0x10, %xmm0, %xmm2
+  movdqu 64(%rax), %xmm3
+  psrldq $$8, %xmm1
+  pxor %xmm2, %xmm1
+  movdqu 32(%rax), %xmm0
+  movdqa %xmm1, %xmm2
+  psrldq $$4, %xmm2
+  pand %xmm3, %xmm1
+  pclmulqdq $$0x00, %xmm0, %xmm1
+  pxor %xmm2, %xmm1
+  movdqu 48(%rax), %xmm0
+  movdqa %xmm1, %xmm2
+  pand %xmm3, %xmm2
+  pclmulqdq $$0x10, %xmm0, %xmm2
+  pand %xmm3, %xmm2
+  pclmulqdq $$0x00, %xmm0, %xmm2
+  pxor %xmm2, %xmm1
+  pextrd $$1, %xmm1, $0
+" : "=r"(result) : "r"(pointer), "r"(folded.to_i64), "r"(FOLD_CONSTANTS.to_unsafe), "r"(state)
+  : "rax", "rdx", "rsi", "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "xmm6", "xmm7", "xmm8", "xmm9",
+    "xmm10", "xmm11", "xmm12", "memory", "flags")
+        update_with_tables(~result, pointer + folded, count - folded)
       end
     {% end %}
 
@@ -199,7 +345,22 @@ module Mica::Deflate
     end
 
     # :nodoc:
+    #
+    # Runs the variant `Core::ProcessorKernels` chose for this processor:
+    # the Advanced SIMD body on AArch64, the AVX2 build of the generic loop
+    # on x86-64 processors that have AVX2, otherwise the generic body (which LLVM vectorizes for the baseline SSE2 or Advanced
+    # SIMD registers).
     def self.update(adler : UInt32, pointer : UInt8*, count : Int32) : UInt32
+      {% if flag?(:aarch64) %}
+        return update_with_advanced_simd(adler, pointer, count) if Core::ProcessorKernels::HAS_ADVANCED_SIMD
+      {% elsif flag?(:x86_64) %}
+        return update_with_avx2(adler, pointer, count) if Core::ProcessorKernels::HAS_AVX2
+      {% end %}
+      update_generic(adler, pointer, count)
+    end
+
+    # The block sums of every body, written once.
+    private macro sum_blocks
       low = (adler & 0xFFFF).to_u64
       high = (adler >> 16).to_u64
       index = 0
@@ -228,5 +389,129 @@ module Mica::Deflate
       end
       ((high << 16) | low).to_u32
     end
+
+    # :nodoc:
+    #
+    # The generic body, the reference every variant matches.
+    def self.update_generic(adler : UInt32, pointer : UInt8*, count : Int32) : UInt32
+      sum_blocks
+    end
+
+    {% if flag?(:aarch64) %}
+      # The weight of each byte of a 64-byte chunk: its distance from the
+      # chunk's end, 64 for the first byte down to 1 for the last.
+      CHUNK_WEIGHTS = StaticArray(UInt16, 64).new { |index| (64 - index).to_u16 }
+
+      # The most 64-byte chunks summed before the sums are reduced: 86
+      # chunks (5,504 bytes) stay within `BLOCK`, and a 16-bit column sum of
+      # 86 bytes cannot overflow.
+      CHUNKS_PER_BLOCK = 86
+
+      # :nodoc:
+      #
+      # The Adler-32 on Advanced SIMD, written by hand because it beats what
+      # LLVM makes of the generic loop about fourfold. Each 64-byte chunk adds
+      # its bytes into sixteen-bit column sums (one per position in the chunk)
+      # and pairwise into the running byte sum; before each chunk the running
+      # byte sum is added into a second sum, which, multiplied by 64, gives the
+      # weight the earlier bytes gain from the later chunks. At the end of a
+      # block the column sums are multiplied by their weights (64 down to 1)
+      # and added in. The bytes that do not fill a chunk go through the
+      # generic body. Advanced SIMD is part of every AArch64 processor this
+      # runs on (`Core::ProcessorKernels::HAS_ADVANCED_SIMD`).
+      #
+      # Registers: x9 input, x10 chunks left, x11 weights; v16 the byte sum
+      # and v17 the earlier-bytes sum (four 32-bit lanes each), v18 to v25 the
+      # column sums.
+      def self.update_with_advanced_simd(adler : UInt32, pointer : UInt8*, count : Int32) : UInt32
+        low = (adler & 0xFFFF).to_u64
+        high = (adler >> 16).to_u64
+        index = 0
+        chunked = count & ~63
+        while index < chunked
+          chunks = Math.min(CHUNKS_PER_BLOCK, (chunked - index) // 64)
+          sum = 0_u32
+          weighted = 0_u32
+          asm("
+      mov x9, $2
+      mov x10, $3
+      mov x11, $4
+      movi v16.4s, #0
+      movi v17.4s, #0
+      movi v18.8h, #0
+      movi v19.8h, #0
+      movi v20.8h, #0
+      movi v21.8h, #0
+      movi v22.8h, #0
+      movi v23.8h, #0
+      movi v24.8h, #0
+      movi v25.8h, #0
+    1:
+      ldp q0, q1, [x9], #32
+      ldp q26, q27, [x9], #32
+      add v17.4s, v17.4s, v16.4s
+      uaddlp v2.8h, v0.16b
+      uaddlp v3.8h, v26.16b
+      uadalp v2.8h, v1.16b
+      uadalp v3.8h, v27.16b
+      add v2.8h, v2.8h, v3.8h
+      uadalp v16.4s, v2.8h
+      uaddw v18.8h, v18.8h, v0.8b
+      uaddw2 v19.8h, v19.8h, v0.16b
+      uaddw v20.8h, v20.8h, v1.8b
+      uaddw2 v21.8h, v21.8h, v1.16b
+      uaddw v22.8h, v22.8h, v26.8b
+      uaddw2 v23.8h, v23.8h, v26.16b
+      uaddw v24.8h, v24.8h, v27.8b
+      uaddw2 v25.8h, v25.8h, v27.16b
+      subs x10, x10, #1
+      b.ne 1b
+      shl v17.4s, v17.4s, #6
+      ldp q4, q5, [x11]
+      ldp q6, q7, [x11, #32]
+      umlal v17.4s, v18.4h, v4.4h
+      umlal2 v17.4s, v18.8h, v4.8h
+      umlal v17.4s, v19.4h, v5.4h
+      umlal2 v17.4s, v19.8h, v5.8h
+      umlal v17.4s, v20.4h, v6.4h
+      umlal2 v17.4s, v20.8h, v6.8h
+      umlal v17.4s, v21.4h, v7.4h
+      umlal2 v17.4s, v21.8h, v7.8h
+      ldp q4, q5, [x11, #64]
+      ldp q6, q7, [x11, #96]
+      umlal v17.4s, v22.4h, v4.4h
+      umlal2 v17.4s, v22.8h, v4.8h
+      umlal v17.4s, v23.4h, v5.4h
+      umlal2 v17.4s, v23.8h, v5.8h
+      umlal v17.4s, v24.4h, v6.4h
+      umlal2 v17.4s, v24.8h, v6.8h
+      umlal v17.4s, v25.4h, v7.4h
+      umlal2 v17.4s, v25.8h, v7.8h
+      addv s16, v16.4s
+      addv s17, v17.4s
+      fmov ${0:w}, s16
+      fmov ${1:w}, s17
+    " : "=r"(sum), "=r"(weighted) : "r"(pointer + index), "r"(chunks.to_i64), "r"(CHUNK_WEIGHTS.to_unsafe)
+      : "x9", "x10", "x11", "v0", "v1", "v2", "v4", "v5", "v6", "v7", "v3", "v16", "v17", "v18", "v19", "v20", "v21", "v22", "v23", "v24", "v25", "v26", "v27", "memory", "cc")
+          size = chunks * 64
+          high = (high &+ low &* size.to_u64 &+ weighted.to_u64) % MODULUS
+          low = (low &+ sum.to_u64) % MODULUS
+          index &+= size
+        end
+        update_generic(((high << 16) | low).to_u32, pointer + index, count - index)
+      end
+    {% end %}
+
+    {% if flag?(:x86_64) %}
+      # :nodoc:
+      #
+      # The same loop compiled for AVX2, whose 256-bit registers sum twice
+      # the bytes per instruction. Only for a processor that has AVX2
+      # (`Core::ProcessorKernels::HAS_AVX2`).
+      @[TargetFeature("+avx2")]
+      def self.update_with_avx2(adler : UInt32, pointer : UInt8*, count : Int32) : UInt32
+        sum_blocks
+      end
+    {% end %}
   end
 end
