@@ -24,10 +24,16 @@
 #    links the same libraries, has no yaml_ symbol and no libyaml entry in
 #    its linker map. A control program that uses stdlib YAML, built the
 #    same way, shows libyaml in all three probes.
-# 7. The spec binary links the same plus libpcre2-8 and libz: the standard
-#    library's spec runner and the specs' expect_raises(..., /message/)
-#    use Regex, and the differential specs use system zlib as the oracle.
-#    No Mica code calls either.
+# 7. A minimal Mica::Decimal128 / Mica::Money program (require
+#    "mica/decimal" alone) links the same libraries, has no __gmp symbol
+#    and no libgmp entry in its linker map. A control program that requires
+#    "mica/decimal/big", built the same way, shows libgmp in all three
+#    probes.
+# 8. The spec binary links the same plus libpcre2-8, libz and libgmp: the
+#    standard library's spec runner and the specs' expect_raises(...,
+#    /message/) use Regex, the differential specs use system zlib as the
+#    oracle, and the decimal specs test the opt-in BigDecimal conversions.
+#    No other Mica code calls any of them.
 #
 # usage: scripts/check_linkage.sh [OUTPUT_DIR]   (macOS, otool -L and nm)
 set -eu
@@ -61,6 +67,10 @@ crystal-alpha build --release scripts/linkage/minimal_yaml.cr -o "$out/minimal_y
   --link-flags="-Wl,-map,$out/minimal_yaml.map"
 crystal-alpha build --release scripts/linkage/stdlib_yaml_control.cr -o "$out/stdlib_yaml_control" \
   --link-flags="-Wl,-map,$out/stdlib_yaml_control.map"
+crystal-alpha build --release scripts/linkage/minimal_decimal.cr -o "$out/minimal_decimal" \
+  --link-flags="-Wl,-map,$out/minimal_decimal.map"
+crystal-alpha build --release scripts/linkage/decimal_big_control.cr -o "$out/decimal_big_control" \
+  --link-flags="-Wl,-map,$out/decimal_big_control.map"
 # shellcheck disable=SC2046 # spec paths contain no spaces
 crystal-alpha build $(find spec -name '*_spec.cr' | sort) -o "$out/spec_binary"
 
@@ -84,7 +94,8 @@ check minimal_regex '/libgc\.|/libiconv\.|/libSystem\.'
 check minimal_inflate '/libgc\.|/libiconv\.|/libSystem\.'
 check minimal_deflate '/libgc\.|/libiconv\.|/libSystem\.'
 check minimal_yaml '/libgc\.|/libiconv\.|/libSystem\.'
-check spec_binary '/libgc\.|/libiconv\.|/libSystem\.|/libpcre2-8\.|/libz\.'
+check minimal_decimal '/libgc\.|/libiconv\.|/libSystem\.'
+check spec_binary '/libgc\.|/libiconv\.|/libSystem\.|/libpcre2-8\.|/libz\.|/libgmp\.'
 otool -L "$out/stdlib_regex_control" | tail -n +2 | awk '{print $1}' > "$out/stdlib_regex_control.libs"
 if grep -q pcre "$out/minimal_xml.libs"; then
   echo "FAIL: minimal_xml links pcre"
@@ -155,9 +166,31 @@ for binary in minimal_yaml stdlib_yaml_control; do
   fi
 done
 
+otool -L "$out/decimal_big_control" | tail -n +2 | awk '{print $1}' > "$out/decimal_big_control.libs"
+for binary in minimal_decimal decimal_big_control; do
+  symbols=$(nm -u "$out/$binary" | grep -cE ' ?___?gmp[a-z_]+$' || true)
+  map_lines=$(grep -cE '/libgmp[-.0-9]*(dylib|tbd|a)' "$out/$binary.map" || true)
+  libraries=$(grep -cE '/libgmp' "$out/$binary.libs" || true)
+  echo "$binary: $symbols undefined gmp symbols, $map_lines libgmp linker-map lines, $libraries libgmp libraries"
+  if [ "$binary" = minimal_decimal ]; then
+    if [ "$symbols" != 0 ] || [ "$map_lines" != 0 ] || [ "$libraries" != 0 ]; then
+      echo "FAIL: minimal_decimal reaches libgmp"
+      status=1
+    else
+      echo "ok: minimal_decimal has no gmp symbol, map entry or library"
+    fi
+  elif [ "$symbols" = 0 ] || [ "$map_lines" = 0 ] || [ "$libraries" = 0 ]; then
+    echo "FAIL: the mica/decimal/big control shows no libgmp, so the probes prove nothing"
+    status=1
+  else
+    echo "ok: the mica/decimal/big control shows libgmp in all three probes"
+  fi
+done
+
 "$out/minimal_xml" '<r><i/><i/></r>'
 "$out/minimal_yaml"
 "$out/minimal_inflate"
 "$out/minimal_deflate"
 "$out/minimal_regex"
+"$out/minimal_decimal"
 exit $status

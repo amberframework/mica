@@ -153,9 +153,26 @@ Every engine is linear in the input; the plan only picks the fastest one that fi
 | `Mica::HTTP2`, `Mica::HPACK` | HTTP/2 frames (RFC 9113: the client preface and the 10 frame types, sans-IO, parsed and serialized) and HPACK header compression (RFC 7541: decoder under limits, deterministic encoder). On `main`, ships in the next release | [docs/http2.md](docs/http2.md) |
 | `Mica::YAML` | YAML 1.2 (402 of 402 yaml-test-suite cases) and a libyaml 0.2.5 dialect: pull parser, node API with aliases and merge keys, emitter. On `main`, ships in the next release | [docs/yaml.md](docs/yaml.md) |
 | `Mica::XML` | XML 1.0 and 1.1 with Namespaces: streaming reader, DOM, builder, XPath 1.0 | [docs/xml.md](docs/xml.md) |
+| `Mica::Decimal128`, `Mica::Currency`, `Mica::Money` | Exact decimals of up to 38 digits (`12.30` stays `12.30`), every ISO 4217 currency, and money that splits without losing a cent; no libgmp. On `main`, ships in the next release | [docs/decimal.md](docs/decimal.md) |
 | `Mica::Core` | Strict UTF-8, UTF-16/UTF-32/ISO-8859-1 transcoding, positions, limits, work budgets | [docs/ADDING_A_FORMAT.md](docs/ADDING_A_FORMAT.md) |
 
 More formats (JSON, CBOR, HTTP/1.1, URIs, multipart, CSV, TOML, Markdown) plug into the same core.
+
+## Exact money
+
+`Mica::Decimal128` is an exact decimal of up to 38 digits in a 128-bit integer and a scale, and `Mica::Money` pairs it with an ISO 4217 currency. Nothing rounds unless you name the rounding, nothing overflows silently, and a split never loses a cent:
+
+```crystal
+require "mica/decimal"
+
+price = Mica::Decimal128.parse("19.99")
+tax = (price * Mica::Decimal128.parse("0.0825")).round(2, :ties_away) # => 1.65
+Mica::Money.new(price + tax, "USD").to_s                              # => "21.64 USD"
+Mica::Money.new("100.00", "USD").split(3).map(&.to_s)                 # => ["33.34 USD", "33.33 USD", "33.33 USD"]
+Mica::Decimal128.parse("0.1") + Mica::Decimal128.parse("0.2") == Mica::Decimal128.parse("0.3") # => true
+```
+
+Arithmetic, comparison and rounding allocate nothing and run many times faster than `BigDecimal`, with 0 differences from it over 1,000,000 random operations. JSON, YAML and `BigDecimal` conversions are opt-in. Details and timings: [docs/decimal.md](docs/decimal.md).
 
 ## Safe by default
 
@@ -212,7 +229,7 @@ On the geometric mean, yes: against system zlib 1.2.12 over 93 cases, one-shot d
 shards-alpha install --frozen
 crystal-alpha build $(find spec -name '*_spec.cr' | sort) -o bin/specs && bin/specs
 crystal-alpha tool format --check
-scripts/check_linkage.sh     # no PCRE2, libz, libyaml or libxml2 in a Mica program
+scripts/check_linkage.sh     # no PCRE2, libz, libyaml, libxml2 or libgmp in a Mica program
 bench/regex/run.sh --quick   # Mica::Regex against PCRE2
 bench/deflate/run.sh --quick # Inflate against zlib
 bench/yaml/run.sh            # Mica::YAML against libyaml
