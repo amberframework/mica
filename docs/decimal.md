@@ -148,7 +148,26 @@ bin/decimal_differential 20261127 1000000   # differences: 0
 1234.56 and 19.99, rates such as 0.07 and 0.0825, at 2 and 4 places),
 median ns per operation:
 
-BENCH_TABLE
+| Operation | Decimal128 | BigDecimal (GMP) | Float64 | BigDecimal / Decimal128 |
+|---|---|---|---|---|
+| parse | 13.9 | 324.9 | 13.6 | 23× |
+| to_s | 30.6 | 165.1 | 128.2 | 5.4× |
+| `+` | 2.8 | 70.9 | 0.80 | 25× |
+| `*` | 2.4 | 24.5 | 0.81 | 10× |
+| round to 2 places | 3.7 | 192.3 | 0.79 | 52× |
+| compare | 2.8 | 52.3 | 1.02 | 19× |
+
+macOS arm64 (Apple M1 Max, crystal-alpha 1.22.3, `--release`), the median of
+three runs of nine rounds each, 2026-11-27. On Linux aarch64 (Colima on an
+Apple M4 Mac mini, stock Crystal 1.21.0, `--release`), Decimal128 against
+BigDecimal and Float64: parse 7.9 / 168.2 / 8.1, to_s 14.1 / 99.4 / 66.0,
+`+` 1.6 / 57.1 / 0.46, `*` 2.0 / 13.6 / 0.46, round 1.9 / 118.6 / 0.62,
+compare 1.6 / 43.9 / 0.68 ns.
+
+Decimal128 is 5 to 52 times as fast as BigDecimal on every operation.
+Float64 stays faster at arithmetic, but it is not exact (0.1 + 0.2 is not
+0.3). Decimal128 parses as fast as Float64 does and prints about four
+times as fast.
 
 ## Vendoring
 
